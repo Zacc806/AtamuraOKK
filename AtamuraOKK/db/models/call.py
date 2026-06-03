@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import (
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -50,6 +51,7 @@ class Call(Base):
     record_file_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     record_url: Mapped[str | None] = mapped_column(String(2000), nullable=True)
     audio_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    is_stereo: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
     crm_entity_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     crm_entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

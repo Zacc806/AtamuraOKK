@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import Depends
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from AtamuraOKK.db.dependencies import get_db_session
@@ -20,6 +23,24 @@ class CallDAO:
     async def get(self, call_id: int) -> Call | None:
         """Fetch a call by primary key."""
         return await self.session.get(Call, call_id)
+
+    async def upsert_from_bitrix(self, values: dict[str, Any]) -> None:
+        """Idempotent upsert keyed on ``bitrix_call_id``.
+
+        On conflict, refresh ingestion-owned metadata but preserve ``status``
+        (and thus downstream pipeline progress) for calls already in flight.
+        """
+        stmt = pg_insert(Call).values(**values)
+        update_cols = {
+            key: getattr(stmt.excluded, key)
+            for key in values
+            if key != "status"
+        }
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["bitrix_call_id"],
+            set_=update_cols,
+        )
+        await self.session.execute(stmt)
 
     async def claim_batch(self, status: CallStatus, limit: int) -> list[Call]:
         """Lock and return up to ``limit`` calls in ``status`` (FIFO).

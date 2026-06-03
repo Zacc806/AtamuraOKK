@@ -54,8 +54,30 @@ services:
       db:
         condition: service_healthy
 
+  worker:
+    <<: *main_app
+    restart: always
+    command: python -m AtamuraOKK.workers
+    ports: []
+    environment:
+      ATAMURAOKK_DB_HOST: AtamuraOKK-db
+      ATAMURAOKK_DB_PORT: 5432
+      ATAMURAOKK_DB_USER: AtamuraOKK
+      ATAMURAOKK_DB_PASS: AtamuraOKK
+      ATAMURAOKK_DB_BASE: AtamuraOKK
+      ATAMURAOKK_AUDIO_DIR: /app/audio
+    volumes:
+      - .:/app/src/
+      - okk-audio:/app/audio
+    depends_on:
+      db:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
 
 
 volumes:
   AtamuraOKK-db-data:
     name: AtamuraOKK-db-data
+  okk-audio:
+    name: okk-audio

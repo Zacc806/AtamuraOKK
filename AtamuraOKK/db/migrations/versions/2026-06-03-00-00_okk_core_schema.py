@@ -83,6 +83,7 @@ def upgrade() -> None:
         sa.Column("record_file_id", sa.String(length=64), nullable=True),
         sa.Column("record_url", sa.String(length=2000), nullable=True),
         sa.Column("audio_path", sa.String(length=1024), nullable=True),
+        sa.Column("is_stereo", sa.Boolean(), nullable=True),
         sa.Column("crm_entity_type", sa.String(length=32), nullable=True),
         sa.Column("crm_entity_id", sa.Integer(), nullable=True),
         sa.Column("crm_activity_id", sa.Integer(), nullable=True),

@@ -110,6 +110,23 @@ class Settings(BaseSettings):
     # Hard cap on transcript characters sent to the LLM (cost guard).
     score_max_transcript_chars: int = 24000
 
+    # --- Ingestion / workers ---
+    # Local directory where call recordings are stored before transcription.
+    audio_dir: Path = TEMP_DIR / "atamura_audio"
+    # Only ingest answered calls at least this long (seconds).
+    ingest_min_duration_sec: int = 15
+    # Look-back window (days) on the first ingest run with no cursor.
+    ingest_days_back: int = 2
+    # Overlap (hours) subtracted from the window end to catch late-written rows.
+    ingest_window_overlap_hours: int = 2
+    # APScheduler intervals (minutes) and per-tick batch sizes.
+    ingest_interval_min: int = 60
+    user_sync_interval_min: int = 360
+    pipeline_interval_min: int = 5
+    download_batch_size: int = 20
+    transcribe_batch_size: int = 20
+    score_batch_size: int = 20
+
     @property
     def db_url(self) -> URL:
         """
