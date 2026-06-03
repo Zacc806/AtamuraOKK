@@ -2,6 +2,7 @@ import enum
 from pathlib import Path
 from tempfile import gettempdir
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from yarl import URL
 
@@ -46,6 +47,30 @@ class Settings(BaseSettings):
     db_base: str = "AtamuraOKK"
     db_echo: bool = False
 
+    # --- Bitrix24 ---
+    # Inbound-webhook base URL, e.g.
+    # https://<portal>.bitrix24.kz/rest/<user_id>/<token>/
+    # Accept both the prefixed and bare spellings in .env.
+    bitrix_webhook: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "ATAMURAOKK_BITRIX_WEBHOOK",
+            "BITRIX_WEBHOOK",
+        ),
+    )
+    # Seconds to wait/retry on Bitrix QUERY_LIMIT_EXCEEDED throttling.
+    bitrix_max_retries: int = 5
+    bitrix_retry_base_delay: float = 1.0
+
+    # --- Phase 0 spike ---
+    # Where the transcription-eval spike writes calls metadata, audio, and
+    # transcripts.
+    spike_dir: Path = TEMP_DIR / "atamura_spike"
+    # faster-whisper model + device for the spike.
+    whisper_model: str = "large-v3"
+    whisper_device: str = "auto"
+    whisper_compute_type: str = "default"
+
     @property
     def db_url(self) -> URL:
         """
@@ -62,10 +87,17 @@ class Settings(BaseSettings):
             path=f"/{self.db_base}",
         )
 
+    @property
+    def bitrix_base(self) -> str:
+        """Webhook base URL guaranteed to end with exactly one slash."""
+        return self.bitrix_webhook.rstrip("/") + "/"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="ATAMURAOKK_",
         env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
     )
 
 

@@ -19,9 +19,17 @@ dependencies = [
   "httptools >=0.7.1,<1",
   "pymongo >=4.15.4,<5",
   "loguru >=0.7.3,<1",
+  "httpx >=0.28.1,<1",
 ]
 
 [dependency-groups]
+# Heavy, optional deps used only by the Phase 0 transcription spike.
+# Install with: uv sync --group spike
+spike = [
+  "faster-whisper >=1.1.0,<2",
+  "jiwer >=3.0.0,<4",
+  "soundfile >=0.12.1,<1",
+]
 dev = [
   "pytest >=9.0.1,<10",
   "ruff >=0.14.6,<1",
