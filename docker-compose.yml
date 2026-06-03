@@ -1,0 +1,61 @@
+services:
+  api: &main_app
+    build:
+      context: .
+      target: dev
+      dockerfile: ./Dockerfile
+    image: AtamuraOKK:${ATAMURAOKK_VERSION:-latest}
+    restart: always
+    ports:
+      # Exposes application port.
+    - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+    environment:
+      ATAMURAOKK_HOST: 0.0.0.0
+      ATAMURAOKK_RELOAD: "True"
+      ATAMURAOKK_DB_HOST: AtamuraOKK-db
+      ATAMURAOKK_DB_PORT: 5432
+      ATAMURAOKK_DB_USER: AtamuraOKK
+      ATAMURAOKK_DB_PASS: AtamuraOKK
+      ATAMURAOKK_DB_BASE: AtamuraOKK
+    volumes:
+      - .:/app/src/
+
+  db:
+    image: postgres:18.3-trixie
+    hostname: AtamuraOKK-db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_PASSWORD: "AtamuraOKK"
+      POSTGRES_USER: "AtamuraOKK"
+      POSTGRES_DB: "AtamuraOKK"
+    volumes:
+      - AtamuraOKK-db-data:/var/lib/postgresql
+    restart: always
+    healthcheck:
+      test: pg_isready -U AtamuraOKK
+      interval: 2s
+      timeout: 3s
+      retries: 40
+
+  migrator:
+    <<: *main_app
+    restart: "no"
+    command: alembic upgrade head
+    depends_on:
+      db:
+        condition: service_healthy
+
+
+
+volumes:
+  AtamuraOKK-db-data:
+    name: AtamuraOKK-db-data

@@ -1,0 +1,167 @@
+[project]
+name = "AtamuraOKK"
+version = "0.1.0"
+requires-python = ">=3.12,<4.0"
+description = ""
+authors = []
+maintainers = []
+readme = "README.md"
+dependencies = [
+  "fastapi >=0.122.0,<1",
+  "uvicorn[standard] >=0.38.0,<1",
+  "pydantic >=2.12.5,<3",
+  "pydantic-settings >=2.12.0,<3",
+  "yarl >=1.22.0,<2",
+  "ujson >=5.11.0,<6",
+  "SQLAlchemy[asyncio] >=2.0.44,<3",
+  "alembic >=1.17.2,<2",
+  "asyncpg >=0.31.0,<1",
+  "httptools >=0.7.1,<1",
+  "pymongo >=4.15.4,<5",
+  "loguru >=0.7.3,<1",
+]
+
+[dependency-groups]
+dev = [
+  "pytest >=9.0.1,<10",
+  "ruff >=0.14.6,<1",
+  "mypy >=1.19.0,<2",
+  "pre-commit >=4.5.0,<5",
+  "pytest-cov >=7.0.0,<8",
+  "anyio >=4.11.0,<5",
+  "pytest-env >=1.2.0,<2",
+  "httpx >=0.28.1,<1",
+]
+
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+src_paths = ["AtamuraOKK",]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+ignore_missing_imports = true
+allow_subclassing_any = true
+allow_untyped_calls = true
+pretty = true
+show_error_codes = true
+implicit_reexport = true
+allow_untyped_decorators = true
+warn_unused_ignores = false
+warn_return_any = false
+namespace_packages = true
+
+[tool.pytest.ini_options]
+addopts = "-p no:unraisableexception"
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning",
+    "ignore:.*unclosed.*:ResourceWarning",
+]
+anyio_mode = "auto"
+env = [
+    "ATAMURAOKK_ENVIRONMENT=pytest",
+    "ATAMURAOKK_DB_BASE=AtamuraOKK_test",
+]
+
+[tool.ruff]
+target-version = "py313"
+# List of enabled rulsets.
+# See https://docs.astral.sh/ruff/rules/ for more information.
+lint.select = [ "E",     # Error
+    "F",     # Pyflakes
+    "W",     # Pycodestyle
+    "C90",   # McCabe complexity
+    "I",     # Isort
+    "N",     # pep8-naming
+    "D",     # Pydocstyle
+    "ANN",   # Pytype annotations
+    "S",     # Bandit
+    "B",     # Bugbear
+    "C4",    # Comprehensions
+    "ISC",   # Implicit string concat
+    "PIE",   # Unnecessary code
+    "T20",   # Catch prints
+    "PYI",   # validate pyi files
+    "Q",     # Checks for quotes
+    "RSE",   # Checks raise statements
+    "RET",   # Checks return statements
+    "SLF",   # Self checks
+    "SIM",   # Simplificator
+    "PTH",   # Pathlib checks
+    "ERA",   # Checks for commented out code
+    "PL",    # PyLint checks
+    "RUF",   # Specific to Ruff checks
+	"FA102", # Future annotations
+	"UP",	 # Python updates
+]
+lint.ignore = [
+    "D105",    # Missing docstring in magic method
+    "D107",    # Missing docstring in __init__
+    "B008",    # Do not perform function calls in argument defaults
+    "D211",    # No blank lines allowed before class docstring
+    "D212",    # Multi-line docstring summary should start at the first line
+    "D401",    # First line should be in imperative mood
+    "D104",    # Missing docstring in public package
+    "D100",    # Missing docstring in public module
+    "D202",    # No blank lines allowed after function docstring
+    "ANN401",  # typing.Any are disallowed in `**kwargs
+    "PLR0913", # Too many arguments for function call
+    "D106",    # Missing docstring in public nested class
+    "UP043",   # Unnecessary default argument specified (conflicts with mypy).
+    "N999",    # Invalid module name (project package is intentionally CamelCase).
+]
+exclude = [
+    "AtamuraOKK/db/migrations",
+    ".venv/"
+]
+lint.mccabe = { max-complexity = 10 }
+line-length = 88
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "S101",    # Use of assert detected
+	"PLC0415", # Import outside toplevel
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+ignore-decorators = ["typing.overload"]
+
+[tool.ruff.lint.pylint]
+allow-magic-value-types = ["int", "str", "float", "bytes"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = [
+  "fastapi.Depends",
+  "fastapi.Query",
+]
+
+[fastapi-template.options]
+project_name = "AtamuraOKK"
+api_type = "rest"
+enable_redis = "None"
+enable_rmq = "None"
+ci_type = "none"
+enable_migrations = "True"
+enable_taskiq = "None"
+enable_routers = "True"
+enable_kafka = "None"
+enable_nats = "None"
+enable_loguru = "True"
+traefik_labels = "None"
+add_dummy = "True"
+orm = "sqlalchemy"
+self_hosted_swagger = "None"
+prometheus_enabled = "None"
+sentry_enabled = "None"
+otlp_enabled = "None"
+gunicorn = "None"
+add_users = "None"
+cookie_auth = "None"
+jwt_auth = "None"
