@@ -25,6 +25,10 @@ _RETRYABLE_CODES = frozenset(
     {"QUERY_LIMIT_EXCEEDED", "OPERATION_TIME_LIMIT", "INTERNAL_SERVER_ERROR"},
 )
 
+# Transient HTTP statuses that warrant a retry.
+_HTTP_TOO_MANY = 429
+_HTTP_SERVER_ERROR = 500
+
 
 class BitrixError(RuntimeError):
     """A Bitrix REST call returned an ``error`` payload."""
@@ -72,25 +76,51 @@ class BitrixClient:
         """Close the underlying HTTP connection pool."""
         await self._client.aclose()
 
-    async def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
-        """Call one REST method and return its ``result`` field.
+    async def _request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """POST one method with exponential backoff; return the full envelope.
 
-        Retries with exponential backoff on Bitrix throttling errors.
+        Retries on Bitrix throttling error codes AND transient HTTP statuses
+        (429 / 5xx), so high-volume paging via :meth:`list` survives rate limits.
         """
         url = f"{self._base}{method}.json"
         payload = params or {}
         delay = settings.bitrix_retry_base_delay
 
         for attempt in range(1, settings.bitrix_max_retries + 1):
+            last = attempt == settings.bitrix_max_retries
             response = await self._client.post(url, json=payload)
-            data = response.json()
 
+            if response.status_code == _HTTP_TOO_MANY or (
+                response.status_code >= _HTTP_SERVER_ERROR
+            ):
+                if last:
+                    raise BitrixError(
+                        f"HTTP_{response.status_code}",
+                        response.text[:200],
+                        method,
+                    )
+                logger.warning(
+                    "Bitrix {method} HTTP {s}; retry {n} in {d}s",
+                    method=method,
+                    s=response.status_code,
+                    n=attempt,
+                    d=delay,
+                )
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+
+            data: dict[str, Any] = response.json()
             if "error" not in data:
-                return data.get("result")
+                return data
 
             code = str(data.get("error", "")).upper()
             description = str(data.get("error_description", ""))
-            if code in _RETRYABLE_CODES and attempt < settings.bitrix_max_retries:
+            if code in _RETRYABLE_CODES and not last:
                 logger.warning(
                     "Bitrix {method} throttled ({code}); retry {n} in {d}s",
                     method=method,
@@ -105,22 +135,18 @@ class BitrixClient:
 
         raise BitrixError("RETRIES_EXHAUSTED", "max retries reached", method)
 
+    async def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        """Call one REST method and return its ``result`` field (with retry)."""
+        data = await self._request(method, params)
+        return data.get("result")
+
     async def call_raw(
         self,
         method: str,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Call a list method and return the full envelope (with ``next``/``total``)."""
-        url = f"{self._base}{method}.json"
-        response = await self._client.post(url, json=params or {})
-        data: dict[str, Any] = response.json()
-        if "error" in data:
-            raise BitrixError(
-                str(data.get("error", "")).upper(),
-                str(data.get("error_description", "")),
-                method,
-            )
-        return data
+        """Call a list method and return the full envelope (with retry)."""
+        return await self._request(method, params)
 
     async def list(
         self,
