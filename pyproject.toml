@@ -20,6 +20,7 @@ dependencies = [
   "pymongo >=4.15.4,<5",
   "loguru >=0.7.3,<1",
   "httpx >=0.28.1,<1",
+  "groq >=0.11.0,<1",
 ]
 
 [dependency-groups]
@@ -29,6 +30,10 @@ spike = [
   "faster-whisper >=1.1.0,<2",
   "jiwer >=3.0.0,<4",
   "soundfile >=0.12.1,<1",
+]
+# Calibration harness deps (parse the human-scored OKK xlsx). Install: uv sync --group calib
+calib = [
+  "openpyxl >=3.1.0,<4",
 ]
 dev = [
   "pytest >=9.0.1,<10",
@@ -123,6 +128,9 @@ lint.ignore = [
     "D106",    # Missing docstring in public nested class
     "UP043",   # Unnecessary default argument specified (conflicts with mypy).
     "N999",    # Invalid module name (project package is intentionally CamelCase).
+    "RUF001",  # Ambiguous unicode in strings — domain text is Russian/Kazakh (Cyrillic).
+    "RUF002",  # Ambiguous unicode in docstrings — same: bilingual RU/KK domain.
+    "RUF003",  # Ambiguous unicode in comments — same.
 ]
 exclude = [
     "AtamuraOKK/db/migrations",

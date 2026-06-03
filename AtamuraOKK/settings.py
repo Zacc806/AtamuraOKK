@@ -71,6 +71,45 @@ class Settings(BaseSettings):
     whisper_device: str = "auto"
     whisper_compute_type: str = "default"
 
+    # --- Groq (production transcription + Russian scoring) ---
+    groq_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("ATAMURAOKK_GROQ_API_KEY", "GROQ_API_KEY"),
+    )
+    groq_whisper_model: str = "whisper-large-v3"
+    groq_scoring_model: str = "llama-3.3-70b-versatile"
+
+    # --- Yandex (Kazakh/shala scoring; optional Kazakh transcription) ---
+    yandex_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("ATAMURAOKK_YANDEX_API_KEY", "YANDEX_API_KEY"),
+    )
+    yandex_folder_id: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "ATAMURAOKK_YANDEX_FOLDER_ID",
+            "YANDEX_FOLDER_ID",
+        ),
+    )
+    yandex_gpt_model: str = "yandexgpt/latest"
+    # Which engine transcribes Kazakh calls: "groq" or "yandex" (decided by WER gate).
+    kazakh_transcriber: str = "groq"
+
+    # --- Scoring ---
+    score_rubric_version: str = "tm_call_v2"
+    score_pass_threshold: int = 75
+    # Detected-language probability above which a call is routed to the Russian
+    # scorer; below it (or any Kazakh signal) routes to the Kazakh scorer.
+    score_lang_confidence: float = 0.75
+    score_max_retries: int = 5
+    score_retry_base_delay: float = 1.0
+    score_concurrency: int = 4
+    transcribe_concurrency: int = 6
+    # Calls shorter than this (seconds) are flagged for human review, not LLM-scored.
+    score_min_duration_sec: int = 60
+    # Hard cap on transcript characters sent to the LLM (cost guard).
+    score_max_transcript_chars: int = 24000
+
     @property
     def db_url(self) -> URL:
         """

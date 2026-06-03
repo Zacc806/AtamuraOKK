@@ -140,3 +140,11 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# Business reference materials (provided for analysis, not part of the codebase).
+# Kept locally (the OKK xlsx is read by the calibration harness) but never committed.
+/fb_capi/
+/ОКК ТМ/
+/*.docx
+/*.xlsx
+/*.pptx
