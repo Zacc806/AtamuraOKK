@@ -46,6 +46,24 @@ def test_by_id_indexes_all() -> None:
     assert rubric.by_id[10].max_score == 15
 
 
+def test_tm_rubric_objection_block() -> None:
+    """The TM rubric names its conditional objections block."""
+    rubric = load_rubric(RUBRIC)
+    assert rubric.objection_block == "Отработка возражений"
+
+
+def test_okk_meeting_rubric_loads() -> None:
+    """The OP-meeting rubric (from the xlsx) loads with 20 criteria summing to 50."""
+    rubric = load_rubric("okk_meeting_v1")
+    assert rubric.max_total_score == 50
+    assert len(rubric.criteria) == 20
+    assert sum(c.max_score for c in rubric.criteria) == 50
+    # All criteria are LLM-scored (no auto_check on the meeting checklist).
+    assert rubric.ai_criteria == rubric.criteria
+    assert rubric.objection_block == "Возражения"
+    assert rubric.blocks["Возражения"] == [12, 13, 14, 15]
+
+
 def test_missing_rubric_raises() -> None:
     """Loading an unknown rubric version raises FileNotFoundError."""
     with pytest.raises(FileNotFoundError):

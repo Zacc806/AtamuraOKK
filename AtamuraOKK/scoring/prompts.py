@@ -11,11 +11,11 @@ import json
 
 from AtamuraOKK.scoring.rubric import Rubric
 
-_OBJECTION_BLOCK = "Отработка возражений"
-
 
 def _objection_ids(rubric: Rubric) -> list[int]:
-    return rubric.blocks.get(_OBJECTION_BLOCK, [])
+    if rubric.objection_block is None:
+        return []
+    return rubric.blocks.get(rubric.objection_block, [])
 
 
 def build_prompt(
@@ -43,6 +43,11 @@ def build_prompt(
         ensure_ascii=False,
     )
     objection_ids = ", ".join(str(i) for i in _objection_ids(rubric))
+    objection_rule = (
+        [f"- Если возражений не было — ставь полный балл за пункты {objection_ids}"]
+        if objection_ids
+        else []
+    )
 
     parts = [
         "Ты эксперт отдела контроля качества компании Атамура Групп.",
@@ -72,7 +77,7 @@ def build_prompt(
         '- manager_tone = "вежливый" / "нейтральный" / "грубый" / "неуверенный"',
         "- Звонок может быть на русском или казахском — оценивай одинаково строго",
         "- Транскрипция местами с ошибками распознавания — игнорируй опечатки",
-        f"- Если возражений не было — ставь полный балл за пункты {objection_ids}",
+        *objection_rule,
         "",
         f"Длительность звонка: {duration_sec} секунд",
         "",

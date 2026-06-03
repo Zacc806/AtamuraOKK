@@ -45,6 +45,8 @@ class Rubric:
     blocks: dict[str, list[int]]
     red_flags: list[str]
     raw: dict[str, Any]  # the original JSON, for the rubric_versions snapshot
+    # Name of the conditional "objections" block (full marks if none arose).
+    objection_block: str | None = None
 
     @property
     def ai_criteria(self) -> list[Criterion]:
@@ -97,6 +99,7 @@ def _parse(data: dict[str, Any]) -> Rubric:
         blocks={k: [int(i) for i in v] for k, v in data.get("blocks", {}).items()},
         red_flags=[str(f) for f in data.get("red_flags", [])],
         raw=data,
+        objection_block=data.get("objection_block"),
     )
     _validate(rubric)
     return rubric

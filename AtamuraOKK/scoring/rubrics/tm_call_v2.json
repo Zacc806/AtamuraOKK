@@ -3,6 +3,7 @@
   "version": "2.0",
   "source": "Атамура Групп — Чек-лист ОКК Біржана (Апрель ТМ 2026)",
   "context": "tm_call",
+  "objection_block": "Отработка возражений",
   "max_total_score": 100,
   "criteria": [
     {
