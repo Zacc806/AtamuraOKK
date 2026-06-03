@@ -40,7 +40,9 @@ spike-download: ## Download recordings (needs disk scope for external-integratio
 	uv run python -m AtamuraOKK.spike download
 
 spike-transcribe: ## Transcribe with faster-whisper (needs spike group + ffmpeg)
-	uv run python -m AtamuraOKK.spike transcribe
+	# CPU int8 is the fast path on Apple Silicon (CTranslate2 has no Metal backend).
+	ATAMURAOKK_WHISPER_DEVICE=cpu ATAMURAOKK_WHISPER_COMPUTE_TYPE=int8 \
+		uv run python -m AtamuraOKK.spike transcribe
 
 spike-wer: ## Compute WER vs hand-corrected references
 	uv run python -m AtamuraOKK.spike wer

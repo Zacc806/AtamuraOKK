@@ -16,8 +16,8 @@ from AtamuraOKK.bitrix import BitrixClient
 from AtamuraOKK.settings import settings
 
 # A call counts as "answered and recorded" when Bitrix reports success and
-# attaches a recording file. CALL_RECORD_URL is empty on this portal (external
-# telephony integration); recordings are Bitrix Drive files in RECORD_FILE_ID.
+# carries a recording — either a direct CALL_RECORD_URL (Voximplant cloud mp3,
+# the common case) or a Bitrix Drive RECORD_FILE_ID fallback.
 SUCCESS_CODE = "200"
 MIN_DURATION_SEC = 15
 

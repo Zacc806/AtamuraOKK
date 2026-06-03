@@ -50,7 +50,7 @@ def main() -> None:
 
     sub.add_parser(
         "download",
-        help="download recordings (needs disk scope)",
+        help="download recordings from CALL_RECORD_URL (disk scope only as fallback)",
     ).set_defaults(func=_cmd_download)
 
     sub.add_parser(

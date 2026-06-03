@@ -52,15 +52,18 @@ def probe_channels(audio_path: Path) -> int:
 
 
 def _split_channel(audio_path: Path, channel: int, dest: Path) -> Path:
-    """Extract a single channel to a mono wav with ffmpeg."""
+    """Extract a single channel to a 16 kHz mono wav with ffmpeg.
+
+    Uses the ``pan`` filter (``-map_channel`` was removed in ffmpeg 7+).
+    """
     subprocess.run(  # noqa: S603
         [  # noqa: S607
             "ffmpeg",
             "-y",
             "-i",
             str(audio_path),
-            "-map_channel",
-            f"0.0.{channel}",
+            "-af",
+            f"pan=mono|c0=c{channel}",
             "-ar",
             "16000",
             str(dest),
@@ -125,12 +128,12 @@ def transcribe_all() -> list[dict[str, Any]]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     transcriber = FasterWhisperTranscriber()
+    todo = [c for c in calls if c.get("audio_path") and Path(c["audio_path"]).exists()]
     done = 0
-    for call in calls:
-        audio_path = call.get("audio_path")
-        if not audio_path or not Path(audio_path).exists():
-            continue
+    for idx, call in enumerate(todo, start=1):
+        audio_path = call["audio_path"]
         call_id = call["CALL_ID"]
+        logger.info("[{i}/{n}] Transcribing {id}", i=idx, n=len(todo), id=call_id)
         result = transcribe_call(transcriber, Path(audio_path))
         payload = {
             "call_id": call_id,

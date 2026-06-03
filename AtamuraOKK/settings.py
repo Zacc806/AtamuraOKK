@@ -7,6 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from yarl import URL
 
 TEMP_DIR = Path(gettempdir())
+# Repository root (parent of the AtamuraOKK package dir).
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class LogLevel(enum.StrEnum):
@@ -64,8 +66,8 @@ class Settings(BaseSettings):
 
     # --- Phase 0 spike ---
     # Where the transcription-eval spike writes calls metadata, audio, and
-    # transcripts.
-    spike_dir: Path = TEMP_DIR / "atamura_spike"
+    # transcripts. Repo-local + gitignored; persistent across runs (unlike TMPDIR).
+    spike_dir: Path = PROJECT_ROOT / ".spike"
     # faster-whisper model + device for the spike.
     whisper_model: str = "large-v3"
     whisper_device: str = "auto"

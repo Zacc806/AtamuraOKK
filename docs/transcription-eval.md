@@ -15,7 +15,7 @@ Portal: `amanat.bitrix24.kz` · webhook user `65998` (admin) · TZ `Asia/Qyzylor
 
 | Item | Plan assumption | Reality on this portal |
 |---|---|---|
-| Volume | ~200 calls/day (~6k/mo) | **~1,640 call *events*/day** (15,421 in the 9 days to 2026-06-03). Many are missed (duration 0, `CALL_FAILED_CODE=304`); answered+recorded is a subset but still well above 200/day. |
+| Volume | ~200 calls/day (~6k/mo) | Portal logs **~1,640 call *events*/day** raw, BUT scope is only the **first call per client** / **qualified clients** → **~200 analyzed calls/day**, so the plan's sizing holds. (Phase 1 ingestion must apply this filter — see below.) |
 | Recording access | `CALL_RECORD_URL` on the call | **Mixed.** Native Voximplant calls expose a direct `CALL_RECORD_URL` (`storage-gw-ru-02.voximplant.com`, token in the URL, no extra scope). External-integration calls have **only `RECORD_FILE_ID`** (a Bitrix Drive file) and `CALL_RECORD_URL=null`. In a recent sample, ~3/8 had a direct URL. |
 | Recording format | (assumed stereo if enabled) | Downloaded samples are **MP3, 8 kHz, 64 kbps, Stereo** — dual-channel container present, consistent with the no-diarization plan. *Still to confirm: the two channels carry agent vs. customer separately (not duplicated mono).* |
 | Webhook scopes | telephony + user-read | Granted: **`crm`, `telephony`** only. Missing **`disk`** (resolve `RECORD_FILE_ID`) and **`user`** (map manager → name/email/department for Phase 1). |
@@ -27,8 +27,11 @@ Portal: `amanat.bitrix24.kz` · webhook user `65998` (admin) · TZ `Asia/Qyzylor
   fetch them — `pyannote` fallback in Phase 2 is likely needed, not optional.
 - **Two recording-fetch paths** must both be supported in Phase 1 ingestion:
   direct `CALL_RECORD_URL`, and `RECORD_FILE_ID` → `disk.file.get` → `DOWNLOAD_URL`.
-- **Volume is ~8× the estimate.** Still single-GPU-worker territory, but sizing,
-  cost estimates, and retention should assume ~10–20k *scored* calls/month.
+- **Ingestion must filter to ~200/day.** Only the *first call per client* /
+  *qualified clients* are analyzed (not every call). A client = CRM entity
+  (`CRM_ENTITY_TYPE` + `CRM_ENTITY_ID`); first call = earliest `CALL_START_DATE`
+  for that entity. The exact definition of "qualified" (lead status / deal stage
+  / custom field) is a Phase 1 open question to confirm with the operator.
 
 ---
 
@@ -49,7 +52,7 @@ Portal: `amanat.bitrix24.kz` · webhook user `65998` (admin) · TZ `Asia/Qyzylor
 
 ## How to run the spike
 
-Output dir defaults to `$TMPDIR/atamura_spike` (override with
+Output dir defaults to `./.spike` (repo-local, gitignored; override with
 `ATAMURAOKK_SPIKE_DIR`). Each stage writes inputs the next consumes.
 
 ```bash
@@ -64,8 +67,8 @@ make spike-transcribe       # → transcripts/<call>.json (stereo-split + merge)
 Then create hand-corrected references and label languages:
 
 ```
-$SPIKE_DIR/refs/<call_id>.txt        # corrected transcript, one per call
-$SPIKE_DIR/refs/labels.json          # {"<call_id>": "ru" | "kk", ...}
+.spike/refs/<call_id>.txt            # corrected transcript, one per call
+.spike/refs/labels.json              # {"<call_id>": "ru" | "kk", ...}
 ```
 
 ```bash
