@@ -40,6 +40,7 @@ class Score(Base):
     passed: Mapped[bool] = mapped_column(Boolean)
 
     criteria: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list)
+    call_type: Mapped[str] = mapped_column(String(16), default="первичный", index=True)
     client_agreed_meeting: Mapped[bool] = mapped_column(Boolean, default=False)
     manager_tone: Mapped[str] = mapped_column(String(32), default="")
     red_flags: Mapped[list[str]] = mapped_column(JSONB, default=list)

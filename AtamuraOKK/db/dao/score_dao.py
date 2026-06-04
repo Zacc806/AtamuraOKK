@@ -38,6 +38,7 @@ class ScoreDAO:
             score_pct=result.score_pct,
             passed=result.passed,
             criteria=[asdict(c) for c in result.criteria],
+            call_type=result.call_type,
             client_agreed_meeting=result.client_agreed_meeting,
             manager_tone=result.manager_tone,
             red_flags=list(result.red_flags),

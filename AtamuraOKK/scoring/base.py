@@ -49,6 +49,7 @@ class ScoreResult:
     score_pct: float  # round(total_score / max_total * 100, 1)
     passed: bool  # score_pct >= pass_threshold
     criteria: list[CriterionScore]
+    call_type: str  # первичный | повторный | уточняющий | сервисный
     client_agreed_meeting: bool
     manager_tone: str  # "вежливый" | "нейтральный" | "грубый" | "неуверенный"
     red_flags: list[str]

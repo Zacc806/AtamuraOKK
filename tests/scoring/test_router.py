@@ -16,6 +16,7 @@ def _result(provider: str) -> ScoreResult:
         score_pct=80.0,
         passed=True,
         criteria=[],
+        call_type="первичный",
         client_agreed_meeting=True,
         manager_tone="вежливый",
         red_flags=[],

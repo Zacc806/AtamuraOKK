@@ -31,6 +31,7 @@ def _ai(pct: float, *, passed: bool, crit1: int) -> ScoreResult:
         score_pct=pct,
         passed=passed,
         criteria=[CriterionScore(id=1, block="b", name="n", score=crit1, max_score=1)],
+        call_type="первичный",
         client_agreed_meeting=False,
         manager_tone="нейтральный",
         red_flags=[],

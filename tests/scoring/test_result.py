@@ -88,6 +88,12 @@ def test_out_of_range_scores_clamped() -> None:
     assert result.meta["clamped_criteria"] == 2
 
 
+def test_call_type_flows_from_llm() -> None:
+    """The classified call type is carried into the ScoreResult."""
+    result = _assemble(LLMScore(scores={}, call_type="повторный"))
+    assert result.call_type == "повторный"
+
+
 def test_kev_bonus_rewards_meeting() -> None:
     """A booked meeting adds the КЭВ bonus on top of the base score."""
     llm = LLMScore(scores={"1": 1}, client_agreed_meeting=True)

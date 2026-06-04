@@ -19,6 +19,8 @@ class LLMScore(BaseModel):
     """The structured JSON the scoring LLM must return."""
 
     scores: dict[str, int]  # {criterion_id_as_str: awarded_points}
+    # Call type (контекстный режим): первичный | повторный | уточняющий | сервисный.
+    call_type: str = "первичный"
     client_agreed_meeting: bool = False
     manager_tone: str = "нейтральный"
     red_flags_found: list[str] = Field(default_factory=list)

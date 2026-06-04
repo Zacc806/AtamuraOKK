@@ -99,6 +99,7 @@ def assemble_score(
         score_pct=score_pct,
         passed=score_pct >= pass_threshold,
         criteria=criteria,
+        call_type=llm.call_type,
         client_agreed_meeting=llm.client_agreed_meeting,
         manager_tone=llm.manager_tone,
         red_flags=list(llm.red_flags_found),
