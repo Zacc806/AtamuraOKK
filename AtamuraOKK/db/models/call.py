@@ -22,7 +22,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from AtamuraOKK.db.base import Base
-from AtamuraOKK.db.models.enums import CallDirection, CallStatus
+from AtamuraOKK.db.models.enums import CallDirection, CallSource, CallStatus
 
 
 class Call(Base):
@@ -31,6 +31,16 @@ class Call(Base):
     __tablename__ = "calls"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+
+    # Recording origin: telephony call (default) or ОП face-to-face meeting.
+    # Drives scorer/rubric selection and lets the dashboard exclude meetings
+    # from call-volume metrics. Additive — existing rows default to a call.
+    source: Mapped[CallSource] = mapped_column(
+        String(length=16),
+        default=CallSource.BITRIX_CALL,
+        server_default=CallSource.BITRIX_CALL.value,
+        index=True,
+    )
 
     # --- Bitrix identity / cursor ---
     bitrix_call_id: Mapped[str] = mapped_column(

@@ -52,8 +52,11 @@ ingest-schedule: ## Run now, then every N hours (default 3)
 transcribe: ## Transcribe DOWNLOADED calls (OpenAI ru / Yandex kk) -> TRANSCRIBED
 	uv run python -m AtamuraOKK.transcription
 
-score: ## Score TRANSCRIBED calls (Anthropic) -> SCORED
+score: ## Score TRANSCRIBED calls (Anthropic, tm_call_v3) -> SCORED
 	uv run python -m AtamuraOKK.scoring
+
+score-meetings: ## Score TRANSCRIBED ОП meetings (Anthropic, okk_meeting_v1) -> SCORED
+	uv run python -m AtamuraOKK.scoring --kind meeting
 
 # --- Phase 0 transcription spike ---
 spike-fetch: ## Pull recent answered+recorded calls (telephony scope)
