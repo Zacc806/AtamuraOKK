@@ -42,6 +42,10 @@ ingest-download: ## Download analyzable recordings -> object storage
 ingest-requalify: ## Re-check pending first-calls; promote newly-qualified
 	uv run python -m AtamuraOKK.ingestion requalify
 
+# --- Phase 2 transcription ---
+transcribe: ## Transcribe analyzable DOWNLOADED calls (OpenAI gpt-4o-transcribe)
+	uv run python -m AtamuraOKK.transcription run
+
 ingest-run: ## Ingest then download (one full pass)
 	uv run python -m AtamuraOKK.ingestion run
 

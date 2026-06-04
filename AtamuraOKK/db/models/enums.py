@@ -37,3 +37,4 @@ class CallStatus(enum.StrEnum):
     PUSHED = "PUSHED"  # optional writeback to Bitrix done
     FAILED = "FAILED"  # gave up after retries (see error)
     SKIPPED = "SKIPPED"  # out of analysis scope (see skip_reason)
+    PENDING_KK = "PENDING_KK"  # Kazakh call held until a Kazakh STT provider exists

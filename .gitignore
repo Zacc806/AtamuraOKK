@@ -148,6 +148,9 @@ cython_debug/
 # Contain secrets/PII (FB token, Bitrix webhook, manager data) — NEVER commit.
 /fb_capi/
 /ОКК ТМ/
-/*.docx
-/*.xlsx
-/*.pptx
+# Office docs anywhere (incl. docs/), not just repo root.
+*.docx
+*.xlsx
+*.pptx
+# macOS junk.
+.DS_Store
