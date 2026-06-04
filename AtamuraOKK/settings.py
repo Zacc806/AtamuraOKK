@@ -78,6 +78,51 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_transcribe_model: str = "gpt-4o-transcribe"
 
+    # --- Groq (Russian transcription via Whisper) ---
+    groq_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("ATAMURAOKK_GROQ_API_KEY", "GROQ_API_KEY"),
+    )
+    groq_whisper_model: str = "whisper-large-v3"
+    groq_scoring_model: str = "llama-3.3-70b-versatile"
+
+    # --- Yandex (SpeechKit STT for Kazakh; optional YandexGPT scorer) ---
+    yandex_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("ATAMURAOKK_YANDEX_API_KEY", "YANDEX_API_KEY"),
+    )
+    yandex_folder_id: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "ATAMURAOKK_YANDEX_FOLDER_ID",
+            "YANDEX_FOLDER_ID",
+        ),
+    )
+    yandex_gpt_model: str = "yandexgpt/latest"
+    yandex_speechkit_model: str = "general"
+
+    # --- Anthropic (default scorer: Claude Sonnet) ---
+    anthropic_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "ATAMURAOKK_ANTHROPIC_API_KEY",
+            "ANTHROPIC_API_KEY",
+        ),
+    )
+    anthropic_model: str = "claude-sonnet-4-6"
+
+    # --- Scoring ---
+    score_provider: str = "anthropic"  # "anthropic" | "groq_yandex"
+    score_rubric_version: str = "tm_call_v3"
+    score_script_version: str = ""  # sales-script id for deviation dim; empty = off
+    score_pass_threshold: int = 75
+    score_lang_confidence: float = 0.75
+    score_max_retries: int = 5
+    score_retry_base_delay: float = 1.0
+    score_max_transcript_chars: int = 24000
+    score_min_duration_sec: int = 90
+    short_contact_min_sec: int = 30
+
     # --- Ingestion ---
     # How far back the very first ingestion run reaches when no cursor exists.
     ingest_initial_days_back: int = 7

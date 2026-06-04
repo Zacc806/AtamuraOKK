@@ -48,6 +48,13 @@ ingest-run: ## Ingest then download (one full pass)
 ingest-schedule: ## Run now, then every N hours (default 3)
 	uv run python -m AtamuraOKK.ingestion schedule
 
+# --- Phase 2/3 transcription + scoring ---
+transcribe: ## Transcribe DOWNLOADED calls (Groq ru / Yandex kk) -> TRANSCRIBED
+	uv run python -m AtamuraOKK.transcription
+
+score: ## Score TRANSCRIBED calls (Anthropic) -> SCORED
+	uv run python -m AtamuraOKK.scoring
+
 # --- Phase 0 transcription spike ---
 spike-fetch: ## Pull recent answered+recorded calls (telephony scope)
 	uv run python -m AtamuraOKK.spike fetch

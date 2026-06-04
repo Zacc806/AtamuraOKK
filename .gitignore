@@ -143,3 +143,11 @@ cython_debug/
 
 # Phase 0 transcription-spike artifacts (audio, transcripts, refs)
 .spike/
+
+# Business reference materials (provided for analysis, not part of the codebase).
+# Contain secrets/PII (FB token, Bitrix webhook, manager data) — NEVER commit.
+/fb_capi/
+/ОКК ТМ/
+/*.docx
+/*.xlsx
+/*.pptx
