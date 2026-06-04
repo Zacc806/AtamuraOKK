@@ -1,8 +1,8 @@
 """Transcription worker CLI: DOWNLOADED -> TRANSCRIBED.
 
 ``python -m AtamuraOKK.transcription`` — pull each downloaded recording from
-object storage, transcribe it (Groq Whisper for Russian, Yandex SpeechKit for
-Kazakh), and persist the transcript.
+object storage, transcribe it (OpenAI gpt-4o-transcribe for Russian, Yandex
+SpeechKit for Kazakh), and persist the transcript.
 """
 
 from __future__ import annotations

@@ -1,8 +1,7 @@
 """Wire contract for the scoring LLM's JSON output + tolerant parsing.
 
-The same JSON shape is produced by both providers (Groq, Yandex), so the
-prompt and validation are shared. Ported from the legacy ``compliance_checker``
-response format.
+The JSON shape is provider-independent, so the prompt and validation are
+shared. Ported from the legacy ``compliance_checker`` response format.
 """
 
 from __future__ import annotations

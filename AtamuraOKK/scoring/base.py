@@ -1,9 +1,9 @@
 """Provider-agnostic call-scoring interface.
 
-The pipeline depends only on :class:`Scorer`, so the scoring engine (Groq for
-Russian calls, YandexGPT for Kazakh/"шала казахский" calls, or any future
-provider) can be swapped without touching ingestion, transcription, or the
-workers. Mirrors the style of :mod:`AtamuraOKK.transcription.base`.
+The pipeline depends only on :class:`Scorer`, so the scoring engine (Anthropic
+Claude Sonnet by default, or any future provider) can be swapped without
+touching ingestion, transcription, or the workers. Mirrors the style of
+:mod:`AtamuraOKK.transcription.base`.
 """
 
 from __future__ import annotations
@@ -54,8 +54,8 @@ class ScoreResult:
     manager_tone: str  # "вежливый" | "нейтральный" | "грубый" | "неуверенный"
     red_flags: list[str]
     summary: str
-    language: str  # routed language: "ru" | "kk" | "shala"
-    provider: str  # "groq" | "yandex" | "anthropic"
+    language: str  # detected language: "ru" | "kk" | "shala"
+    provider: str  # "anthropic"
     model: str
     needs_human_review: bool = False
     # Script-adherence dimension (None when no sales script is configured).

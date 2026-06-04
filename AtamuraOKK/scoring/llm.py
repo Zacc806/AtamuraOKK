@@ -1,8 +1,8 @@
 """Shared LLM-scorer machinery: prompt build, retry loop, parse, assemble.
 
-Concrete providers (:class:`GroqScorer`, :class:`YandexScorer`) implement only
-the transport (:meth:`_raw_complete`). The retry/backoff loop mirrors
-``BitrixClient.call`` and the legacy ``compliance_checker.check_one``.
+Concrete providers (:class:`AnthropicScorer`) implement only the transport
+(:meth:`_raw_complete`). The retry/backoff loop mirrors ``BitrixClient.call``
+and the legacy ``compliance_checker.check_one``.
 """
 
 from __future__ import annotations

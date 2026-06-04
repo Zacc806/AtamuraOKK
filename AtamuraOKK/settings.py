@@ -73,20 +73,14 @@ class Settings(BaseSettings):
     # Use path-style addressing (required by MinIO).
     s3_use_path_style: bool = True
 
-    # --- Transcription / scoring providers ---
-    # Russian transcription via OpenAI; Kazakh deferred (no provider yet).
-    openai_api_key: str = ""
+    # --- OpenAI (Russian transcription via gpt-4o-transcribe) ---
+    openai_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("ATAMURAOKK_OPENAI_API_KEY", "OPENAI_API_KEY"),
+    )
     openai_transcribe_model: str = "gpt-4o-transcribe"
 
-    # --- Groq (Russian transcription via Whisper) ---
-    groq_api_key: str = Field(
-        default="",
-        validation_alias=AliasChoices("ATAMURAOKK_GROQ_API_KEY", "GROQ_API_KEY"),
-    )
-    groq_whisper_model: str = "whisper-large-v3"
-    groq_scoring_model: str = "llama-3.3-70b-versatile"
-
-    # --- Yandex (SpeechKit STT for Kazakh; optional YandexGPT scorer) ---
+    # --- Yandex (SpeechKit STT for Kazakh / shala) ---
     yandex_api_key: str = Field(
         default="",
         validation_alias=AliasChoices("ATAMURAOKK_YANDEX_API_KEY", "YANDEX_API_KEY"),
@@ -98,7 +92,6 @@ class Settings(BaseSettings):
             "YANDEX_FOLDER_ID",
         ),
     )
-    yandex_gpt_model: str = "yandexgpt/latest"
     yandex_speechkit_model: str = "general"
 
     # --- Anthropic (default scorer: Claude Sonnet) ---
@@ -111,8 +104,7 @@ class Settings(BaseSettings):
     )
     anthropic_model: str = "claude-sonnet-4-6"
 
-    # --- Scoring ---
-    score_provider: str = "anthropic"  # "anthropic" | "groq_yandex"
+    # --- Scoring (Anthropic Claude Sonnet handles ru + kk in one model) ---
     score_rubric_version: str = "tm_call_v3"
     score_script_version: str = ""  # sales-script id for deviation dim; empty = off
     score_pass_threshold: int = 75

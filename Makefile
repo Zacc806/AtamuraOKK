@@ -49,7 +49,7 @@ ingest-schedule: ## Run now, then every N hours (default 3)
 	uv run python -m AtamuraOKK.ingestion schedule
 
 # --- Phase 2/3 transcription + scoring ---
-transcribe: ## Transcribe DOWNLOADED calls (Groq ru / Yandex kk) -> TRANSCRIBED
+transcribe: ## Transcribe DOWNLOADED calls (OpenAI ru / Yandex kk) -> TRANSCRIBED
 	uv run python -m AtamuraOKK.transcription
 
 score: ## Score TRANSCRIBED calls (Anthropic) -> SCORED

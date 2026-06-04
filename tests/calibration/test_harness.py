@@ -37,7 +37,7 @@ def _ai(pct: float, *, passed: bool, crit1: int) -> ScoreResult:
         red_flags=[],
         summary="",
         language="ru",
-        provider="groq",
+        provider="anthropic",
         model="m",
     )
 

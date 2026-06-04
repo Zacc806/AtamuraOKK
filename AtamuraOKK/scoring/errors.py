@@ -12,4 +12,4 @@ class MalformedOutputError(ScoringError):
 
 
 class ProviderUnavailableError(ScoringError):
-    """A scoring provider (Groq/Yandex) was unreachable or rate-limited out."""
+    """A scoring provider (e.g. Anthropic) was unreachable or rate-limited out."""

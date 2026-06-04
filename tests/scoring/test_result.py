@@ -32,7 +32,7 @@ def _assemble(llm: LLMScore, *, duration_sec: int = 120) -> ScoreResult:
         rubric=RUBRIC,
         call=_call(duration_sec),
         language="ru",
-        provider="groq",
+        provider="anthropic",
         model="test",
         pass_threshold=THRESHOLD,
     )

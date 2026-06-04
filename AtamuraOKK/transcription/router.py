@@ -69,20 +69,20 @@ class LanguageRoutedTranscriber:
 def build_transcriber() -> Transcriber:
     """Wire the production language-routed transcriber from settings.
 
-    Russian -> Groq Whisper (used per Pavel's decision; faster-whisper stays only
-    for the offline WER spike). Kazakh / shala -> Yandex SpeechKit.
+    Russian -> OpenAI gpt-4o-transcribe (faster-whisper stays only for the
+    offline WER spike). Kazakh / shala -> Yandex SpeechKit.
     """
     from AtamuraOKK.settings import settings  # noqa: PLC0415
-    from AtamuraOKK.transcription.groq_whisper import (  # noqa: PLC0415
-        GroqWhisperTranscriber,
+    from AtamuraOKK.transcription.openai_transcribe import (  # noqa: PLC0415
+        OpenAITranscriber,
     )
     from AtamuraOKK.transcription.yandex_speech import (  # noqa: PLC0415
         YandexSpeechKitTranscriber,
     )
 
-    primary = GroqWhisperTranscriber(
-        api_key=settings.groq_api_key,
-        model=settings.groq_whisper_model,
+    primary = OpenAITranscriber(
+        api_key=settings.openai_api_key,
+        model=settings.openai_transcribe_model,
     )
     kazakh = YandexSpeechKitTranscriber(
         api_key=settings.yandex_api_key,
