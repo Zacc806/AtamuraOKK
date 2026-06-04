@@ -17,7 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from AtamuraOKK.db.base import Base
-from AtamuraOKK.db.models.enums import CallStatus
+from AtamuraOKK.db.models.enums import CallSource, CallStatus
 
 
 class Call(Base):
@@ -33,6 +33,11 @@ class Call(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     bitrix_call_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    source: Mapped[CallSource] = mapped_column(
+        String(16),
+        default=CallSource.TELEPHONY,
+        index=True,
+    )
     manager_id: Mapped[int | None] = mapped_column(
         ForeignKey("managers.id"),
         nullable=True,
