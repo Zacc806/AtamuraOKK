@@ -1,18 +1,18 @@
 # Техническое задание — AtamuraOKK
 
-> **ОБНОВЛЕНИЕ ПРОВАЙДЕРОВ (2026-06-04) — приоритет над деталями ниже.**
-> Финальная архитектура по уточнённой спеке:
-> - **Транскрипция (бюджетно):** **faster-whisper** локально для русского (он же детектит язык);
->   **Yandex SpeechKit** только для казахского / «шала казахского». Реализация:
->   `transcription/router.py` (`build_transcriber` → `LanguageRoutedTranscriber`),
->   `transcription/whisper.py` (faster-whisper), `transcription/yandex_speech.py` (SpeechKit).
-> - **Оценка:** **Anthropic Claude Sonnet** по умолчанию (`scoring/anthropic.py`,
->   `ATAMURAOKK_SCORE_PROVIDER=anthropic`, модель `ATAMURAOKK_ANTHROPIC_MODEL=claude-sonnet-4-6`).
->   Claude тянет ru+kk одной моделью — отдельный язык-роутер для скоринга не нужен.
->   Groq/YandexGPT-скореры остаются как альтернатива (`ATAMURAOKK_SCORE_PROVIDER=groq_yandex`).
-> - **Рубрика по умолчанию:** `okk_meeting_v1` (чек-лист из xlsx).
-> - **Ключи для прода:** `ATAMURAOKK_ANTHROPIC_API_KEY`, `ATAMURAOKK_YANDEX_API_KEY`+`_FOLDER_ID`
->   (SpeechKit), Bitrix-вебхук со scopes. Groq-ключ — только если включить `groq_yandex`.
+> **ФИНАЛЬНЫЙ СТЕК ПРОВАЙДЕРОВ (2026-06-04) — приоритет над деталями ниже.**
+> - **Транскрипция:** **OpenAI gpt-4o-transcribe** для русского + **Yandex SpeechKit** для казахского /
+>   «шала казахского». Реализация: `transcription/router.py` (`build_transcriber` →
+>   `LanguageRoutedTranscriber`: транскрибирует на OpenAI, эскалирует казах-сигнал в Yandex),
+>   `transcription/openai_transcribe.py` (OpenAI), `transcription/yandex_speech.py` (SpeechKit).
+>   faster-whisper остался ТОЛЬКО для оффлайн WER-спайка (`uv sync --group spike`).
+> - **Оценка:** **Anthropic Claude Sonnet** (`scoring/anthropic.py`, модель
+>   `ATAMURAOKK_ANTHROPIC_MODEL=claude-sonnet-4-6`). Claude тянет ru+kk одной моделью —
+>   отдельный язык-роутер для скоринга не нужен.
+> - **Groq полностью удалён** из стека (и транскрипция, и скоринг).
+> - **Рубрика по умолчанию:** `tm_call_v3` (обновлённый чек-лист звонка из xlsx, 100 баллов).
+> - **Ключи для прода:** `ATAMURAOKK_OPENAI_API_KEY` (транскрипция ru), `ATAMURAOKK_YANDEX_API_KEY`+
+>   `_FOLDER_ID` (SpeechKit), `ATAMURAOKK_ANTHROPIC_API_KEY` (скоринг), Bitrix-вебхук со scopes.
 > - **Скрипт-отклонение:** ИИ дополнительно сверяет разговор со скриптом продаж (скрипты Pavel
 >   пришлёт) и оценивает отклонение — добавляется в Anthropic-промт/результат отдельным измерением.
 >

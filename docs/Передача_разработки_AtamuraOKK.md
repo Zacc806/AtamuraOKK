@@ -1,16 +1,18 @@
 # Передача разработки — AtamuraOKK
 
-> **ОБНОВЛЕНИЕ ПРОВАЙДЕРОВ (2026-06-04) — приоритет над деталями ниже.**
-> - **Транскрипция:** faster-whisper (русский, локально/бесплатно, он же детектит язык) +
->   **Yandex SpeechKit** (казахский/«шала»). `transcription/router.py` `build_transcriber`.
-> - **Оценка:** **Anthropic Claude Sonnet** по умолчанию (`scoring/anthropic.py`). Groq/YandexGPT —
->   опциональная альтернатива (`ATAMURAOKK_SCORE_PROVIDER=groq_yandex`). Рубрика `okk_meeting_v1`.
-> - **Секреты для прода:** `ATAMURAOKK_ANTHROPIC_API_KEY` (скоринг), `ATAMURAOKK_YANDEX_API_KEY` +
->   `ATAMURAOKK_YANDEX_FOLDER_ID` (SpeechKit для казахского), Bitrix-вебхук со scopes
->   `crm,telephony,disk,user`. Groq-ключ нужен только при `groq_yandex`.
+> **ФИНАЛЬНЫЙ СТЕК ПРОВАЙДЕРОВ (2026-06-04) — приоритет над деталями ниже.**
+> - **Транскрипция:** **OpenAI gpt-4o-transcribe** (русский) + **Yandex SpeechKit** (казахский/«шала»).
+>   `transcription/router.py` `build_transcriber`: транскрибирует на OpenAI, эскалирует казах-сигнал
+>   в Yandex. faster-whisper остался ТОЛЬКО для оффлайн WER-спайка (`uv sync --group spike`).
+> - **Оценка:** **Anthropic Claude Sonnet** (`scoring/anthropic.py`). Claude тянет ru+kk одной моделью,
+>   поэтому language-роутинга в скоринге нет. Рубрика по умолчанию `tm_call_v3` (100 баллов).
+> - **Groq полностью удалён** из стека (и транскрипция, и скоринг).
+> - **Секреты для прода:** `ATAMURAOKK_OPENAI_API_KEY` (транскрипция ru), `ATAMURAOKK_YANDEX_API_KEY` +
+>   `ATAMURAOKK_YANDEX_FOLDER_ID` (SpeechKit для казахского), `ATAMURAOKK_ANTHROPIC_API_KEY` (скоринг),
+>   Bitrix-вебхук со scopes `crm,telephony,disk,user`.
 > - **Скрипты продаж** для проверки отклонения менеджера — Pavel пришлёт; подключаются в Anthropic-скорер.
 >
-> Где ниже «Groq Whisper»/«Groq+Yandex как основной скоринг» — это ранний дизайн (заменён этим блоком).
+> Где ниже «Groq Whisper»/«Groq+Yandex как скоринг» — это ранний дизайн (заменён этим блоком).
 
 AI-автоматизация отдела контроля качества (ОКК) Атамура Групп — документация для развёртывания и продолжения разработки
 
