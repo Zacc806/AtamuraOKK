@@ -134,6 +134,10 @@ class Settings(BaseSettings):
     )
     telegram_alert_chat_id: str = ""
 
+    # --- Sale-outcome backfill (ТЗ 3.4) ---
+    # Days after the contact before its CRM deal outcome (won/lose) is recorded.
+    outcome_check_days: int = 30
+
     # --- Ingestion ---
     # How far back the very first ingestion run reaches when no cursor exists.
     ingest_initial_days_back: int = 7

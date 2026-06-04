@@ -64,6 +64,7 @@ class BaseLLMScorer(ABC):
             duration_sec=call.duration_sec,
             max_chars=self.max_transcript_chars,
             script=self.script,
+            visit_index=call.visit_index,
         )
         delay = self.retry_base_delay
         started = time.monotonic()

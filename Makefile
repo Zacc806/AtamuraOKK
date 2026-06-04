@@ -65,6 +65,9 @@ score-meetings: ## Score TRANSCRIBED ОП meetings (Anthropic, okk_meeting_v1) -
 calibrate-meetings: ## Calibration gate: AI meeting scores vs human OKK xlsx (PASS/REVISE/FAIL)
 	uv run --group calib python -m AtamuraOKK.calibration --xlsx "Чек лист встречи ОП - Январь.xlsx"
 
+outcomes: ## Backfill sale outcomes (won/lose) from CRM for scores >=30 days old
+	uv run python -m AtamuraOKK.outcomes
+
 # --- Phase 0 transcription spike ---
 spike-fetch: ## Pull recent answered+recorded calls (telephony scope)
 	uv run python -m AtamuraOKK.spike fetch

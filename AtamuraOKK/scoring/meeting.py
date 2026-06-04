@@ -100,6 +100,7 @@ class MeetingScorer:
                 language=call.language,
                 language_probability=call.language_probability,
                 call_ref=f"{call.call_ref}#chunk{i}",
+                visit_index=call.visit_index,
             )
             for i, chunk in enumerate(chunks)
         ]
@@ -140,6 +141,7 @@ class MeetingScorer:
         meta["client_emotion"] = _peak_emotion(
             [str(r.meta.get("client_emotion", "")) for r in results],
         )
+        meta["visit_index"] = call.visit_index
         if kev_bonus:
             meta["kev_bonus"] = kev_bonus
 

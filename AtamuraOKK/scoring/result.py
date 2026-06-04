@@ -82,6 +82,7 @@ def assemble_score(
     out_meta: dict[str, Any] = dict(meta or {})
     out_meta["base_score_pct"] = base_pct
     out_meta["client_emotion"] = llm.client_emotion
+    out_meta["visit_index"] = call.visit_index
     if kev_bonus:
         out_meta["kev_bonus"] = kev_bonus
     if missing:

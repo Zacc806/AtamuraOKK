@@ -25,6 +25,10 @@ class CallForScoring:
     language: str = "auto"  # detected language: "ru" | "kk" | "auto"
     language_probability: float = 1.0
     call_ref: str = ""  # opaque id, for logging only
+    # Position of this contact in the client's chain (ТЗ 2.4): 1 = first, 2+ =
+    # repeat. Lets the scorer apply repeat-visit leniency from CRM metadata, not
+    # just the LLM's guess.
+    visit_index: int = 1
 
 
 @dataclass(slots=True)

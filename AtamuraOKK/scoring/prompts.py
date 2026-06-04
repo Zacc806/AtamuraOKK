@@ -29,6 +29,9 @@ def _roles_section(*, is_meeting: bool) -> list[str]:
     if is_meeting:
         base += [
             "- [third_party] = третьи лица (родственники, друзья) — НЕ оцениваются.",
+            "- Если спикеры размечены диаризацией ([speaker_1]/[speaker_2]/...) —",
+            "  определи, кто из них менеджер (ведёт, презентует ЖК, дожимает), кто",
+            "  клиент, кто третьи лица.",
             "- Если реплики не размечены — определи роли сам: менеджер здоровается,",
             "  презентует ЖК, отрабатывает возражения, ведёт к брони; клиент",
             "  спрашивает, сомневается, соглашается.",
@@ -71,6 +74,18 @@ def _type_section(*, is_meeting: bool) -> list[str]:
     ]
 
 
+def _visit_section(visit_index: int, *, is_meeting: bool) -> list[str]:
+    if visit_index <= 1:
+        return []
+    unit = "встреча" if is_meeting else "звонок"
+    return [
+        f"КОНТЕКСТ КЛИЕНТА (CRM): это {visit_index}-й {unit} с этим клиентом"
+        " (повторный) — НЕ штрафуй за пропуск приветствия / установления контакта"
+        " / программирования; клиент уже знаком.",
+        "",
+    ]
+
+
 def build_prompt(
     rubric: Rubric,
     *,
@@ -78,6 +93,7 @@ def build_prompt(
     duration_sec: int,
     max_chars: int,
     script: Script | None = None,
+    visit_index: int = 1,
 ) -> str:
     """Build the scoring prompt for one call or ОП meeting.
 
@@ -91,6 +107,7 @@ def build_prompt(
     :param duration_sec: call/meeting duration (for the model's context).
     :param max_chars: truncate the transcript to this many characters (cost guard).
     :param script: optional sales script to also measure adherence against.
+    :param visit_index: client contact position (ТЗ 2.4); >1 adds repeat context.
     :returns: the full prompt string.
     """
     is_meeting = rubric.context == _MEETING_CONTEXT
@@ -157,6 +174,7 @@ def build_prompt(
         "",
         *_type_section(is_meeting=is_meeting),
         "",
+        *_visit_section(visit_index, is_meeting=is_meeting),
         "ЧЕК-ЛИСТ:",
         criteria_desc,
         "",
@@ -189,6 +207,9 @@ def build_prompt(
         "  «Қайырлы күн/кеш») и микс с русским — это валидное приветствие",
         "- Small talk про погоду/жару — норма в РК, не считай тратой времени",
         "- Транскрипция местами с ошибками распознавания — игнорируй опечатки",
+        "- Если в транскрипте отмечена невербалика ([пауза Nс], [неуверенно] и"
+        " т.п.) — учитывай: паузы менеджера >5с и неуверенный тон снижают софт-"
+        "скилы; если разметки нет — не выдумывай",
         *objection_rule,
         *script_rules,
         "",
