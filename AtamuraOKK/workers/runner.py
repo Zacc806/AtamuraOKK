@@ -13,7 +13,7 @@ from AtamuraOKK.bitrix.users import sync_users
 from AtamuraOKK.db.dao.manager_dao import DepartmentDAO, ManagerDAO
 from AtamuraOKK.scoring.router import build_scorer
 from AtamuraOKK.settings import settings
-from AtamuraOKK.transcription.groq_whisper import GroqWhisperTranscriber
+from AtamuraOKK.transcription.router import build_transcriber
 from AtamuraOKK.workers.context import build_engine, session_factory
 from AtamuraOKK.workers.download import run_download
 from AtamuraOKK.workers.ingest import run_ingest
@@ -29,10 +29,7 @@ async def _sync_users_job(factory: async_sessionmaker[AsyncSession]) -> None:
 
 def build_scheduler(factory: async_sessionmaker[AsyncSession]) -> AsyncIOScheduler:
     """Build the scheduler with all pipeline jobs registered."""
-    transcriber = GroqWhisperTranscriber(
-        api_key=settings.groq_api_key,
-        model=settings.groq_whisper_model,
-    )
+    transcriber = build_transcriber()
     scorer = build_scorer()
     scheduler = AsyncIOScheduler(timezone="UTC")
     common = {"max_instances": 1, "coalesce": True}
