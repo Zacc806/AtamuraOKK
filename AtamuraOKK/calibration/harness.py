@@ -21,7 +21,7 @@ from AtamuraOKK.calibration.metrics import (
     spearman,
 )
 from AtamuraOKK.calibration.xlsx_loader import HumanCall
-from AtamuraOKK.scoring.base import ScoreResult
+from AtamuraOKK.scoring.meetings.base import ScoreResult
 
 # Default go/no-go thresholds (overridable).
 DEFAULT_GATES: dict[str, float] = {

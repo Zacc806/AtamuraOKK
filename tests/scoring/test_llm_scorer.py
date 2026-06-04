@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from AtamuraOKK.scoring.base import CallForScoring
-from AtamuraOKK.scoring.errors import MalformedOutputError, ProviderUnavailableError
-from AtamuraOKK.scoring.llm import BaseLLMScorer
-from AtamuraOKK.scoring.rubric import load_rubric
+from AtamuraOKK.scoring.meetings.base import CallForScoring
+from AtamuraOKK.scoring.meetings.errors import (
+    MalformedOutputError,
+    ProviderUnavailableError,
+)
+from AtamuraOKK.scoring.meetings.llm import BaseLLMScorer
+from AtamuraOKK.scoring.meetings.rubric import load_rubric
 
 RUBRIC = load_rubric("tm_call_v2")
 

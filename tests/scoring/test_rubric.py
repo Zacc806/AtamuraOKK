@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from AtamuraOKK.scoring.rubric import load_rubric
+from AtamuraOKK.scoring.meetings.rubric import load_rubric
 
 RUBRIC = "tm_call_v2"
 

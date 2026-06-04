@@ -16,7 +16,7 @@ from AtamuraOKK.calibration.db_source import ai_scores_by_deal
 from AtamuraOKK.calibration.harness import compare
 from AtamuraOKK.calibration.xlsx_loader import load_human_calls
 from AtamuraOKK.db.session import session_scope
-from AtamuraOKK.scoring.rubric import load_rubric
+from AtamuraOKK.scoring.meetings.rubric import load_rubric
 from AtamuraOKK.settings import settings
 
 

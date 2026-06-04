@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from AtamuraOKK.scoring.base import CallForScoring, CriterionScore, ScoreResult
-from AtamuraOKK.scoring.rubric import Rubric
-from AtamuraOKK.scoring.schema import LLMScore
+from AtamuraOKK.scoring.meetings.base import CallForScoring, CriterionScore, ScoreResult
+from AtamuraOKK.scoring.meetings.rubric import Rubric
+from AtamuraOKK.scoring.meetings.schema import LLMScore
 
 
 def assemble_score(

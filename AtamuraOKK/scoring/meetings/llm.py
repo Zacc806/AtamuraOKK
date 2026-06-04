@@ -13,13 +13,16 @@ from abc import ABC, abstractmethod
 
 from loguru import logger
 
-from AtamuraOKK.scoring.base import CallForScoring, ScoreResult
-from AtamuraOKK.scoring.errors import MalformedOutputError, ProviderUnavailableError
-from AtamuraOKK.scoring.prompts import build_prompt
-from AtamuraOKK.scoring.result import assemble_score
-from AtamuraOKK.scoring.rubric import Rubric
-from AtamuraOKK.scoring.schema import parse_llm_json
-from AtamuraOKK.scoring.script import Script
+from AtamuraOKK.scoring.meetings.base import CallForScoring, ScoreResult
+from AtamuraOKK.scoring.meetings.errors import (
+    MalformedOutputError,
+    ProviderUnavailableError,
+)
+from AtamuraOKK.scoring.meetings.prompts import build_prompt
+from AtamuraOKK.scoring.meetings.result import assemble_score
+from AtamuraOKK.scoring.meetings.rubric import Rubric
+from AtamuraOKK.scoring.meetings.schema import parse_llm_json
+from AtamuraOKK.scoring.meetings.script import Script
 from AtamuraOKK.transcription.cleanup import clean_transcript
 
 

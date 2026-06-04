@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from AtamuraOKK.scoring.manipulation import (
+from AtamuraOKK.scoring.meetings.manipulation import (
     ManipulationDetector,
     _parse_manipulations,
 )
-from AtamuraOKK.scoring.zhk import ZhkFacts
+from AtamuraOKK.scoring.meetings.zhk import ZhkFacts
 
 
 class _Block:

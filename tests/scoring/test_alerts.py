@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-from AtamuraOKK.scoring import alerts
-from AtamuraOKK.scoring.manipulation import Manipulation
+from AtamuraOKK.scoring.meetings import alerts
+from AtamuraOKK.scoring.meetings.manipulation import Manipulation
 
 
 def _spy_post(calls: list[Any]) -> Any:

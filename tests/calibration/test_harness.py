@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from AtamuraOKK.calibration.harness import compare
 from AtamuraOKK.calibration.xlsx_loader import HumanCall
-from AtamuraOKK.scoring.base import CriterionScore, ScoreResult
+from AtamuraOKK.scoring.meetings.base import CriterionScore, ScoreResult
 
 MAX_TOTAL = 50
 THRESHOLD = 75

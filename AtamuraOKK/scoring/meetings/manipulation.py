@@ -16,8 +16,8 @@ import re
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
-from AtamuraOKK.scoring.errors import ProviderUnavailableError, ScoringError
-from AtamuraOKK.scoring.zhk import ZhkFacts
+from AtamuraOKK.scoring.meetings.errors import ProviderUnavailableError, ScoringError
+from AtamuraOKK.scoring.meetings.zhk import ZhkFacts
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic

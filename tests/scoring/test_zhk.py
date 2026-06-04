@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from AtamuraOKK.scoring.zhk import ZhkFacts, load_zhk_facts
+from AtamuraOKK.scoring.meetings.zhk import ZhkFacts, load_zhk_facts
 
 
 def test_loads_real_files_skips_underscore_templates(tmp_path: Path) -> None:

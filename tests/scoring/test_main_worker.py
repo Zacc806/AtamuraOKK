@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from AtamuraOKK.db.models.enums import CallSource
-from AtamuraOKK.scoring.__main__ import _build_service
+from AtamuraOKK.scoring.meetings.__main__ import _build_service
 from AtamuraOKK.settings import settings
 
 

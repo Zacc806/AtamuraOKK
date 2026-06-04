@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from AtamuraOKK.scoring.prompts import build_prompt
-from AtamuraOKK.scoring.rubric import load_rubric
+from AtamuraOKK.scoring.meetings.prompts import build_prompt
+from AtamuraOKK.scoring.meetings.rubric import load_rubric
 
 RUBRIC = load_rubric("okk_meeting_v1")
 

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from AtamuraOKK.scoring.base import CallForScoring, CriterionScore, ScoreResult
-from AtamuraOKK.scoring.chunking import chunk_transcript
-from AtamuraOKK.scoring.meeting import MeetingScorer, _worst_tone
-from AtamuraOKK.scoring.rubric import load_rubric
+from AtamuraOKK.scoring.meetings.base import CallForScoring, CriterionScore, ScoreResult
+from AtamuraOKK.scoring.meetings.chunking import chunk_transcript
+from AtamuraOKK.scoring.meetings.meeting import MeetingScorer, _worst_tone
+from AtamuraOKK.scoring.meetings.rubric import load_rubric
 
 RUBRIC = load_rubric("okk_meeting_v1")
 

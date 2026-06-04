@@ -18,10 +18,10 @@ from sqlalchemy import select
 from AtamuraOKK.db.models.call import Call
 from AtamuraOKK.db.models.enums import CallSource, CallStatus
 from AtamuraOKK.db.session import session_scope
-from AtamuraOKK.scoring.manipulation import ManipulationDetector
-from AtamuraOKK.scoring.router import build_meeting_scorer, build_scorer
-from AtamuraOKK.scoring.service import Outcome, ScoringService
-from AtamuraOKK.scoring.zhk import load_zhk_facts
+from AtamuraOKK.scoring.meetings.manipulation import ManipulationDetector
+from AtamuraOKK.scoring.meetings.router import build_meeting_scorer, build_scorer
+from AtamuraOKK.scoring.meetings.service import Outcome, ScoringService
+from AtamuraOKK.scoring.meetings.zhk import load_zhk_facts
 from AtamuraOKK.settings import settings
 
 

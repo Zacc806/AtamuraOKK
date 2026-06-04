@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from AtamuraOKK.scoring.prompts import build_prompt
-from AtamuraOKK.scoring.rubric import load_rubric
+from AtamuraOKK.scoring.meetings.prompts import build_prompt
+from AtamuraOKK.scoring.meetings.rubric import load_rubric
 
 _TEXT = "[agent] здравствуйте\n[customer] добрый день"
 

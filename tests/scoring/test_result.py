@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from AtamuraOKK.scoring.base import CallForScoring, ScoreResult
-from AtamuraOKK.scoring.result import assemble_score
-from AtamuraOKK.scoring.rubric import Rubric, load_rubric
-from AtamuraOKK.scoring.schema import LLMScore
+from AtamuraOKK.scoring.meetings.base import CallForScoring, ScoreResult
+from AtamuraOKK.scoring.meetings.result import assemble_score
+from AtamuraOKK.scoring.meetings.rubric import Rubric, load_rubric
+from AtamuraOKK.scoring.meetings.schema import LLMScore
 
 RUBRIC = load_rubric("tm_call_v2")
 THRESHOLD = 75

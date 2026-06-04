@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from AtamuraOKK.scoring.base import CallForScoring
-from AtamuraOKK.scoring.prompts import build_prompt
-from AtamuraOKK.scoring.result import assemble_score
-from AtamuraOKK.scoring.rubric import load_rubric
-from AtamuraOKK.scoring.schema import LLMScore
-from AtamuraOKK.scoring.script import load_script
+from AtamuraOKK.scoring.meetings.base import CallForScoring
+from AtamuraOKK.scoring.meetings.prompts import build_prompt
+from AtamuraOKK.scoring.meetings.result import assemble_score
+from AtamuraOKK.scoring.meetings.rubric import load_rubric
+from AtamuraOKK.scoring.meetings.schema import LLMScore
+from AtamuraOKK.scoring.meetings.script import load_script
 
 RUBRIC = load_rubric("okk_meeting_v1")
 

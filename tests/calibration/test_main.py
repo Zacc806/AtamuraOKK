@@ -11,7 +11,7 @@ import pytest
 
 import AtamuraOKK.calibration.__main__ as cli
 from AtamuraOKK.calibration.xlsx_loader import HumanCall
-from AtamuraOKK.scoring.base import CriterionScore, ScoreResult
+from AtamuraOKK.scoring.meetings.base import CriterionScore, ScoreResult
 
 
 def _human(deal: int, total: int, crit1: int) -> HumanCall:

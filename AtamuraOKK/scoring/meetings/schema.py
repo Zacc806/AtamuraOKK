@@ -11,7 +11,7 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from AtamuraOKK.scoring.errors import MalformedOutputError
+from AtamuraOKK.scoring.meetings.errors import MalformedOutputError
 
 
 class LLMScore(BaseModel):

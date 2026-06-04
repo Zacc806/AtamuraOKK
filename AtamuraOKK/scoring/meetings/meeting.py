@@ -1,7 +1,7 @@
 """Meeting scorer: map-reduce a long ОП-meeting into one rubric score (Этап 3).
 
 Short meetings are scored in a single pass (delegated to the wrapped per-chunk
-:class:`Scorer`). Long ones are chunked (:mod:`AtamuraOKK.scoring.chunking`),
+:class:`Scorer`). Long ones are chunked (:mod:`AtamuraOKK.scoring.meetings.chunking`),
 each chunk scored independently, and the chunk results merged:
 
 * per criterion -> **max** across chunks for stage-bound criteria (greeting,
@@ -21,9 +21,14 @@ from __future__ import annotations
 
 import asyncio
 
-from AtamuraOKK.scoring.base import CallForScoring, CriterionScore, Scorer, ScoreResult
-from AtamuraOKK.scoring.chunking import chunk_transcript
-from AtamuraOKK.scoring.rubric import Rubric
+from AtamuraOKK.scoring.meetings.base import (
+    CallForScoring,
+    CriterionScore,
+    Scorer,
+    ScoreResult,
+)
+from AtamuraOKK.scoring.meetings.chunking import chunk_transcript
+from AtamuraOKK.scoring.meetings.rubric import Rubric
 from AtamuraOKK.transcription.cleanup import clean_transcript
 
 # Most-negative-wins ordering for merging per-chunk tone labels.

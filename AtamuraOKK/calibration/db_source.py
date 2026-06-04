@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from AtamuraOKK.db.models.call import Call
 from AtamuraOKK.db.models.score import Score
-from AtamuraOKK.scoring.base import CriterionScore, ScoreResult
+from AtamuraOKK.scoring.meetings.base import CriterionScore, ScoreResult
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession

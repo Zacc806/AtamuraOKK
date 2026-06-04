@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from AtamuraOKK.scoring.errors import ProviderUnavailableError, ScoringError
-from AtamuraOKK.scoring.llm import BaseLLMScorer
-from AtamuraOKK.scoring.rubric import Rubric
-from AtamuraOKK.scoring.script import Script
+from AtamuraOKK.scoring.meetings.errors import ProviderUnavailableError, ScoringError
+from AtamuraOKK.scoring.meetings.llm import BaseLLMScorer
+from AtamuraOKK.scoring.meetings.rubric import Rubric
+from AtamuraOKK.scoring.meetings.script import Script
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic

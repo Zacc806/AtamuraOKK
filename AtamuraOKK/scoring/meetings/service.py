@@ -13,11 +13,11 @@ from AtamuraOKK.db.models.call import Call
 from AtamuraOKK.db.models.enums import CallStatus
 from AtamuraOKK.db.models.score import Score
 from AtamuraOKK.db.models.transcript import Transcript
-from AtamuraOKK.scoring.alerts import notify_manipulations
-from AtamuraOKK.scoring.base import CallForScoring, Scorer, ScoreResult
-from AtamuraOKK.scoring.errors import ScoringError
-from AtamuraOKK.scoring.history import visit_index as compute_visit_index
-from AtamuraOKK.scoring.manipulation import ManipulationDetector
+from AtamuraOKK.scoring.meetings.alerts import notify_manipulations
+from AtamuraOKK.scoring.meetings.base import CallForScoring, Scorer, ScoreResult
+from AtamuraOKK.scoring.meetings.errors import ScoringError
+from AtamuraOKK.scoring.meetings.history import visit_index as compute_visit_index
+from AtamuraOKK.scoring.meetings.manipulation import ManipulationDetector
 
 _MIN_TEXT_CHARS = 100
 

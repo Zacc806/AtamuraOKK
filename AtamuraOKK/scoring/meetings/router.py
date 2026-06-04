@@ -8,11 +8,11 @@ Kazakh is escalated to Yandex SpeechKit). Swapping the provider is a change to
 
 from __future__ import annotations
 
-from AtamuraOKK.scoring.anthropic import AnthropicScorer
-from AtamuraOKK.scoring.base import Scorer
-from AtamuraOKK.scoring.meeting import MeetingScorer
-from AtamuraOKK.scoring.rubric import Rubric, load_rubric
-from AtamuraOKK.scoring.script import load_script
+from AtamuraOKK.scoring.meetings.anthropic import AnthropicScorer
+from AtamuraOKK.scoring.meetings.base import Scorer
+from AtamuraOKK.scoring.meetings.meeting import MeetingScorer
+from AtamuraOKK.scoring.meetings.rubric import Rubric, load_rubric
+from AtamuraOKK.scoring.meetings.script import load_script
 
 
 def build_scorer(rubric: Rubric | None = None) -> Scorer:

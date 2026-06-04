@@ -1,7 +1,7 @@
 """Bilingual (RU/KK) scoring prompt, built from the rubric.
 
 Ported from the proven ``compliance_checker.build_prompt`` and parameterized by
-:class:`~AtamuraOKK.scoring.rubric.Rubric` so adding/retiring a criterion is a
+:class:`~AtamuraOKK.scoring.meetings.rubric.Rubric` so adding/retiring a criterion is a
 rubric edit, never a prompt edit. The same text is sent to both providers.
 """
 
@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 
-from AtamuraOKK.scoring.rubric import Rubric
-from AtamuraOKK.scoring.script import Script
+from AtamuraOKK.scoring.meetings.rubric import Rubric
+from AtamuraOKK.scoring.meetings.script import Script
 
 _MEETING_CONTEXT = "op_meeting"
 

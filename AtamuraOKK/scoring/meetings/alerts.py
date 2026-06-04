@@ -15,7 +15,7 @@ from loguru import logger
 from AtamuraOKK.settings import settings
 
 if TYPE_CHECKING:
-    from AtamuraOKK.scoring.manipulation import Manipulation
+    from AtamuraOKK.scoring.meetings.manipulation import Manipulation
 
 _TELEGRAM_API = "https://api.telegram.org"
 _TIMEOUT_SEC = 10.0

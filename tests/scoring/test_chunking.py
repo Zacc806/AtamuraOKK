@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from AtamuraOKK.scoring.chunking import chunk_transcript
+from AtamuraOKK.scoring.meetings.chunking import chunk_transcript
 
 
 def test_blank_returns_empty() -> None:

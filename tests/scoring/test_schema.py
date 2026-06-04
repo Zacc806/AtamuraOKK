@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from AtamuraOKK.scoring.errors import MalformedOutputError
-from AtamuraOKK.scoring.schema import parse_llm_json
+from AtamuraOKK.scoring.meetings.errors import MalformedOutputError
+from AtamuraOKK.scoring.meetings.schema import parse_llm_json
 
 _VALID = (
     '{"scores": {"1": 1, "2": 0}, "client_agreed_meeting": true, '

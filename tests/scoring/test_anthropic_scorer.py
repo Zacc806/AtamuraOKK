@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from AtamuraOKK.scoring.anthropic import AnthropicScorer
-from AtamuraOKK.scoring.base import CallForScoring
-from AtamuraOKK.scoring.errors import ScoringError
-from AtamuraOKK.scoring.rubric import load_rubric
+from AtamuraOKK.scoring.meetings.anthropic import AnthropicScorer
+from AtamuraOKK.scoring.meetings.base import CallForScoring
+from AtamuraOKK.scoring.meetings.errors import ScoringError
+from AtamuraOKK.scoring.meetings.rubric import load_rubric
 
 RUBRIC = load_rubric("okk_meeting_v1")
 
