@@ -140,6 +140,13 @@ class Settings(BaseSettings):
     download_batch_size: int = 20
     transcribe_batch_size: int = 20
     score_batch_size: int = 20
+    # Hardening: max pipeline attempts before a FAILED call is left alone;
+    # how often maintenance runs; how long downloaded audio is kept.
+    max_call_attempts: int = 3
+    requeue_batch_size: int = 50
+    maintenance_interval_min: int = 60
+    summary_interval_min: int = 1440
+    audio_retention_days: int = 90
 
     @property
     def db_url(self) -> URL:

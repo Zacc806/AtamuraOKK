@@ -17,6 +17,11 @@ from AtamuraOKK.transcription.router import build_transcriber
 from AtamuraOKK.workers.context import build_engine, session_factory
 from AtamuraOKK.workers.download import run_download
 from AtamuraOKK.workers.ingest import run_ingest
+from AtamuraOKK.workers.maintenance import (
+    run_cleanup_audio,
+    run_daily_summary,
+    run_requeue_failed,
+)
 from AtamuraOKK.workers.score import run_score
 from AtamuraOKK.workers.transcribe import run_transcribe
 
@@ -73,6 +78,29 @@ def build_scheduler(factory: async_sessionmaker[AsyncSession]) -> AsyncIOSchedul
         minutes=pipeline_min,
         args=[factory, scorer],
         id="score",
+        **common,
+    )
+    scheduler.add_job(
+        run_requeue_failed,
+        "interval",
+        minutes=settings.maintenance_interval_min,
+        args=[factory],
+        id="requeue",
+        **common,
+    )
+    scheduler.add_job(
+        run_daily_summary,
+        "interval",
+        minutes=settings.summary_interval_min,
+        args=[factory],
+        id="summary",
+        **common,
+    )
+    scheduler.add_job(
+        run_cleanup_audio,
+        "interval",
+        minutes=settings.summary_interval_min,
+        id="cleanup_audio",
         **common,
     )
     return scheduler

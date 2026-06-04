@@ -5,13 +5,20 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import Depends
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from AtamuraOKK.db.dependencies import get_db_session
 from AtamuraOKK.db.models.call import Call
 from AtamuraOKK.db.models.enums import CallStatus
+
+# When a stage fails, which status to re-queue the call back to.
+_REQUEUE_TARGET = {
+    "download": CallStatus.NEW,
+    "transcribe": CallStatus.DOWNLOADED,
+    "score": CallStatus.TRANSCRIBED,
+}
 
 
 class CallDAO:
@@ -72,3 +79,29 @@ class CallDAO:
         call.failed_stage = failed_stage
         if status == CallStatus.FAILED:
             call.attempts += 1
+
+    async def count_by_status(self) -> dict[str, int]:
+        """Count calls grouped by status (pipeline health snapshot)."""
+        stmt = select(Call.status, func.count()).group_by(Call.status)
+        result = await self.session.execute(stmt)
+        return {str(status): count for status, count in result.all()}
+
+    async def requeue_failed(self, *, max_attempts: int, limit: int) -> int:
+        """Re-queue retryable FAILED calls back to their stage's input status.
+
+        :returns: number of calls re-queued.
+        """
+        stmt = (
+            select(Call)
+            .where(Call.status == CallStatus.FAILED, Call.attempts < max_attempts)
+            .order_by(Call.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+        )
+        result = await self.session.execute(stmt)
+        calls = list(result.scalars().all())
+        for call in calls:
+            call.status = _REQUEUE_TARGET.get(call.failed_stage or "", CallStatus.NEW)
+            call.error = None
+            call.failed_stage = None
+        return len(calls)
