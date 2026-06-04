@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 
 from AtamuraOKK.scoring.rubric import Rubric
+from AtamuraOKK.scoring.script import Script
 
 
 def _objection_ids(rubric: Rubric) -> list[int]:
@@ -24,6 +25,7 @@ def build_prompt(
     text: str,
     duration_sec: int,
     max_chars: int,
+    script: Script | None = None,
 ) -> str:
     """Build the scoring prompt for one call.
 
@@ -31,6 +33,7 @@ def build_prompt(
     :param text: speaker-tagged transcript text.
     :param duration_sec: call duration (for the model's context).
     :param max_chars: truncate the transcript to this many characters (cost guard).
+    :param script: optional sales script to also measure adherence against.
     :returns: the full prompt string.
     """
     ai = rubric.ai_criteria
@@ -46,6 +49,32 @@ def build_prompt(
     objection_rule = (
         [f"- Если возражений не было — ставь полный балл за пункты {objection_ids}"]
         if objection_ids
+        else []
+    )
+
+    script_section = (
+        [
+            "",
+            "СКРИПТ ПРОДАЖ (эталон — оцени, насколько менеджер ему следовал):",
+            script.render(),
+        ]
+        if script is not None
+        else []
+    )
+    script_json = (
+        [
+            '  "script_adherence": 85,',
+            '  "script_deviations": ["где и как менеджер отклонился от скрипта"],',
+        ]
+        if script is not None
+        else []
+    )
+    script_rules = (
+        [
+            "- script_adherence = 0-100: насколько менеджер следовал скрипту выше",
+            "- script_deviations = список конкретных отклонений (пустой, если их нет)",
+        ]
+        if script is not None
         else []
     )
 
@@ -67,6 +96,7 @@ def build_prompt(
         "",
         "КРАСНЫЕ ФЛАГИ (если заметишь):",
         red_flags,
+        *script_section,
         "",
         "ОТВЕТЬ строго в JSON формате (без markdown, без объяснений):",
         "{",
@@ -74,6 +104,7 @@ def build_prompt(
         '  "client_agreed_meeting": true,',
         '  "manager_tone": "вежливый",',
         '  "red_flags_found": [],',
+        *script_json,
         '  "summary": "Менеджер хорошо отработал, клиент записан"',
         "}",
         "",
@@ -85,6 +116,7 @@ def build_prompt(
         "- Звонок может быть на русском или казахском — оценивай одинаково строго",
         "- Транскрипция местами с ошибками распознавания — игнорируй опечатки",
         *objection_rule,
+        *script_rules,
         "",
         f"Длительность звонка: {duration_sec} секунд",
         "",

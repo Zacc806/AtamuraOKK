@@ -54,9 +54,12 @@ class ScoreResult:
     red_flags: list[str]
     summary: str
     language: str  # routed language: "ru" | "kk" | "shala"
-    provider: str  # "groq" | "yandex"
+    provider: str  # "groq" | "yandex" | "anthropic"
     model: str
     needs_human_review: bool = False
+    # Script-adherence dimension (None when no sales script is configured).
+    script_adherence: float | None = None  # 0-100: how well the manager followed it
+    script_deviations: list[str] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:

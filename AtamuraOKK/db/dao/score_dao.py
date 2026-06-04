@@ -46,6 +46,8 @@ class ScoreDAO:
             provider=result.provider,
             model=result.model,
             needs_human_review=result.needs_human_review,
+            script_adherence=result.script_adherence,
+            script_deviations=list(result.script_deviations),
             meta=result.meta,
         )
         self.session.add(score)

@@ -109,6 +109,8 @@ class Settings(BaseSettings):
     # Default scorer provider: "anthropic" (Claude) | "groq_yandex" (language-routed).
     score_provider: str = "anthropic"
     score_rubric_version: str = "okk_meeting_v1"
+    # Sales-script id for the deviation dimension; empty = script check disabled.
+    score_script_version: str = ""
     score_pass_threshold: int = 75
     # Detected-language probability above which a call is routed to the Russian
     # scorer; below it (or any Kazakh signal) routes to the Kazakh scorer.

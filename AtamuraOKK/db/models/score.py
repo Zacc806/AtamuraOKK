@@ -49,6 +49,8 @@ class Score(Base):
     provider: Mapped[str] = mapped_column(String(16), default="")
     model: Mapped[str] = mapped_column(String(64), default="")
     needs_human_review: Mapped[bool] = mapped_column(Boolean, default=False)
+    script_adherence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    script_deviations: Mapped[list[str]] = mapped_column(JSONB, default=list)
     meta: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(

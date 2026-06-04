@@ -23,6 +23,9 @@ class LLMScore(BaseModel):
     manager_tone: str = "нейтральный"
     red_flags_found: list[str] = Field(default_factory=list)
     summary: str = ""
+    # Present only when a sales script was supplied in the prompt.
+    script_adherence: float | None = None
+    script_deviations: list[str] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="ignore")
 

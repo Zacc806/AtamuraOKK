@@ -19,6 +19,7 @@ from AtamuraOKK.scoring.prompts import build_prompt
 from AtamuraOKK.scoring.result import assemble_score
 from AtamuraOKK.scoring.rubric import Rubric
 from AtamuraOKK.scoring.schema import parse_llm_json
+from AtamuraOKK.scoring.script import Script
 
 
 class BaseLLMScorer(ABC):
@@ -35,6 +36,7 @@ class BaseLLMScorer(ABC):
         retry_base_delay: float = 1.0,
         max_transcript_chars: int = 24000,
         pass_threshold: int = 75,
+        script: Script | None = None,
     ) -> None:
         self.rubric = rubric
         self.model = model
@@ -42,6 +44,7 @@ class BaseLLMScorer(ABC):
         self.retry_base_delay = retry_base_delay
         self.max_transcript_chars = max_transcript_chars
         self.pass_threshold = pass_threshold
+        self.script = script
 
     @abstractmethod
     async def _raw_complete(self, prompt: str) -> str:
@@ -57,6 +60,7 @@ class BaseLLMScorer(ABC):
             text=call.text,
             duration_sec=call.duration_sec,
             max_chars=self.max_transcript_chars,
+            script=self.script,
         )
         delay = self.retry_base_delay
         started = time.monotonic()

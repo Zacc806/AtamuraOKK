@@ -16,6 +16,7 @@ from AtamuraOKK.scoring.groq import GroqScorer
 from AtamuraOKK.scoring.llm import BaseLLMScorer
 from AtamuraOKK.scoring.router import LanguageRoutedScorer, build_scorer
 from AtamuraOKK.scoring.rubric import Criterion, Rubric, load_rubric
+from AtamuraOKK.scoring.script import Script, load_script
 from AtamuraOKK.scoring.yandex import YandexScorer
 
 __all__ = [
@@ -32,7 +33,9 @@ __all__ = [
     "ScoreResult",
     "Scorer",
     "ScoringError",
+    "Script",
     "YandexScorer",
     "build_scorer",
     "load_rubric",
+    "load_script",
 ]

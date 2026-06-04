@@ -78,6 +78,10 @@ def assemble_score(
     if clamped:
         out_meta["clamped_criteria"] = clamped
 
+    script_adherence = llm.script_adherence
+    if script_adherence is not None:
+        script_adherence = round(max(0.0, min(100.0, float(script_adherence))), 1)
+
     return ScoreResult(
         rubric_version=rubric.id,
         total_score=total,
@@ -93,5 +97,7 @@ def assemble_score(
         provider=provider,
         model=model,
         needs_human_review=len(missing) >= 3,
+        script_adherence=script_adherence,
+        script_deviations=list(llm.script_deviations),
         meta=out_meta,
     )

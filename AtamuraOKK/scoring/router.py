@@ -14,6 +14,7 @@ from AtamuraOKK.scoring.errors import ProviderUnavailableError
 from AtamuraOKK.scoring.groq import GroqScorer
 from AtamuraOKK.scoring.language import route
 from AtamuraOKK.scoring.rubric import Rubric, load_rubric
+from AtamuraOKK.scoring.script import load_script
 from AtamuraOKK.scoring.yandex import YandexScorer
 
 
@@ -58,6 +59,7 @@ def build_scorer(rubric: Rubric | None = None) -> Scorer:
     from AtamuraOKK.settings import settings  # noqa: PLC0415
 
     rb = rubric or load_rubric(settings.score_rubric_version)
+    script = load_script(settings.score_script_version)
     if settings.score_provider == "anthropic":
         return AnthropicScorer(
             rb,
@@ -67,6 +69,7 @@ def build_scorer(rubric: Rubric | None = None) -> Scorer:
             retry_base_delay=settings.score_retry_base_delay,
             max_transcript_chars=settings.score_max_transcript_chars,
             pass_threshold=settings.score_pass_threshold,
+            script=script,
         )
     ru = GroqScorer(
         rb,
@@ -76,6 +79,7 @@ def build_scorer(rubric: Rubric | None = None) -> Scorer:
         retry_base_delay=settings.score_retry_base_delay,
         max_transcript_chars=settings.score_max_transcript_chars,
         pass_threshold=settings.score_pass_threshold,
+        script=script,
     )
     kk = YandexScorer(
         rb,
@@ -86,6 +90,7 @@ def build_scorer(rubric: Rubric | None = None) -> Scorer:
         retry_base_delay=settings.score_retry_base_delay,
         max_transcript_chars=settings.score_max_transcript_chars,
         pass_threshold=settings.score_pass_threshold,
+        script=script,
     )
     return LanguageRoutedScorer(
         ru=ru,
