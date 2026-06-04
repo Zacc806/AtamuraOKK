@@ -20,6 +20,7 @@ from AtamuraOKK.scoring.result import assemble_score
 from AtamuraOKK.scoring.rubric import Rubric
 from AtamuraOKK.scoring.schema import parse_llm_json
 from AtamuraOKK.scoring.script import Script
+from AtamuraOKK.transcription.cleanup import clean_transcript
 
 
 class BaseLLMScorer(ABC):
@@ -57,7 +58,7 @@ class BaseLLMScorer(ABC):
         """Score one call, retrying transient and malformed-output failures."""
         prompt = build_prompt(
             self.rubric,
-            text=call.text,
+            text=clean_transcript(call.text),
             duration_sec=call.duration_sec,
             max_chars=self.max_transcript_chars,
             script=self.script,
