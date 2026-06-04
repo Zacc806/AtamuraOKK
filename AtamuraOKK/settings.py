@@ -79,6 +79,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("ATAMURAOKK_OPENAI_API_KEY", "OPENAI_API_KEY"),
     )
     openai_transcribe_model: str = "gpt-4o-transcribe"
+    # Scoring model — needs Structured Outputs support (gpt-4o-2024-08-06+).
+    openai_scoring_model: str = "gpt-4o"
 
     # --- Yandex (SpeechKit STT for Kazakh / shala) ---
     yandex_api_key: str = Field(
@@ -158,6 +160,37 @@ class Settings(BaseSettings):
     # Optional explicit override of the qualified deal STATUS_IDs (skips discovery),
     # e.g. ["PREPARATION", "C24:PREPAYMENT_INVOIC"].
     qualified_deal_stage_ids: list[str] = Field(default_factory=list)
+
+    # --- Ops / hardening ---
+    # A FAILED call is retried up to this many attempts; beyond that it's
+    # dead-lettered (left FAILED for manual review).
+    max_retries: int = 4
+    # Cost-estimate rates (USD); tune to your provider contract.
+    cost_transcribe_per_min: float = 0.006  # gpt-4o-transcribe
+    cost_score_input_per_1k: float = 0.0025  # gpt-4o input
+    cost_score_output_per_1k: float = 0.01  # gpt-4o output
+    # Ops alerting via Telegram reuses telegram_bot_token (defined above);
+    # telegram_chat_id is the ops channel (manipulation alerts use
+    # telegram_alert_chat_id). Leave blank to log alerts instead of sending.
+    telegram_chat_id: str = ""
+    # Alert when a single run dead-letters at least this many calls.
+    alert_failure_threshold: int = 5
+
+    # --- Reporting (twice-daily QA reports) ---
+    report_timezone: str = "Asia/Qyzylorda"
+    # The day splits into two halves at this hour (local report tz).
+    report_split_hour: int = 13
+    # The afternoon/second half is bounded at this hour (end of working day).
+    report_day_end_hour: int = 19
+    # When the scheduled reports run: lunch (first half) and evening (second half).
+    report_lunch_hour: int = 13
+    report_evening_hour: int = 19
+    # LLM that writes the narrative sections (Structured Outputs capable).
+    report_model: str = "gpt-4o"
+    # Where generated reports (.md/.docx) are written.
+    report_dir: Path = PROJECT_ROOT / "reports"
+    # Team-average score norm (below = underperforming), from the QA-dept docs.
+    report_score_norm: int = 75
 
     # --- Phase 0 spike ---
     # Where the transcription-eval spike writes calls metadata, audio, and

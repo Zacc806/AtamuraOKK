@@ -57,6 +57,24 @@ services:
       db:
         condition: service_healthy
 
+  # BI dashboard over Postgres (per-manager / per-department QA scorecards).
+  metabase:
+    image: metabase/metabase:latest
+    hostname: AtamuraOKK-metabase
+    ports:
+      - "3000:3000"
+    environment:
+      # Dev: H2 app-db persisted to a volume. For production switch to a Postgres
+      # app-db (MB_DB_TYPE=postgres + MB_DB_* pointing at a dedicated database).
+      MB_DB_FILE: /metabase-data/metabase.db
+      JAVA_TIMEZONE: Asia/Qyzylorda
+    volumes:
+      - AtamuraOKK-metabase-data:/metabase-data
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: always
+
   # S3-compatible object storage for call recordings.
   minio:
     image: minio/minio:latest
@@ -83,3 +101,5 @@ volumes:
     name: AtamuraOKK-db-data
   AtamuraOKK-minio-data:
     name: AtamuraOKK-minio-data
+  AtamuraOKK-metabase-data:
+    name: AtamuraOKK-metabase-data

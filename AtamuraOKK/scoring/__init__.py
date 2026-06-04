@@ -1,1 +1,1 @@
-"""Scoring package (call scoring lives here; ОП-meeting scoring in ``meetings``)."""
+"""Phase 3: QA analysis & scoring of call transcripts."""

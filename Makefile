@@ -46,6 +46,40 @@ ingest-requalify: ## Re-check pending first-calls; promote newly-qualified
 transcribe: ## Transcribe analyzable DOWNLOADED calls (OpenAI gpt-4o-transcribe)
 	uv run python -m AtamuraOKK.transcription run
 
+# --- Phase 3 scoring ---
+seed-rubric: ## Load the active QA rubric into the DB
+	uv run python -m AtamuraOKK.scoring seed
+
+score: ## Score analyzable TRANSCRIBED calls (LLM, conversational rubric)
+	uv run python -m AtamuraOKK.scoring run
+
+# --- Phase 4 dashboard (Metabase) ---
+metabase-up: ## Start the Metabase container
+	docker compose up -d metabase
+
+metabase-bootstrap: ## Provision Metabase admin + Postgres data source (set METABASE_ADMIN_PASSWORD)
+	uv run python metabase/bootstrap.py
+
+# --- Phase 5 reports ---
+report-morning: ## Generate the first-half (morning) report for today
+	uv run python -m AtamuraOKK.reporting generate --half morning --run-pipeline
+
+report-afternoon: ## Generate the second-half (afternoon) report for today
+	uv run python -m AtamuraOKK.reporting generate --half afternoon --run-pipeline
+
+report-schedule: ## Run reports twice daily (lunch=first half, evening=second half)
+	uv run python -m AtamuraOKK.reporting schedule
+
+# --- Phase 5 ops (observability + reliability) ---
+ops-summary: ## Print today's run-summary (add --send for Telegram)
+	uv run python -m AtamuraOKK.ops summary
+
+ops-retry: ## Requeue FAILED calls (under the retry cap) for another attempt
+	uv run python -m AtamuraOKK.ops retry
+
+ops-dead-letter: ## List FAILED calls that exhausted retries
+	uv run python -m AtamuraOKK.ops dead-letter
+
 ingest-run: ## Ingest then download (one full pass)
 	uv run python -m AtamuraOKK.ingestion run
 
