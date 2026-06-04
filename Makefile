@@ -52,6 +52,19 @@ ingest-run: ## Ingest then download (one full pass)
 ingest-schedule: ## Run now, then every N hours (default 3)
 	uv run python -m AtamuraOKK.ingestion schedule
 
+# --- Phase 2/3 transcription + scoring ---
+transcribe: ## Transcribe DOWNLOADED calls (OpenAI ru / Yandex kk) -> TRANSCRIBED
+	uv run python -m AtamuraOKK.transcription
+
+score: ## Score TRANSCRIBED calls (Anthropic, tm_call_v3) -> SCORED
+	uv run python -m AtamuraOKK.scoring
+
+score-meetings: ## Score TRANSCRIBED ОП meetings (Anthropic, okk_meeting_v1) -> SCORED
+	uv run python -m AtamuraOKK.scoring --kind meeting
+
+calibrate-meetings: ## Calibration gate: AI meeting scores vs human OKK xlsx (PASS/REVISE/FAIL)
+	uv run --group calib python -m AtamuraOKK.calibration --xlsx "Чек лист встречи ОП - Январь.xlsx"
+
 # --- Phase 0 transcription spike ---
 spike-fetch: ## Pull recent answered+recorded calls (telephony scope)
 	uv run python -m AtamuraOKK.spike fetch

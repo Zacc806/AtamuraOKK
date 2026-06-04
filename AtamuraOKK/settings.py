@@ -73,10 +73,53 @@ class Settings(BaseSettings):
     # Use path-style addressing (required by MinIO).
     s3_use_path_style: bool = True
 
-    # --- Transcription / scoring providers ---
-    # Russian transcription via OpenAI; Kazakh deferred (no provider yet).
-    openai_api_key: str = ""
+    # --- OpenAI (Russian transcription via gpt-4o-transcribe) ---
+    openai_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("ATAMURAOKK_OPENAI_API_KEY", "OPENAI_API_KEY"),
+    )
     openai_transcribe_model: str = "gpt-4o-transcribe"
+
+    # --- Yandex (SpeechKit STT for Kazakh / shala) ---
+    yandex_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("ATAMURAOKK_YANDEX_API_KEY", "YANDEX_API_KEY"),
+    )
+    yandex_folder_id: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "ATAMURAOKK_YANDEX_FOLDER_ID",
+            "YANDEX_FOLDER_ID",
+        ),
+    )
+    yandex_speechkit_model: str = "general"
+
+    # --- Anthropic (default scorer: Claude Sonnet) ---
+    anthropic_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "ATAMURAOKK_ANTHROPIC_API_KEY",
+            "ANTHROPIC_API_KEY",
+        ),
+    )
+    anthropic_model: str = "claude-sonnet-4-6"
+
+    # --- Scoring (Anthropic Claude Sonnet handles ru + kk in one model) ---
+    score_rubric_version: str = "tm_call_v3"
+    score_script_version: str = ""  # sales-script id for deviation dim; empty = off
+    score_pass_threshold: int = 75
+    score_lang_confidence: float = 0.75
+    score_max_retries: int = 5
+    score_retry_base_delay: float = 1.0
+    score_max_transcript_chars: int = 24000
+    score_min_duration_sec: int = 90
+    short_contact_min_sec: int = 30
+
+    # --- Meeting scoring (Этап 3: ОП-встречи, long transcripts) ---
+    score_meeting_rubric_version: str = "okk_meeting_v1"
+    # Soft per-chunk size cap; long meetings are chunked + map-reduced.
+    score_meeting_chunk_chars: int = 12000
+    score_meeting_overlap_lines: int = 1
 
     # --- Ingestion ---
     # How far back the very first ingestion run reaches when no cursor exists.

@@ -11,6 +11,18 @@ class CallDirection(enum.StrEnum):
     UNKNOWN = "unknown"
 
 
+class CallSource(enum.StrEnum):
+    """Origin of a recording — telephony call vs an ОП face-to-face meeting.
+
+    Lets the scoring worker pick the right scorer/rubric (tm_call_v3 for calls,
+    okk_meeting_v1 for meetings) and the dashboard exclude meetings from
+    call-volume metrics. Default keeps every existing row a telephony call.
+    """
+
+    BITRIX_CALL = "bitrix_call"
+    OP_MEETING = "op_meeting"
+
+
 class CallStatus(enum.StrEnum):
     """Lifecycle status of an analyzable call.
 
