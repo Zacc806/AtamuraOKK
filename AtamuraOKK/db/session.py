@@ -12,12 +12,16 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from AtamuraOKK.db.models import load_all_models
 from AtamuraOKK.settings import settings
 
 
 @lru_cache(maxsize=1)
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
     """Process-wide async session factory."""
+    # Import every model so cross-table FKs (e.g. calls.manager_id) resolve even
+    # when a worker only imports a subset of models directly.
+    load_all_models()
     engine = create_async_engine(str(settings.db_url), echo=settings.db_echo)
     return async_sessionmaker(engine, expire_on_commit=False)
 

@@ -22,6 +22,7 @@ dependencies = [
   "httpx >=0.28.1,<1",
   "boto3 >=1.35.0,<2",
   "apscheduler >=3.10.4,<4",
+  "openai >=1.60.0,<2",
 ]
 
 [dependency-groups]
@@ -138,6 +139,8 @@ line-length = 88
     "S101",    # Use of assert detected
 	"PLC0415", # Import outside toplevel
 ]
+# Intentionally full of Cyrillic (Kazakh) letters for language detection.
+"AtamuraOKK/transcription/language.py" = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "pep257"
