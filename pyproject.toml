@@ -23,6 +23,7 @@ dependencies = [
   "boto3 >=1.35.0,<2",
   "apscheduler >=3.10.4,<4",
   "openai >=1.60.0,<2",
+  "python-docx >=1.1.2,<2",
 ]
 
 [dependency-groups]
@@ -141,6 +142,12 @@ line-length = 88
 ]
 # Intentionally full of Cyrillic (Kazakh) letters for language detection.
 "AtamuraOKK/transcription/language.py" = ["RUF001", "RUF002", "RUF003"]
+# Scoring prompts/rubric/schema are intentionally in Russian.
+"AtamuraOKK/scoring/*" = ["RUF001", "RUF002", "RUF003"]
+# Report narrative/render are intentionally in Russian.
+"AtamuraOKK/reporting/*" = ["RUF001", "RUF002", "RUF003"]
+# Ops scripts print to the operator's console by design.
+"metabase/*" = ["T201"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "pep257"

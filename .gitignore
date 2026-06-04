@@ -143,3 +143,6 @@ cython_debug/
 
 # Phase 0 transcription-spike artifacts (audio, transcripts, refs)
 .spike/
+
+# Generated QA reports
+reports/

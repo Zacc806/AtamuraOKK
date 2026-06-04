@@ -139,6 +139,7 @@ async def transcribe_pending(*, limit: int = 50) -> TranscribeStats:
                     call.error = None
                     stats.transcribed += 1
             except Exception as exc:  # record + continue to next call
+                call.attempts += 1
                 call.status = CallStatus.FAILED
                 call.error = f"transcription: {exc}"
                 stats.failed += 1
