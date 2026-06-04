@@ -120,8 +120,11 @@ class Settings(BaseSettings):
     score_retry_base_delay: float = 1.0
     score_concurrency: int = 4
     transcribe_concurrency: int = 6
-    # Calls shorter than this (seconds) are flagged for human review, not LLM-scored.
-    score_min_duration_sec: int = 60
+    # Minimum duration (seconds) for a full evaluation (ТЗ: raised 60 -> 90).
+    score_min_duration_sec: int = 90
+    # Below this (seconds) a call is a technical non-call (wrong number / transfer
+    # / drop); 30-90s is the "короткий контакт" category — neither is full-scored.
+    short_contact_min_sec: int = 30
     # Hard cap on transcript characters sent to the LLM (cost guard).
     score_max_transcript_chars: int = 24000
 

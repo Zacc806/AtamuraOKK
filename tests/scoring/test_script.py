@@ -47,6 +47,12 @@ def test_prompt_includes_script_only_when_present() -> None:
     assert "script_adherence" not in without
 
 
+def test_prompt_mentions_kazakh_greetings() -> None:
+    """The prompt instructs that Kazakh greetings count as a valid greeting (ТЗ 1.4)."""
+    prompt = build_prompt(RUBRIC, text="x", duration_sec=120, max_chars=100)
+    assert "Сәлеметсіз" in prompt
+
+
 def test_assemble_passes_and_clamps_script_adherence() -> None:
     """Script fields flow into ScoreResult; adherence is clamped to 0-100."""
     llm = LLMScore(

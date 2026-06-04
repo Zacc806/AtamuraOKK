@@ -28,6 +28,8 @@ async def run_score(
             transcripts=TranscriptDAO(session),
             scores=ScoreDAO(session),
             rubric_version=settings.score_rubric_version,
+            min_duration_sec=settings.score_min_duration_sec,
+            short_contact_min_sec=settings.short_contact_min_sec,
         )
         batch = await calls.claim_batch(
             CallStatus.TRANSCRIBED,

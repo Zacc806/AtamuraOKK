@@ -52,12 +52,16 @@ class ScoringService:
         transcripts: TranscriptDAO,
         scores: ScoreDAO,
         rubric_version: str,
+        min_duration_sec: int = 90,
+        short_contact_min_sec: int = 30,
     ) -> None:
         self._scorer = scorer
         self._calls = calls
         self._transcripts = transcripts
         self._scores = scores
         self._rubric_version = rubric_version
+        self._min_duration_sec = min_duration_sec
+        self._short_contact_min_sec = short_contact_min_sec
 
     async def score_call(self, call: Call) -> ScoringOutcome:
         """Score a single call (already TRANSCRIBED) and persist the result."""
@@ -66,6 +70,18 @@ class ScoringService:
             rubric_version=self._rubric_version,
         ):
             return ScoringOutcome(call.id, Outcome.ALREADY_SCORED)
+
+        # Duration gate (ТЗ 1.3): too short to be a real scoreable conversation.
+        if call.duration_sec < self._short_contact_min_sec:
+            await self._calls.mark(
+                call,
+                CallStatus.SKIPPED,
+                error="too_short_technical",
+            )
+            return ScoringOutcome(call.id, Outcome.SKIPPED)
+        if call.duration_sec < self._min_duration_sec:
+            await self._calls.mark(call, CallStatus.SKIPPED, error="short_contact")
+            return ScoringOutcome(call.id, Outcome.SKIPPED)
 
         transcript = await self._transcripts.get_by_call(call.id)
         if transcript is None or len(transcript.full_text.strip()) < _MIN_TEXT_CHARS:
