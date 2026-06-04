@@ -4,10 +4,17 @@ from __future__ import annotations
 
 from AtamuraOKK.scoring.base import CallForScoring, CriterionScore, ScoreResult
 from AtamuraOKK.scoring.chunking import chunk_transcript
-from AtamuraOKK.scoring.meeting import MeetingScorer
+from AtamuraOKK.scoring.meeting import MeetingScorer, _worst_tone
 from AtamuraOKK.scoring.rubric import load_rubric
 
 RUBRIC = load_rubric("okk_meeting_v1")
+
+
+def _long_text(n: int = 60) -> str:
+    """A transcript long enough to force chunking at chunk_chars=200."""
+    return "\n".join(
+        f"[agent] реплика {i} с достаточным объёмом текста" for i in range(n)
+    )
 
 
 def _result(
@@ -135,3 +142,53 @@ async def test_long_meeting_merges_max_per_criterion_and_kev_bonus() -> None:
     assert out.score_pct == 22.0
     assert "начало" in out.summary
     assert "конец" in out.summary
+
+
+async def test_objection_block_merges_by_min_not_max() -> None:
+    """A no-objection chunk must not mask bad objection handling elsewhere.
+
+    Objection criteria (12-15) are in min_merge_blocks, so the worst chunk wins
+    — otherwise the per-chunk 'full marks if no objection' rule would leak full
+    marks via MAX and erase the badly-handled objection.
+    """
+    text = _long_text()
+    n = len(chunk_transcript(text, max_chars=200, overlap_lines=1))
+    assert n >= 2
+    # Every chunk reports full objection marks (no objection seen) EXCEPT the
+    # last, where the objection was handled badly (zeros).
+    by_index = [_result({12: 1, 13: 2, 14: 2, 15: 3}) for _ in range(n)]
+    by_index[-1] = _result({12: 0, 13: 0, 14: 0, 15: 0})
+    scorer = MeetingScorer(_FakeScorer(by_index), rubric=RUBRIC, chunk_chars=200)
+
+    out = await scorer.score(
+        CallForScoring(text=text, duration_sec=3600, call_ref="m"),
+    )
+
+    by_crit = {cs.id: cs.score for cs in out.criteria}
+    assert by_crit[12] == 0
+    assert by_crit[13] == 0
+    assert by_crit[15] == 0  # min wins -> bad handling counts, not masked
+
+
+async def test_soft_skill_block_merges_by_min() -> None:
+    """Whole-meeting soft skills take the worst chunk, not the best."""
+    text = _long_text()
+    n = len(chunk_transcript(text, max_chars=200, overlap_lines=1))
+    by_index = [_result({19: 2, 20: 2}) for _ in range(n)]
+    by_index[-1] = _result({19: 0, 20: 0})  # rude/sloppy in one chunk
+    scorer = MeetingScorer(_FakeScorer(by_index), rubric=RUBRIC, chunk_chars=200)
+
+    out = await scorer.score(
+        CallForScoring(text=text, duration_sec=3600, call_ref="m"),
+    )
+
+    by_crit = {cs.id: cs.score for cs in out.criteria}
+    assert by_crit[19] == 0
+    assert by_crit[20] == 0
+
+
+def test_worst_tone_ignores_off_schema_labels() -> None:
+    """Unknown tone labels are ignored, not ranked as neutral."""
+    assert _worst_tone(["вежливый", "polite"]) == "вежливый"
+    assert _worst_tone(["вежливый", "грубый"]) == "грубый"
+    assert _worst_tone(["мусор"]) == "нейтральный"

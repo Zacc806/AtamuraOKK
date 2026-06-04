@@ -4,6 +4,7 @@
   "source": "Атамура Групп — Чек-лист встречи ОП (Январь 2026), отдел ОКК",
   "context": "op_meeting",
   "objection_block": "Возражения",
+  "min_merge_blocks": ["Возражения", "Софт скилы"],
   "max_total_score": 50,
   "criteria": [
     {

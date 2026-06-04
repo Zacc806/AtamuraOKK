@@ -92,9 +92,15 @@ def compare(
         )
 
     human_pct = [(h.raw_total or 0) / max_total * 100 for h, _ in matched]
-    ai_pct = [a.score_pct for _, a in matched]
+    # Calibrate on the bonus-free base score: the human xlsx carries no КЭВ
+    # bonus, so comparing it against the +10-inflated score_pct/passed would be a
+    # guaranteed scale mismatch. base_score_pct is stored in meta by both scoring
+    # paths; fall back to score_pct for results that predate it.
+    ai_pct = [
+        float(a.meta.get("base_score_pct", a.score_pct)) for _, a in matched
+    ]
     human_pass = [p >= pass_threshold for p in human_pct]
-    ai_pass = [a.passed for _, a in matched]
+    ai_pass = [p >= pass_threshold for p in ai_pct]
 
     criterion_ids = sorted(
         {cid for h, _ in matched for cid in h.per_criterion},

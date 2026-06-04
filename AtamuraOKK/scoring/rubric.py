@@ -9,7 +9,7 @@ relocated, typed, and validated.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +47,12 @@ class Rubric:
     raw: dict[str, Any]  # the original JSON, for the rubric_versions snapshot
     # Name of the conditional "objections" block (full marks if none arose).
     objection_block: str | None = None
+    # Block names whose criteria describe the WHOLE conversation (soft skills) or
+    # are conditional (objections). When a long transcript is chunked, these are
+    # merged across chunks by MIN (worst chunk wins) instead of MAX, so a clean
+    # chunk cannot mask bad behaviour seen in another. Stage-bound criteria
+    # (greeting, closing) stay MAX — they legitimately appear in one chunk only.
+    min_merge_blocks: list[str] = field(default_factory=list)
 
     @property
     def ai_criteria(self) -> list[Criterion]:
@@ -100,6 +106,7 @@ def _parse(data: dict[str, Any]) -> Rubric:
         red_flags=[str(f) for f in data.get("red_flags", [])],
         raw=data,
         objection_block=data.get("objection_block"),
+        min_merge_blocks=[str(b) for b in data.get("min_merge_blocks", [])],
     )
     _validate(rubric)
     return rubric

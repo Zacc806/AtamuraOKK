@@ -69,8 +69,10 @@ async def ai_scores_by_deal(
     """Map CRM deal id -> AI ScoreResult for one rubric version.
 
     Joins ``scores`` to ``calls`` and uses ``calls.crm_entity_id`` as the deal
-    id (the same key the human xlsx is grouped by). Rows without a CRM entity id
-    are skipped; on duplicates the most recent score wins.
+    id (the same key the human xlsx is grouped by). Only deal-anchored calls are
+    matched — the id is only a deal id when ``crm_entity_type == 'DEAL'`` (a
+    CONTACT/LEAD/COMPANY id lives in a different id space and would mis-join).
+    On duplicate deals the most recent score wins (``created_at`` ascending).
     """
     rows = (
         await session.execute(
@@ -78,6 +80,7 @@ async def ai_scores_by_deal(
             .join(Call, Score.call_id == Call.id)
             .where(
                 Score.rubric_version == rubric_version,
+                Call.crm_entity_type == "DEAL",
                 Call.crm_entity_id.is_not(None),
             )
             .order_by(Score.created_at.asc()),

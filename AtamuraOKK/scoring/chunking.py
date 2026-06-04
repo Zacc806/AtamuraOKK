@@ -43,6 +43,12 @@ def chunk_transcript(
             current = current[-overlap_lines:] if overlap_lines > 0 else []
             cur_len = len("\n".join(current))
             piece = len(line) + (1 if current else 0)
+            # Drop the overlap seed if it would itself push past the cap, so the
+            # documented `<= max_chars` guarantee holds (bar one oversized line).
+            if current and cur_len + piece > max_chars:
+                current = []
+                cur_len = 0
+                piece = len(line)
         current.append(line)
         cur_len += piece
 

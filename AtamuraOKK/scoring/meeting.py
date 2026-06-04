@@ -4,8 +4,11 @@ Short meetings are scored in a single pass (delegated to the wrapped per-chunk
 :class:`Scorer`). Long ones are chunked (:mod:`AtamuraOKK.scoring.chunking`),
 each chunk scored independently, and the chunk results merged:
 
-* per criterion -> the **max** score across chunks (a criterion satisfied in any
-  meeting phase counts — best evidence wins);
+* per criterion -> **max** across chunks for stage-bound criteria (greeting,
+  closing — they appear in one phase, best evidence wins), but **min** for
+  ``rubric.min_merge_blocks`` (objections + soft skills): a clean chunk must not
+  mask bad behaviour seen elsewhere, and the "full marks if no objection arose"
+  rule applied per chunk would otherwise leak full objection marks;
 * ``client_agreed_meeting`` -> any chunk; ``red_flags`` / ``script_deviations``
   -> de-duplicated union; ``script_adherence`` -> mean of present values;
   ``manager_tone`` -> the most negative observed (conservative for the KPI).
@@ -39,10 +42,11 @@ def _dedup(items: list[str]) -> list[str]:
 
 
 def _worst_tone(tones: list[str]) -> str:
-    """Pick the most negative tone label (unknown labels rank as neutral)."""
-    if not tones:
+    """Pick the most negative known tone label; off-schema labels are ignored."""
+    known = [t for t in tones if t in _TONE_SEVERITY]
+    if not known:
         return "нейтральный"
-    return max(tones, key=lambda t: _TONE_SEVERITY.get(t, 1))
+    return max(known, key=lambda t: _TONE_SEVERITY[t])
 
 
 class MeetingScorer:
@@ -64,14 +68,18 @@ class MeetingScorer:
         self.pass_threshold = pass_threshold
         self.overlap_lines = overlap_lines
         self.kev_bonus_points = kev_bonus_points
+        self._min_merge_blocks = frozenset(rubric.min_merge_blocks)
 
     async def score(self, call: CallForScoring) -> ScoreResult:
         """Score the meeting; single pass when it fits, else chunk + merge."""
-        if len(clean_transcript(call.text)) <= self.chunk_chars:
+        # Clean once and gate + chunk on the SAME text so the size decision and
+        # the splitter never disagree (cleanup only shrinks, never grows).
+        cleaned = clean_transcript(call.text)
+        if len(cleaned) <= self.chunk_chars:
             return await self.base.score(call)
 
         chunks = chunk_transcript(
-            call.text,
+            cleaned,
             max_chars=self.chunk_chars,
             overlap_lines=self.overlap_lines,
         )
@@ -89,13 +97,17 @@ class MeetingScorer:
         return self._merge(list(results), call)
 
     def _merge(self, results: list[ScoreResult], call: CallForScoring) -> ScoreResult:
-        best: dict[int, CriterionScore] = {}
+        seen: dict[int, list[CriterionScore]] = {}
         for res in results:
             for cs in res.criteria:
-                cur = best.get(cs.id)
-                if cur is None or cs.score > cur.score:
-                    best[cs.id] = cs
-        criteria = [best[c.id] for c in self.rubric.criteria if c.id in best]
+                seen.setdefault(cs.id, []).append(cs)
+        chosen: dict[int, CriterionScore] = {}
+        for cid, scores in seen.items():
+            # MIN for whole-meeting / conditional blocks (worst chunk wins),
+            # MAX otherwise (a stage-bound criterion appears in one chunk only).
+            pick = min if scores[0].block in self._min_merge_blocks else max
+            chosen[cid] = pick(scores, key=lambda c: c.score)
+        criteria = [chosen[c.id] for c in self.rubric.criteria if c.id in chosen]
 
         total = sum(cs.score for cs in criteria)
         base_pct = round(total / self.rubric.max_total_score * 100, 1)

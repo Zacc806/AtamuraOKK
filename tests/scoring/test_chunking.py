@@ -44,6 +44,18 @@ def test_overlap_repeats_boundary_line() -> None:
     assert chunks[1].splitlines()[0] == chunks[0].splitlines()[-1]
 
 
+def test_overlap_never_exceeds_cap() -> None:
+    """No chunk exceeds the cap even with overlap (overlap dropped if it would)."""
+    lines = ["x" * 44 for _ in range(8)]  # each line < cap, but line+overlap > cap
+    text = "\n".join(lines)
+
+    chunks = chunk_transcript(text, max_chars=60, overlap_lines=1)
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= 60
+
+
 def test_invalid_max_chars_raises() -> None:
     """A non-positive cap is rejected."""
     with pytest.raises(ValueError, match="max_chars"):
