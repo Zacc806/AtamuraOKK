@@ -32,6 +32,22 @@ down: ## Stop docker compose stack
 migrate: ## Apply DB migrations
 	uv run alembic upgrade head
 
+# --- Phase 1 ingestion ---
+ingest: ## One incremental pull (Bitrix -> Postgres)
+	uv run python -m AtamuraOKK.ingestion ingest
+
+ingest-download: ## Download analyzable recordings -> object storage
+	uv run python -m AtamuraOKK.ingestion download
+
+ingest-requalify: ## Re-check pending first-calls; promote newly-qualified
+	uv run python -m AtamuraOKK.ingestion requalify
+
+ingest-run: ## Ingest then download (one full pass)
+	uv run python -m AtamuraOKK.ingestion run
+
+ingest-schedule: ## Run now, then every N hours (default 3)
+	uv run python -m AtamuraOKK.ingestion schedule
+
 # --- Phase 0 transcription spike ---
 spike-fetch: ## Pull recent answered+recorded calls (telephony scope)
 	uv run python -m AtamuraOKK.spike fetch

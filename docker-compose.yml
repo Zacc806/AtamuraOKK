@@ -32,7 +32,10 @@ services:
     image: postgres:18.3-trixie
     hostname: AtamuraOKK-db
     ports:
-      - "5432:5432"
+      # Host 5433 to avoid clashing with other local Postgres instances; the
+      # container still listens on 5432 internally. Host tools (alembic, app)
+      # use ATAMURAOKK_DB_PORT=5433 (see .env).
+      - "5433:5432"
     environment:
       POSTGRES_PASSWORD: "AtamuraOKK"
       POSTGRES_USER: "AtamuraOKK"
@@ -54,8 +57,29 @@ services:
       db:
         condition: service_healthy
 
+  # S3-compatible object storage for call recordings.
+  minio:
+    image: minio/minio:latest
+    hostname: AtamuraOKK-minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"  # S3 API
+      - "9001:9001"  # web console
+    environment:
+      MINIO_ROOT_USER: "${ATAMURAOKK_S3_ACCESS_KEY:-minioadmin}"
+      MINIO_ROOT_PASSWORD: "${ATAMURAOKK_S3_SECRET_KEY:-minioadmin}"
+    volumes:
+      - AtamuraOKK-minio-data:/data
+    restart: always
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
 
 volumes:
   AtamuraOKK-db-data:
     name: AtamuraOKK-db-data
+  AtamuraOKK-minio-data:
+    name: AtamuraOKK-minio-data

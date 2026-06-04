@@ -64,6 +64,41 @@ class Settings(BaseSettings):
     bitrix_max_retries: int = 5
     bitrix_retry_base_delay: float = 1.0
 
+    # --- Object storage (S3-compatible: MinIO in dev) ---
+    s3_endpoint_url: str = "http://localhost:9000"
+    s3_region: str = "us-east-1"
+    s3_access_key: str = "minioadmin"
+    s3_secret_key: str = "minioadmin"  # noqa: S105
+    s3_bucket: str = "call-recordings"
+    # Use path-style addressing (required by MinIO).
+    s3_use_path_style: bool = True
+
+    # --- Transcription / scoring providers ---
+    # Russian transcription via OpenAI; Kazakh deferred (no provider yet).
+    openai_api_key: str = ""
+    openai_transcribe_model: str = "gpt-4o-transcribe"
+
+    # --- Ingestion ---
+    # How far back the very first ingestion run reaches when no cursor exists.
+    ingest_initial_days_back: int = 7
+    # Overlap re-scanned each run so calls near the cursor boundary aren't missed
+    # (idempotent upsert on bitrix_call_id makes the overlap harmless).
+    ingest_overlap_minutes: int = 10
+    # A call must be answered (CALL_FAILED_CODE) and at least this long to qualify.
+    ingest_success_code: str = "200"
+    ingest_min_duration_sec: int = 15
+
+    # --- Analysis-scope filter (first call AND qualified) ---
+    # A call is analyzable only if its client is "qualified": a deal of theirs
+    # ever entered the Kanban column below (resolved via deal stage history).
+    ingest_require_qualified: bool = True
+    # The Kanban column / deal-stage name that marks qualification. Stage IDs are
+    # auto-discovered from this name across all deal pipelines.
+    qualified_stage_name: str = "Лид квалифицирован"
+    # Optional explicit override of the qualified deal STATUS_IDs (skips discovery),
+    # e.g. ["PREPARATION", "C24:PREPAYMENT_INVOIC"].
+    qualified_deal_stage_ids: list[str] = Field(default_factory=list)
+
     # --- Phase 0 spike ---
     # Where the transcription-eval spike writes calls metadata, audio, and
     # transcripts. Repo-local + gitignored; persistent across runs (unlike TMPDIR).
