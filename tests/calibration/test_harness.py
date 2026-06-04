@@ -42,6 +42,31 @@ def _ai(pct: float, *, passed: bool, crit1: int) -> ScoreResult:
     )
 
 
+def _ai_with_base(pct: float, *, base: float, passed: bool, crit1: int) -> ScoreResult:
+    """An AI result whose score_pct is КЭВ-inflated above its bonus-free base."""
+    result = _ai(pct, passed=passed, crit1=crit1)
+    result.meta = {"base_score_pct": base}
+    return result
+
+
+def test_calibration_uses_bonus_free_base_score() -> None:
+    """The gate compares the bonus-free base, not the +10-inflated score_pct.
+
+    Human pct = 80/90/40. Base AI = 82/88/42 (aligned -> PASS). The inflated
+    score_pct 92/98/42 would push total MAE past 7.0 -> not PASS; asserting PASS
+    proves base_score_pct is what the harness compares.
+    """
+    human = [_human(1, 40, 1), _human(2, 45, 1), _human(3, 20, 0)]
+    ai = {
+        1: _ai_with_base(92, base=82, passed=True, crit1=1),
+        2: _ai_with_base(98, base=88, passed=True, crit1=1),
+        3: _ai_with_base(42, base=42, passed=False, crit1=0),
+    }
+    report = compare(human, ai, max_total=MAX_TOTAL, pass_threshold=THRESHOLD)
+    assert report.total_mae < 7.0
+    assert report.verdict == "PASS"
+
+
 def test_strong_agreement_passes() -> None:
     """Close totals and identical pass/fail decisions yield a PASS verdict."""
     human = [_human(1, 40, 1), _human(2, 45, 1), _human(3, 20, 0)]

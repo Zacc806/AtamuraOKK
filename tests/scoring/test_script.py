@@ -47,10 +47,13 @@ def test_prompt_includes_script_only_when_present() -> None:
     assert "script_adherence" not in without
 
 
-def test_prompt_includes_call_type_classification() -> None:
-    """The prompt asks the model to classify the call type (ТЗ 1.1)."""
+def test_prompt_includes_type_classification() -> None:
+    """The prompt asks the model to classify the type (ТЗ 1.1).
+
+    RUBRIC is okk_meeting_v1, so the meeting framing ("ТИП ВСТРЕЧИ") applies.
+    """
     prompt = build_prompt(RUBRIC, text="x", duration_sec=120, max_chars=100)
-    assert "ТИП ЗВОНКА" in prompt
+    assert "ТИП ВСТРЕЧИ" in prompt
     assert "call_type" in prompt
 
 

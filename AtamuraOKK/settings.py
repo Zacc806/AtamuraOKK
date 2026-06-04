@@ -115,6 +115,12 @@ class Settings(BaseSettings):
     score_min_duration_sec: int = 90
     short_contact_min_sec: int = 30
 
+    # --- Meeting scoring (Этап 3: ОП-встречи, long transcripts) ---
+    score_meeting_rubric_version: str = "okk_meeting_v1"
+    # Soft per-chunk size cap; long meetings are chunked + map-reduced.
+    score_meeting_chunk_chars: int = 12000
+    score_meeting_overlap_lines: int = 1
+
     # --- Ingestion ---
     # How far back the very first ingestion run reaches when no cursor exists.
     ingest_initial_days_back: int = 7

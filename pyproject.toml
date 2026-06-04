@@ -146,6 +146,7 @@ line-length = 88
 "tests/*" = [
     "S101",    # Use of assert detected
 	"PLC0415", # Import outside toplevel
+	"SLF001",  # Tests may inspect private members to assert wiring
 ]
 
 [tool.ruff.lint.pydocstyle]
