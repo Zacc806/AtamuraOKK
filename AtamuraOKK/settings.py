@@ -121,6 +121,19 @@ class Settings(BaseSettings):
     score_meeting_chunk_chars: int = 12000
     score_meeting_overlap_lines: int = 1
 
+    # --- Manipulation detector (ТЗ 2.1) ---
+    # Off until the ЖК knowledge base (scoring/zhk/*.json) is populated.
+    manipulation_check_enabled: bool = False
+    # Telegram admin alert for detected manipulations (optional; logs either way).
+    telegram_bot_token: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "ATAMURAOKK_TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_BOT_TOKEN",
+        ),
+    )
+    telegram_alert_chat_id: str = ""
+
     # --- Ingestion ---
     # How far back the very first ingestion run reaches when no cursor exists.
     ingest_initial_days_back: int = 7

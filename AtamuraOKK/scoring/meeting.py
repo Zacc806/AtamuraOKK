@@ -28,6 +28,8 @@ from AtamuraOKK.transcription.cleanup import clean_transcript
 
 # Most-negative-wins ordering for merging per-chunk tone labels.
 _TONE_SEVERITY = {"вежливый": 0, "нейтральный": 1, "неуверенный": 2, "грубый": 3}
+# Most-intense-wins ordering for merging per-chunk client-emotion labels (ТЗ 2.2).
+_EMOTION_SEVERITY = {"спокоен": 0, "спешит": 1, "эмоционален": 2, "раздражён": 3}
 
 
 def _dedup(items: list[str]) -> list[str]:
@@ -47,6 +49,14 @@ def _worst_tone(tones: list[str]) -> str:
     if not known:
         return "нейтральный"
     return max(known, key=lambda t: _TONE_SEVERITY[t])
+
+
+def _peak_emotion(emotions: list[str]) -> str:
+    """Pick the most intense known client emotion across chunks (surface issues)."""
+    known = [e for e in emotions if e in _EMOTION_SEVERITY]
+    if not known:
+        return "спокоен"
+    return max(known, key=lambda e: _EMOTION_SEVERITY[e])
 
 
 class MeetingScorer:
@@ -127,6 +137,9 @@ class MeetingScorer:
         )
 
         meta: dict[str, object] = {"n_chunks": len(results), "base_score_pct": base_pct}
+        meta["client_emotion"] = _peak_emotion(
+            [str(r.meta.get("client_emotion", "")) for r in results],
+        )
         if kev_bonus:
             meta["kev_bonus"] = kev_bonus
 

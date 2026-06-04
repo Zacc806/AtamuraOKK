@@ -1,0 +1,10 @@
+{
+  "name": "Аура",
+  "aliases": ["Aura", "ЖК Аура"],
+  "floors": 6,
+  "has_elevator": false,
+  "finishing": "черновая",
+  "handover": "4 кв. 2026",
+  "banks": ["Halyk Bank", "Otbasy Bank"],
+  "notes": "Пример-шаблон (имя файла с '_' = не грузится в проде). Скопируй в <zhk>.json и заполни реальными фактами."
+}

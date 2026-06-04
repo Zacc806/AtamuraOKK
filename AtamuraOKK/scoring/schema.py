@@ -22,6 +22,8 @@ class LLMScore(BaseModel):
     call_type: str = "первичный"
     client_agreed_meeting: bool = False
     manager_tone: str = "нейтральный"
+    # Client emotional state (ТЗ 2.2): спокоен | спешит | раздражён | эмоционален.
+    client_emotion: str = "спокоен"
     red_flags_found: list[str] = Field(default_factory=list)
     summary: str = ""
     # Present only when a sales script was supplied in the prompt.

@@ -13,8 +13,10 @@ from AtamuraOKK.db.models.call import Call
 from AtamuraOKK.db.models.enums import CallStatus
 from AtamuraOKK.db.models.score import Score
 from AtamuraOKK.db.models.transcript import Transcript
+from AtamuraOKK.scoring.alerts import notify_manipulations
 from AtamuraOKK.scoring.base import CallForScoring, Scorer, ScoreResult
 from AtamuraOKK.scoring.errors import ScoringError
+from AtamuraOKK.scoring.manipulation import ManipulationDetector
 
 _MIN_TEXT_CHARS = 100
 
@@ -73,11 +75,13 @@ class ScoringService:
         rubric_version: str,
         min_duration_sec: int = 90,
         short_contact_min_sec: int = 30,
+        manipulation_detector: ManipulationDetector | None = None,
     ) -> None:
         self._scorer = scorer
         self._rubric_version = rubric_version
         self._min_duration_sec = min_duration_sec
         self._short_contact_min_sec = short_contact_min_sec
+        self._manipulation_detector = manipulation_detector
 
     async def score_call(self, session: AsyncSession, call: Call) -> ScoringOutcome:
         """Score one call (already TRANSCRIBED) and persist the result."""
@@ -121,6 +125,30 @@ class ScoringService:
             call.error = str(exc)[:500]
             return ScoringOutcome(call.id, Outcome.FAILED, error=str(exc)[:500])
 
-        session.add(_to_score(result, call_id=call.id))
+        score = _to_score(result, call_id=call.id)
+        await self._check_manipulations(score, call, transcript.full_text)
+        session.add(score)
         call.status = CallStatus.SCORED
         return ScoringOutcome(call.id, Outcome.SCORED, score_pct=result.score_pct)
+
+    async def _check_manipulations(
+        self,
+        score: Score,
+        call: Call,
+        transcript_text: str,
+    ) -> None:
+        """Run the manipulation detector (if any) and attach flags/alert (ТЗ 2.1)."""
+        if self._manipulation_detector is None:
+            return
+        manipulations = await self._manipulation_detector.detect(transcript_text)
+        if not manipulations:
+            return
+        score.flags = [
+            *(score.flags or []),
+            *(f"манипуляция: {m.claim}" for m in manipulations),
+        ]
+        meta = dict(score.meta or {})
+        meta["manipulations"] = [m.to_dict() for m in manipulations]
+        score.meta = meta
+        score.needs_human_review = True
+        notify_manipulations(call.bitrix_call_id, manipulations)

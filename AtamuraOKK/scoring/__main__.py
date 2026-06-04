@@ -18,9 +18,26 @@ from sqlalchemy import select
 from AtamuraOKK.db.models.call import Call
 from AtamuraOKK.db.models.enums import CallSource, CallStatus
 from AtamuraOKK.db.session import session_scope
+from AtamuraOKK.scoring.manipulation import ManipulationDetector
 from AtamuraOKK.scoring.router import build_meeting_scorer, build_scorer
 from AtamuraOKK.scoring.service import Outcome, ScoringService
+from AtamuraOKK.scoring.zhk import load_zhk_facts
 from AtamuraOKK.settings import settings
+
+
+def _build_manipulation_detector() -> ManipulationDetector | None:
+    """Build the ЖК manipulation detector if enabled and the KB is populated."""
+    if not settings.manipulation_check_enabled:
+        return None
+    facts = load_zhk_facts()
+    if not facts:
+        return None
+    return ManipulationDetector(
+        facts,
+        api_key=settings.anthropic_api_key,
+        model=settings.anthropic_model,
+        max_transcript_chars=settings.score_max_transcript_chars,
+    )
 
 
 def _build_service(*, kind: str) -> tuple[ScoringService, CallSource]:
@@ -32,6 +49,7 @@ def _build_service(*, kind: str) -> tuple[ScoringService, CallSource]:
             rubric_version=settings.score_meeting_rubric_version,
             min_duration_sec=0,
             short_contact_min_sec=0,
+            manipulation_detector=_build_manipulation_detector(),
         )
         return service, CallSource.OP_MEETING
     service = ScoringService(
