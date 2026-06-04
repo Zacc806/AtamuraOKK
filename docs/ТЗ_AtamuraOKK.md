@@ -1,5 +1,24 @@
 # Техническое задание — AtamuraOKK
 
+> **ОБНОВЛЕНИЕ ПРОВАЙДЕРОВ (2026-06-04) — приоритет над деталями ниже.**
+> Финальная архитектура по уточнённой спеке:
+> - **Транскрипция (бюджетно):** **faster-whisper** локально для русского (он же детектит язык);
+>   **Yandex SpeechKit** только для казахского / «шала казахского». Реализация:
+>   `transcription/router.py` (`build_transcriber` → `LanguageRoutedTranscriber`),
+>   `transcription/whisper.py` (faster-whisper), `transcription/yandex_speech.py` (SpeechKit).
+> - **Оценка:** **Anthropic Claude Sonnet** по умолчанию (`scoring/anthropic.py`,
+>   `ATAMURAOKK_SCORE_PROVIDER=anthropic`, модель `ATAMURAOKK_ANTHROPIC_MODEL=claude-sonnet-4-6`).
+>   Claude тянет ru+kk одной моделью — отдельный язык-роутер для скоринга не нужен.
+>   Groq/YandexGPT-скореры остаются как альтернатива (`ATAMURAOKK_SCORE_PROVIDER=groq_yandex`).
+> - **Рубрика по умолчанию:** `okk_meeting_v1` (чек-лист из xlsx).
+> - **Ключи для прода:** `ATAMURAOKK_ANTHROPIC_API_KEY`, `ATAMURAOKK_YANDEX_API_KEY`+`_FOLDER_ID`
+>   (SpeechKit), Bitrix-вебхук со scopes. Groq-ключ — только если включить `groq_yandex`.
+> - **Скрипт-отклонение:** ИИ дополнительно сверяет разговор со скриптом продаж (скрипты Pavel
+>   пришлёт) и оценивает отклонение — добавляется в Anthropic-промт/результат отдельным измерением.
+>
+> Разделы ниже, где упомянуты «Groq Whisper» для транскрипции и «Groq/YandexGPT» как основной
+> скоринг — это ранний дизайн (заменён настоящим блоком).
+
 Автоматизация отдела контроля качества (ОКК) Атамура Групп: AI-оценка звонков и встреч на базе Bitrix24
 
 | Параметр | Значение |
