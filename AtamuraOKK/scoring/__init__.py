@@ -7,13 +7,15 @@ from AtamuraOKK.scoring.base import (
     Scorer,
     ScoreResult,
 )
+from AtamuraOKK.scoring.chunking import chunk_transcript
 from AtamuraOKK.scoring.errors import (
     MalformedOutputError,
     ProviderUnavailableError,
     ScoringError,
 )
 from AtamuraOKK.scoring.llm import BaseLLMScorer
-from AtamuraOKK.scoring.router import build_scorer
+from AtamuraOKK.scoring.meeting import MeetingScorer
+from AtamuraOKK.scoring.router import build_meeting_scorer, build_scorer
 from AtamuraOKK.scoring.rubric import Criterion, Rubric, load_rubric
 from AtamuraOKK.scoring.script import Script, load_script
 
@@ -24,13 +26,16 @@ __all__ = [
     "Criterion",
     "CriterionScore",
     "MalformedOutputError",
+    "MeetingScorer",
     "ProviderUnavailableError",
     "Rubric",
     "ScoreResult",
     "Scorer",
     "ScoringError",
     "Script",
+    "build_meeting_scorer",
     "build_scorer",
+    "chunk_transcript",
     "load_rubric",
     "load_script",
 ]
