@@ -23,6 +23,7 @@ def assemble_score(
     provider: str,
     model: str,
     pass_threshold: int,
+    kev_bonus_points: int = 0,
     meta: dict[str, Any] | None = None,
 ) -> ScoreResult:
     """Merge LLM + auto_check scores into a :class:`ScoreResult`.
@@ -70,9 +71,18 @@ def assemble_score(
         )
 
     total = sum(cs.score for cs in criteria)
-    score_pct = round(total / rubric.max_total_score * 100, 1)
+    base_pct = round(total / rubric.max_total_score * 100, 1)
+    # ТЗ 2.3: reward achieving the КЭВ (meeting booked) even via a non-standard
+    # path — +bonus, capped at 100 (the KPI ceiling).
+    kev_bonus = (
+        kev_bonus_points if kev_bonus_points and llm.client_agreed_meeting else 0
+    )
+    score_pct = min(100.0, round(base_pct + kev_bonus, 1))
 
     out_meta: dict[str, Any] = dict(meta or {})
+    out_meta["base_score_pct"] = base_pct
+    if kev_bonus:
+        out_meta["kev_bonus"] = kev_bonus
     if missing:
         out_meta["missing_criteria"] = missing
     if clamped:

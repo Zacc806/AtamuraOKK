@@ -88,6 +88,55 @@ def test_out_of_range_scores_clamped() -> None:
     assert result.meta["clamped_criteria"] == 2
 
 
+def test_kev_bonus_rewards_meeting() -> None:
+    """A booked meeting adds the КЭВ bonus on top of the base score."""
+    llm = LLMScore(scores={"1": 1}, client_agreed_meeting=True)
+    result = assemble_score(
+        llm,
+        rubric=RUBRIC,
+        call=_call(),
+        language="ru",
+        provider="anthropic",
+        model="m",
+        pass_threshold=THRESHOLD,
+        kev_bonus_points=10,
+    )
+    assert result.meta["kev_bonus"] == 10
+    assert result.score_pct == round(result.meta["base_score_pct"] + 10, 1)
+
+
+def test_kev_bonus_capped_at_100() -> None:
+    """The bonus never pushes the score above the 100 KPI ceiling."""
+    llm = LLMScore(scores=_full_scores(RUBRIC), client_agreed_meeting=True)
+    result = assemble_score(
+        llm,
+        rubric=RUBRIC,
+        call=_call(),
+        language="ru",
+        provider="anthropic",
+        model="m",
+        pass_threshold=THRESHOLD,
+        kev_bonus_points=10,
+    )
+    assert result.score_pct == 100.0
+
+
+def test_no_bonus_without_meeting() -> None:
+    """No meeting -> no КЭВ bonus."""
+    llm = LLMScore(scores=_full_scores(RUBRIC), client_agreed_meeting=False)
+    result = assemble_score(
+        llm,
+        rubric=RUBRIC,
+        call=_call(),
+        language="ru",
+        provider="anthropic",
+        model="m",
+        pass_threshold=THRESHOLD,
+        kev_bonus_points=10,
+    )
+    assert "kev_bonus" not in result.meta
+
+
 def test_low_score_does_not_pass() -> None:
     """A near-empty score (only default_full autos) fails the threshold."""
     result = _assemble(LLMScore(scores={}), duration_sec=400)

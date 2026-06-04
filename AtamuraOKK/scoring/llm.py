@@ -38,6 +38,7 @@ class BaseLLMScorer(ABC):
         max_transcript_chars: int = 24000,
         pass_threshold: int = 75,
         script: Script | None = None,
+        kev_bonus_points: int = 10,
     ) -> None:
         self.rubric = rubric
         self.model = model
@@ -46,6 +47,7 @@ class BaseLLMScorer(ABC):
         self.max_transcript_chars = max_transcript_chars
         self.pass_threshold = pass_threshold
         self.script = script
+        self.kev_bonus_points = kev_bonus_points
 
     @abstractmethod
     async def _raw_complete(self, prompt: str) -> str:
@@ -93,6 +95,7 @@ class BaseLLMScorer(ABC):
                 provider=self.provider,
                 model=self.model,
                 pass_threshold=self.pass_threshold,
+                kev_bonus_points=self.kev_bonus_points,
                 meta={
                     "attempts": attempt,
                     "latency_ms": round((time.monotonic() - started) * 1000),
