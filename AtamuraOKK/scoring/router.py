@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from loguru import logger
 
+from AtamuraOKK.scoring.anthropic import AnthropicScorer
 from AtamuraOKK.scoring.base import CallForScoring, Scorer, ScoreResult
 from AtamuraOKK.scoring.errors import ProviderUnavailableError
 from AtamuraOKK.scoring.groq import GroqScorer
@@ -52,11 +53,21 @@ class LanguageRoutedScorer:
         return result
 
 
-def build_scorer(rubric: Rubric | None = None) -> LanguageRoutedScorer:
-    """Wire the Groq + Yandex scorers and the router from settings."""
+def build_scorer(rubric: Rubric | None = None) -> Scorer:
+    """Build the configured default scorer (Anthropic, or Groq/Yandex routed)."""
     from AtamuraOKK.settings import settings  # noqa: PLC0415
 
     rb = rubric or load_rubric(settings.score_rubric_version)
+    if settings.score_provider == "anthropic":
+        return AnthropicScorer(
+            rb,
+            api_key=settings.anthropic_api_key,
+            model=settings.anthropic_model,
+            max_retries=settings.score_max_retries,
+            retry_base_delay=settings.score_retry_base_delay,
+            max_transcript_chars=settings.score_max_transcript_chars,
+            pass_threshold=settings.score_pass_threshold,
+        )
     ru = GroqScorer(
         rb,
         api_key=settings.groq_api_key,

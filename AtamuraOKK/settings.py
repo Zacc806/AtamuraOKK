@@ -92,11 +92,23 @@ class Settings(BaseSettings):
         ),
     )
     yandex_gpt_model: str = "yandexgpt/latest"
-    # Which engine transcribes Kazakh calls: "groq" or "yandex" (decided by WER gate).
-    kazakh_transcriber: str = "groq"
+    # Yandex SpeechKit (STT) model for Kazakh transcription.
+    yandex_speechkit_model: str = "general"
+
+    # --- Anthropic (default production scorer) ---
+    anthropic_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "ATAMURAOKK_ANTHROPIC_API_KEY",
+            "ANTHROPIC_API_KEY",
+        ),
+    )
+    anthropic_model: str = "claude-sonnet-4-6"
 
     # --- Scoring ---
-    score_rubric_version: str = "tm_call_v2"
+    # Default scorer provider: "anthropic" (Claude) | "groq_yandex" (language-routed).
+    score_provider: str = "anthropic"
+    score_rubric_version: str = "okk_meeting_v1"
     score_pass_threshold: int = 75
     # Detected-language probability above which a call is routed to the Russian
     # scorer; below it (or any Kazakh signal) routes to the Kazakh scorer.

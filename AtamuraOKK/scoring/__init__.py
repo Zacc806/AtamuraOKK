@@ -1,5 +1,6 @@
 """Call quality-control scoring subsystem (ported from compliance_checker)."""
 
+from AtamuraOKK.scoring.anthropic import AnthropicScorer
 from AtamuraOKK.scoring.base import (
     CallForScoring,
     CriterionScore,
@@ -18,6 +19,7 @@ from AtamuraOKK.scoring.rubric import Criterion, Rubric, load_rubric
 from AtamuraOKK.scoring.yandex import YandexScorer
 
 __all__ = [
+    "AnthropicScorer",
     "BaseLLMScorer",
     "CallForScoring",
     "Criterion",
