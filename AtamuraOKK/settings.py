@@ -115,6 +115,16 @@ class Settings(BaseSettings):
     # Alert when a single run dead-letters at least this many calls.
     alert_failure_threshold: int = 5
 
+    # --- Unified production worker (python -m AtamuraOKK.worker) ---
+    # Full ingestion pass (ingest -> requalify -> download) cadence, in hours.
+    worker_ingest_interval_hours: int = 3
+    # Auto-recovery (requeue FAILED calls) cadence, in hours.
+    worker_retry_interval_hours: int = 1
+    # Run one ingestion pass immediately on startup (don't wait for the interval).
+    worker_run_on_start: bool = True
+    # Send the daily run-summary via the alerter at end-of-day (report_day_end_hour).
+    worker_send_daily_summary: bool = True
+
     # --- Reporting (twice-daily QA reports) ---
     report_timezone: str = "Asia/Qyzylorda"
     # The day splits into two halves at this hour (local report tz).

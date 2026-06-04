@@ -1,4 +1,5 @@
 .PHONY: help install install-spike lint fmt typecheck test up down migrate \
+        worker worker-up worker-logs \
         spike-fetch spike-download spike-transcribe spike-wer
 
 help: ## Show this help
@@ -69,6 +70,16 @@ report-afternoon: ## Generate the second-half (afternoon) report for today
 
 report-schedule: ## Run reports twice daily (lunch=first half, evening=second half)
 	uv run python -m AtamuraOKK.reporting schedule
+
+# --- Phase 5 production worker (always-on scheduler) ---
+worker: ## Run the unified always-on worker (ingest/transcribe/score/report/retry)
+	uv run python -m AtamuraOKK.worker
+
+worker-up: ## Start the worker as a background container (docker compose)
+	docker compose up -d worker
+
+worker-logs: ## Tail the worker container logs
+	docker compose logs -f worker
 
 # --- Phase 5 ops (observability + reliability) ---
 ops-summary: ## Print today's run-summary (add --send for Telegram)

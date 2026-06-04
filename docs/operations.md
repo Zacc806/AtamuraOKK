@@ -39,11 +39,13 @@ Telegram when configured, otherwise logged. Set `telegram_bot_token` +
 `telegram_chat_id`. `ops retry` alerts when ≥ `alert_failure_threshold` calls hit
 dead-letter; `ops summary --send` pushes the daily summary.
 
-## Suggested cron (production)
+## Production: use the worker, not cron
+In production the **always-on worker** (`python -m AtamuraOKK.worker`) already runs
+auto-recovery hourly and the daily summary at end-of-day — no external cron needed.
+See [deployment.md](deployment.md). The `make ops-*` commands above are for ad-hoc
+manual use. If you deploy without the worker, the equivalent cron is:
 ```cron
-# hourly auto-recovery
 0 * * * *   cd /path/AtamuraOKK && make ops-retry        >> reports/ops.log 2>&1
-# daily summary to Telegram (19:30 local)
 30 19 * * * cd /path/AtamuraOKK && uv run python -m AtamuraOKK.ops summary --send
 ```
 

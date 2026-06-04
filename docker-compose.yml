@@ -4,7 +4,7 @@ services:
       context: .
       target: dev
       dockerfile: ./Dockerfile
-    image: AtamuraOKK:${ATAMURAOKK_VERSION:-latest}
+    image: atamuraokk:${ATAMURAOKK_VERSION:-latest}
     restart: always
     ports:
       # Exposes application port.
@@ -42,6 +42,8 @@ services:
       POSTGRES_DB: "AtamuraOKK"
     volumes:
       - AtamuraOKK-db-data:/var/lib/postgresql
+      # Creates the dedicated metabaseappdb database on first volume init.
+      - ./db-init:/docker-entrypoint-initdb.d:ro
     restart: always
     healthcheck:
       test: pg_isready -U AtamuraOKK
@@ -57,6 +59,39 @@ services:
       db:
         condition: service_healthy
 
+  # Always-on pipeline worker: ingestion, transcription, scoring, twice-daily
+  # reports, auto-recovery and the daily summary — all on one schedule.
+  # Standalone (not the api anchor) so it publishes no port and won't clash.
+  worker:
+    build:
+      context: .
+      target: dev
+      dockerfile: ./Dockerfile
+    image: atamuraokk:${ATAMURAOKK_VERSION:-latest}
+    restart: always
+    command: python -m AtamuraOKK.worker
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ATAMURAOKK_DB_HOST: AtamuraOKK-db
+      ATAMURAOKK_DB_PORT: 5432
+      ATAMURAOKK_DB_USER: AtamuraOKK
+      ATAMURAOKK_DB_PASS: AtamuraOKK
+      ATAMURAOKK_DB_BASE: AtamuraOKK
+      # Reach MinIO over the compose network (override any .env host:port).
+      ATAMURAOKK_S3_ENDPOINT_URL: http://AtamuraOKK-minio:9000
+    depends_on:
+      db:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+    volumes:
+      # Persist generated reports (.md/.docx) to the host.
+      - ./reports:/app/src/reports
+
   # BI dashboard over Postgres (per-manager / per-department QA scorecards).
   metabase:
     image: metabase/metabase:latest
@@ -64,12 +99,18 @@ services:
     ports:
       - "3000:3000"
     environment:
-      # Dev: H2 app-db persisted to a volume. For production switch to a Postgres
-      # app-db (MB_DB_TYPE=postgres + MB_DB_* pointing at a dedicated database).
-      MB_DB_FILE: /metabase-data/metabase.db
+      # Metabase's internal app-db (its own metadata: users, dashboards, settings)
+      # lives in a dedicated "metabaseappdb" database on the shared Postgres server.
+      # This is separate from the AtamuraOKK call data Metabase analyzes, which is
+      # added as a data source inside the Metabase UI. The metabaseappdb database is
+      # created by db-init/01-metabase-db.sql on first Postgres volume init.
+      MB_DB_TYPE: postgres
+      MB_DB_DBNAME: metabaseappdb
+      MB_DB_HOST: AtamuraOKK-db
+      MB_DB_PORT: 5432
+      MB_DB_USER: AtamuraOKK
+      MB_DB_PASS: AtamuraOKK
       JAVA_TIMEZONE: Asia/Qyzylorda
-    volumes:
-      - AtamuraOKK-metabase-data:/metabase-data
     depends_on:
       db:
         condition: service_healthy
@@ -101,5 +142,3 @@ volumes:
     name: AtamuraOKK-db-data
   AtamuraOKK-minio-data:
     name: AtamuraOKK-minio-data
-  AtamuraOKK-metabase-data:
-    name: AtamuraOKK-metabase-data
