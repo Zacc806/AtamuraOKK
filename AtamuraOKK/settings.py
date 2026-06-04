@@ -108,7 +108,8 @@ class Settings(BaseSettings):
     # --- Scoring ---
     # Default scorer provider: "anthropic" (Claude) | "groq_yandex" (language-routed).
     score_provider: str = "anthropic"
-    score_rubric_version: str = "okk_meeting_v1"
+    # tm_call_v3 = обновлённый чек-лист звонка (измененные поля, 21 крит, max 100).
+    score_rubric_version: str = "tm_call_v3"
     # Sales-script id for the deviation dimension; empty = script check disabled.
     score_script_version: str = ""
     score_pass_threshold: int = 75

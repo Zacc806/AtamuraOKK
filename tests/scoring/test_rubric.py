@@ -64,6 +64,19 @@ def test_okk_meeting_rubric_loads() -> None:
     assert rubric.blocks["Возражения"] == [12, 13, 14, 15]
 
 
+def test_tm_call_v3_loads() -> None:
+    """The updated call checklist (измененные поля) loads: 21 crit, max 100."""
+    rubric = load_rubric("tm_call_v3")
+    assert rubric.max_total_score == 100
+    assert len(rubric.criteria) == 21
+    assert sum(c.max_score for c in rubric.criteria) == 100
+    # CRM-discipline criteria 19, 20 are auto (not checkable from call audio).
+    auto = rubric.auto_scores(duration_sec=120)
+    assert auto == {19: 2, 20: 5}
+    assert {c.id for c in rubric.ai_criteria}.isdisjoint({19, 20})
+    assert rubric.objection_block == "Отработка возражений"
+
+
 def test_missing_rubric_raises() -> None:
     """Loading an unknown rubric version raises FileNotFoundError."""
     with pytest.raises(FileNotFoundError):
