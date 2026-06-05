@@ -20,7 +20,7 @@ from AtamuraOKK.db.models.score import Score
 from AtamuraOKK.db.models.transcript import Transcript
 from AtamuraOKK.db.session import session_scope
 from AtamuraOKK.scoring.base import CallScore, Scorer
-from AtamuraOKK.scoring.openai_scorer import OpenAIScorer
+from AtamuraOKK.scoring.factory import get_scorer
 from AtamuraOKK.scoring.rubric import Rubric, load_rubric
 
 
@@ -93,7 +93,6 @@ async def _score_one(
     transcript: Transcript,
     scorer: Scorer,
     rubric: Rubric,
-    model: str,
 ) -> None:
     result = await scorer.score(
         transcript=transcript.full_text,
@@ -113,7 +112,7 @@ async def _score_one(
             },
             summary=result.summary,
             flags=result.red_flags,
-            model=f"openai/{model}",
+            model=scorer.model_label,
         ),
     )
     call.status = CallStatus.SCORED
@@ -130,7 +129,7 @@ async def score_pending(*, limit: int = 50) -> ScoreStats:
     """Score analyzable TRANSCRIBED calls against the active rubric."""
     stats = ScoreStats()
     rubric = load_rubric()
-    scorer = OpenAIScorer()
+    scorer = get_scorer()
 
     async with session_scope() as session:
         rows = (
@@ -149,14 +148,7 @@ async def score_pending(*, limit: int = 50) -> ScoreStats:
         for call, transcript in rows:
             stats.attempted += 1
             try:
-                await _score_one(
-                    session,
-                    call,
-                    transcript,
-                    scorer,
-                    rubric,
-                    scorer.model,
-                )
+                await _score_one(session, call, transcript, scorer, rubric)
                 stats.scored += 1
             except Exception as exc:  # record + continue to next call
                 call.attempts += 1
@@ -168,6 +160,8 @@ async def score_pending(*, limit: int = 50) -> ScoreStats:
                     id=call.bitrix_call_id,
                     e=exc,
                 )
+            # Commit per call: durable progress, no re-spend on a later failure.
+            await session.commit()
 
     logger.info(
         "Scoring done: attempted={a} scored={s} failed={f}",

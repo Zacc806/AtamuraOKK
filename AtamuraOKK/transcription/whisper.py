@@ -7,6 +7,8 @@ runs on a serverless GPU. ``faster-whisper`` is an optional dependency
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,6 +35,8 @@ class FasterWhisperTranscriber:
         self.device = device or settings.whisper_device
         self.compute_type = compute_type or settings.whisper_compute_type
         self._model: WhisperModel | None = None
+        # Guards the one-time model build against concurrent transcribe threads.
+        self._load_lock = threading.Lock()
 
     def _build(self, *, local_files_only: bool) -> WhisperModel:
         from faster_whisper import WhisperModel  # noqa: PLC0415
@@ -41,16 +45,29 @@ class FasterWhisperTranscriber:
             self.model_name,
             device=self.device,
             compute_type=self.compute_type,
+            # Inter-op workers let one model serve concurrent transcribe() calls.
+            num_workers=settings.whisper_num_workers,
+            cpu_threads=settings.whisper_cpu_threads,
             local_files_only=local_files_only,
         )
 
+    def load(self) -> None:
+        """Eagerly load the model (call once before fanning out concurrent work)."""
+        self._load()
+
     def _load(self) -> WhisperModel:
-        if self._model is None:
+        if self._model is not None:
+            return self._model
+        with self._load_lock:
+            if self._model is not None:  # another thread won the race
+                return self._model
             logger.info(
-                "Loading faster-whisper {model} (device={dev}, compute={ct})...",
+                "Loading faster-whisper {model} (device={dev}, compute={ct}, "
+                "workers={w})...",
                 model=self.model_name,
                 dev=self.device,
                 ct=self.compute_type,
+                w=settings.whisper_num_workers,
             )
             # Prefer the local cache: avoids a per-run HF Hub round-trip that, on a
             # slow connection, makes load look "stuck". Fall back to downloading
@@ -62,6 +79,25 @@ class FasterWhisperTranscriber:
                 self._model = self._build(local_files_only=False)
             logger.info("Model ready.")
         return self._model
+
+    async def transcribe_async(
+        self,
+        audio_path: Path,
+        *,
+        language: str | None = None,
+        speaker: str = "unknown",
+    ) -> TranscriptResult:
+        """Async wrapper: run the CPU-bound decode off the event loop.
+
+        Matches the interface the transcription worker calls, so faster-whisper
+        and the OpenAI provider are interchangeable.
+        """
+        return await asyncio.to_thread(
+            self.transcribe,
+            audio_path,
+            language=language,
+            speaker=speaker,
+        )
 
     def transcribe(
         self,

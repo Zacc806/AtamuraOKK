@@ -61,6 +61,9 @@ metabase-up: ## Start the Metabase container
 metabase-bootstrap: ## Provision Metabase admin + Postgres data source (set METABASE_ADMIN_PASSWORD)
 	uv run python metabase/bootstrap.py
 
+metabase-dashboards: ## Build the QA questions + 5 dashboards via API (set METABASE_ADMIN_PASSWORD)
+	uv run python metabase/provision_dashboards.py
+
 # --- Phase 5 reports ---
 report-morning: ## Generate the first-half (morning) report for today
 	uv run python -m AtamuraOKK.reporting generate --half morning --run-pipeline

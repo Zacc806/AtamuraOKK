@@ -56,3 +56,22 @@ class Transcriber(Protocol):
         :param speaker: label applied to every segment of this channel.
         """
         ...
+
+
+@runtime_checkable
+class AsyncTranscriber(Protocol):
+    """A transcriber the worker can await, regardless of engine.
+
+    Both providers satisfy this: the OpenAI provider is natively async; the
+    faster-whisper provider wraps its CPU-bound decode in a thread.
+    """
+
+    async def transcribe_async(
+        self,
+        audio_path: Path,
+        *,
+        language: str | None = None,
+        speaker: str = "unknown",
+    ) -> TranscriptResult:
+        """Transcribe one mono file/channel; see :meth:`Transcriber.transcribe`."""
+        ...

@@ -74,11 +74,23 @@ class Settings(BaseSettings):
     s3_use_path_style: bool = True
 
     # --- Transcription / scoring providers ---
-    # Russian transcription via OpenAI; Kazakh deferred (no provider yet).
+    # Which STT engine the transcription worker uses: "whisper" (local
+    # faster-whisper, no API quota — the default) or "openai" (gpt-4o-transcribe).
+    transcribe_provider: str = "whisper"
+    # How many calls to transcribe concurrently. On a 10-core CPU, 2 concurrent
+    # whisper decodes (~4 CTranslate2 threads each) ≈ 8 cores — the sweet spot.
+    transcribe_concurrency: int = 2
     openai_api_key: str = ""
     openai_transcribe_model: str = "gpt-4o-transcribe"
+    # Which LLM scores calls: "anthropic" (Claude, the default) or "openai".
+    scoring_provider: str = "anthropic"
     # Scoring model — needs Structured Outputs support (gpt-4o-2024-08-06+).
     openai_scoring_model: str = "gpt-4o"
+    # Anthropic scoring (ATAMURAOKK_ANTHROPIC_API_KEY). Sonnet balances cost/quality
+    # for ~200 calls/day; structured output via forced tool-use.
+    anthropic_api_key: str = ""
+    anthropic_scoring_model: str = "claude-sonnet-4-6"
+    anthropic_max_tokens: int = 8000
 
     # --- Ingestion ---
     # How far back the very first ingestion run reaches when no cursor exists.
@@ -145,10 +157,16 @@ class Settings(BaseSettings):
     # Where the transcription-eval spike writes calls metadata, audio, and
     # transcripts. Repo-local + gitignored; persistent across runs (unlike TMPDIR).
     spike_dir: Path = PROJECT_ROOT / ".spike"
-    # faster-whisper model + device for the spike.
+    # faster-whisper model + device. Defaults target Apple Silicon / CPU, where
+    # CTranslate2 has no Metal backend and int8 is the fast path. On a CUDA GPU
+    # set ATAMURAOKK_WHISPER_DEVICE=cuda + ATAMURAOKK_WHISPER_COMPUTE_TYPE=float16.
     whisper_model: str = "large-v3"
-    whisper_device: str = "auto"
-    whisper_compute_type: str = "default"
+    whisper_device: str = "cpu"
+    whisper_compute_type: str = "int8"
+    # CTranslate2 inter-op workers: lets one model serve N concurrent transcribe
+    # calls in parallel. Match to transcribe_concurrency. cpu_threads=0 -> auto.
+    whisper_num_workers: int = 2
+    whisper_cpu_threads: int = 0
 
     @property
     def db_url(self) -> URL:

@@ -70,6 +70,11 @@ class CallScore(BaseModel):
 class Scorer(Protocol):
     """Scores a transcript against a rubric into a validated :class:`CallScore`."""
 
+    @property
+    def model_label(self) -> str:
+        """Provider-prefixed model id stored on the score (e.g. ``anthropic/...``)."""
+        ...
+
     async def score(
         self,
         *,

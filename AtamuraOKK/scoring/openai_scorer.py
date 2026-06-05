@@ -33,6 +33,11 @@ class OpenAIScorer:
         self._api_key = api_key or settings.openai_api_key
         self._client: AsyncOpenAI | None = None
 
+    @property
+    def model_label(self) -> str:
+        """Provider-prefixed model id stored on the score."""
+        return f"openai/{self.model}"
+
     def _get_client(self) -> AsyncOpenAI:
         if self._client is None:
             from openai import AsyncOpenAI  # noqa: PLC0415
