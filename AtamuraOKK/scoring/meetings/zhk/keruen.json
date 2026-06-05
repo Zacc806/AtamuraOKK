@@ -1,0 +1,13 @@
+{
+  "name": "Keruen",
+  "aliases": [
+    "Keruen",
+    "Керуен"
+  ],
+  "floors": null,
+  "has_elevator": null,
+  "finishing": "",
+  "handover": "",
+  "banks": [],
+  "notes": "ЗАПОЛНИТЬ: этажность, лифт, отделка, сроки сдачи, банки (данные от Закира/IT)"
+}
