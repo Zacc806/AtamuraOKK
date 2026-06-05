@@ -1,7 +1,7 @@
 """Wire contract for the scoring LLM's JSON output + tolerant parsing.
 
-The JSON shape is provider-independent, so the prompt and validation are
-shared. Ported from the legacy ``compliance_checker`` response format.
+The JSON shape is provider-independent; parsing tolerates markdown fences and
+surrounding prose, so a chatty model can't break the pipeline.
 """
 
 from __future__ import annotations

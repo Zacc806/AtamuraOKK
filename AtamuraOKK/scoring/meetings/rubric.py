@@ -1,9 +1,9 @@
-"""OKK rubric: versioned checklist loaded from ``scoring/rubrics/<version>.json``.
+"""OKK rubric: versioned checklist from ``scoring/meetings/rubrics/<version>.json``.
 
-The rubric is the source of truth for both the LLM prompt and the DB
-``rubric_versions`` snapshot. Ported from the working ``sales_script.json``
-(Чек-лист ОКК Біржана, ТМ) so the scoring contract is unchanged — only
-relocated, typed, and validated.
+The rubric is the single source of truth for the LLM prompt. The production ОП
+rubric is ``okk_meeting_v1`` (20 criteria, max 50), transcribed from the OKK
+"Чек лист встречи ОП" Excel checklist. Other rubric files serve as engine test
+fixtures.
 """
 
 from __future__ import annotations

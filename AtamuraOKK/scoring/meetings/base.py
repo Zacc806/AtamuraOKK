@@ -1,9 +1,9 @@
-"""Provider-agnostic call-scoring interface.
+"""Provider-agnostic meeting-scoring interface + the data the scorer needs.
 
-The pipeline depends only on :class:`Scorer`, so the scoring engine (Anthropic
-Claude Sonnet by default, or any future provider) can be swapped without
-touching ingestion, transcription, or the workers. Mirrors the style of
-:mod:`AtamuraOKK.transcription.base`.
+Consumers depend only on :class:`Scorer`, so the engine (Anthropic Claude Sonnet
+by default, or any future provider) can be swapped in one place. The dataclasses
+here are plain values — no DB or audio coupling — so the scorer is reusable and
+trivially testable.
 """
 
 from __future__ import annotations

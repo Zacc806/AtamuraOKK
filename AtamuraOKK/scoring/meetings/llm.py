@@ -1,8 +1,9 @@
 """Shared LLM-scorer machinery: prompt build, retry loop, parse, assemble.
 
 Concrete providers (:class:`AnthropicScorer`) implement only the transport
-(:meth:`_raw_complete`). The retry/backoff loop mirrors ``BitrixClient.call``
-and the legacy ``compliance_checker.check_one``.
+(:meth:`_raw_complete`); this base owns the deterministic pipeline — build the
+prompt, call the model, retry transient/malformed failures with exponential
+backoff, then assemble the validated result.
 """
 
 from __future__ import annotations

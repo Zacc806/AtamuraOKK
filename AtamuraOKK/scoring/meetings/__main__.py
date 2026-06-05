@@ -44,6 +44,8 @@ def main() -> None:
         if args.file and args.file != "-"
         else sys.stdin.read()
     )
+    if not text.strip():
+        parser.error("empty transcript (pass --file or pipe text via stdin)")
     print(asyncio.run(_score(text, args.duration)))  # noqa: T201
 
 
