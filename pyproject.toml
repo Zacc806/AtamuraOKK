@@ -24,6 +24,7 @@ dependencies = [
   "apscheduler >=3.10.4,<4",
   "openai >=1.60.0,<2",
   "python-docx >=1.1.2,<2",
+  "anthropic >=0.40.0,<1",  # ОП-meeting scoring automation (scoring/meetings)
 ]
 
 [dependency-groups]
@@ -139,6 +140,9 @@ line-length = 88
 "tests/*" = [
     "S101",    # Use of assert detected
 	"PLC0415", # Import outside toplevel
+	"RUF001",  # Ambiguous unicode — RU/KK test fixtures (Cyrillic).
+	"RUF002",  # Ambiguous unicode in docstrings — same.
+	"RUF003",  # Ambiguous unicode in comments — same.
 ]
 # Intentionally full of Cyrillic (Kazakh) letters for language detection.
 "AtamuraOKK/transcription/language.py" = ["RUF001", "RUF002", "RUF003"]
