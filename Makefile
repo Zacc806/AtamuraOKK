@@ -86,15 +86,9 @@ ingest-run: ## Ingest then download (one full pass)
 ingest-schedule: ## Run now, then every N hours (default 3)
 	uv run python -m AtamuraOKK.ingestion schedule
 
-# --- Phase 2/3 scoring ---
-score: ## Score TRANSCRIBED calls (Anthropic, tm_call_v3) -> SCORED
-	uv run python -m AtamuraOKK.scoring
-
+# --- ОП meeting scoring + sale outcomes (our layer; Anthropic Claude) ---
 score-meetings: ## Score TRANSCRIBED ОП meetings (Anthropic, okk_meeting_v1) -> SCORED
-	uv run python -m AtamuraOKK.scoring --kind meeting
-
-calibrate-meetings: ## Calibration gate: AI meeting scores vs human OKK xlsx (PASS/REVISE/FAIL)
-	uv run --group calib python -m AtamuraOKK.calibration --xlsx "Чек лист встречи ОП - Январь.xlsx"
+	uv run python -m AtamuraOKK.scoring.meetings --kind meeting
 
 outcomes: ## Backfill sale outcomes (won/lose) from CRM for scores >=30 days old
 	uv run python -m AtamuraOKK.outcomes

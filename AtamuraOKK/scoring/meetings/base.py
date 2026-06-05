@@ -16,8 +16,7 @@ from typing import Any, Protocol, runtime_checkable
 class CallForScoring:
     """Minimal call data the scorer needs (decoupled from the DB and audio).
 
-    The service layer builds this from a ``calls`` + ``transcripts`` row; the
-    calibration harness builds it from a spike transcript file.
+    The service layer builds this from a ``calls`` + ``transcripts`` row.
     """
 
     text: str  # speaker-tagged transcript ("[agent] ... [customer] ...")

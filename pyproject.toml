@@ -35,10 +35,6 @@ spike = [
   "jiwer >=3.0.0,<4",
   "soundfile >=0.12.1,<1",
 ]
-# Calibration harness deps (parse the human-scored OKK xlsx). Install: uv sync --group calib
-calib = [
-  "openpyxl >=3.1.0,<4",
-]
 dev = [
   "pytest >=9.0.1,<10",
   "ruff >=0.14.6,<1",
