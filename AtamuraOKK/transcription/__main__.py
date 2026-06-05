@@ -9,7 +9,9 @@ import asyncio
 def _cmd_run(args: argparse.Namespace) -> None:
     from AtamuraOKK.transcription.worker import transcribe_pending  # noqa: PLC0415
 
-    asyncio.run(transcribe_pending(limit=args.limit))
+    asyncio.run(
+        transcribe_pending(limit=args.limit, concurrency=args.concurrency),
+    )
 
 
 def main() -> None:
@@ -19,6 +21,12 @@ def main() -> None:
 
     p_run = sub.add_parser("run", help="transcribe analyzable DOWNLOADED calls")
     p_run.add_argument("--limit", type=int, default=50)
+    p_run.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help="calls in parallel (default: settings.transcribe_concurrency)",
+    )
     p_run.set_defaults(func=_cmd_run)
 
     args = parser.parse_args()

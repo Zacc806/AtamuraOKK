@@ -96,6 +96,8 @@ async def download_pending(*, limit: int = 200) -> DownloadStats:
                     n=call.attempts,
                     err=exc,
                 )
+            # Commit per call so progress is durable and visible live.
+            await session.commit()
 
     logger.info(
         "Download done: attempted={a} downloaded={d} failed={f}",

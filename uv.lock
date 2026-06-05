@@ -133,6 +133,7 @@ dependencies = [
     { name = "asyncpg" },
     { name = "boto3" },
     { name = "fastapi" },
+    { name = "faster-whisper" },
     { name = "httptools" },
     { name = "httpx" },
     { name = "loguru" },
@@ -159,7 +160,6 @@ dev = [
     { name = "ruff" },
 ]
 spike = [
-    { name = "faster-whisper" },
     { name = "jiwer" },
     { name = "soundfile" },
 ]
@@ -172,6 +172,7 @@ requires-dist = [
     { name = "asyncpg", specifier = ">=0.31.0,<1" },
     { name = "boto3", specifier = ">=1.35.0,<2" },
     { name = "fastapi", specifier = ">=0.122.0,<1" },
+    { name = "faster-whisper", specifier = ">=1.1.0,<2" },
     { name = "httptools", specifier = ">=0.7.1,<1" },
     { name = "httpx", specifier = ">=0.28.1,<1" },
     { name = "loguru", specifier = ">=0.7.3,<1" },
@@ -198,7 +199,6 @@ dev = [
     { name = "ruff", specifier = ">=0.14.6,<1" },
 ]
 spike = [
-    { name = "faster-whisper", specifier = ">=1.1.0,<2" },
     { name = "jiwer", specifier = ">=3.0.0,<4" },
     { name = "soundfile", specifier = ">=0.12.1,<1" },
 ]

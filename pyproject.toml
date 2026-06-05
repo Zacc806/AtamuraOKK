@@ -23,15 +23,16 @@ dependencies = [
   "boto3 >=1.35.0,<2",
   "apscheduler >=3.10.4,<4",
   "openai >=1.60.0,<2",
+  "anthropic >=0.40.0,<1",
   "python-docx >=1.1.2,<2",
-  "anthropic >=0.40.0,<1",  # ОП-meeting scoring automation (scoring/meetings)
+  # Local STT engine (no API quota); the default transcription provider.
+  "faster-whisper >=1.1.0,<2",
 ]
 
 [dependency-groups]
-# Heavy, optional deps used only by the Phase 0 transcription spike.
+# Heavy, optional deps used only by the Phase 0 WER-eval spike.
 # Install with: uv sync --group spike
 spike = [
-  "faster-whisper >=1.1.0,<2",
   "jiwer >=3.0.0,<4",
   "soundfile >=0.12.1,<1",
 ]
