@@ -44,8 +44,11 @@ ingest-requalify: ## Re-check pending first-calls; promote newly-qualified
 	uv run python -m AtamuraOKK.ingestion requalify
 
 # --- Phase 2 transcription ---
-transcribe: ## Transcribe analyzable DOWNLOADED calls (OpenAI gpt-4o-transcribe)
+transcribe: ## Transcribe analyzable DOWNLOADED calls (local faster-whisper)
 	uv run python -m AtamuraOKK.transcription run
+
+transcribe-progress: ## Show backlog transcription progress (add ARGS=--watch for live)
+	uv run python -m AtamuraOKK.transcription progress $(ARGS)
 
 # --- Phase 3 scoring ---
 seed-rubric: ## Load the active QA rubric into the DB

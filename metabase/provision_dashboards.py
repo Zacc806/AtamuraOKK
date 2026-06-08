@@ -303,12 +303,17 @@ def _template_tags(sql: str) -> dict[str, Any]:
     tags: dict[str, Any] = {}
     for var in dict.fromkeys(re.findall(r"\{\{\s*(\w+)\s*\}\}", sql)):
         is_call_id = var == "call_id"
+        # call_id is intentionally NOT required: the drill-down queries wrap it in an
+        # optional [[AND ...]] clause and fall back to the latest scored call when it
+        # is unset. A required tag with no default makes every card on the drill-down
+        # dashboard error ("pick a value for Call Id") whenever it is opened directly
+        # rather than via a click-through that supplies the id.
         tags[var] = {
             "id": str(uuid.uuid4()),
             "name": var,
             "display-name": var.replace("_", " ").title(),
             "type": "number" if is_call_id else "text",
-            "required": is_call_id,
+            "required": False,
         }
     return tags
 

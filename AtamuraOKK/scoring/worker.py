@@ -39,15 +39,19 @@ def _assemble(result: CallScore, rubric: Rubric) -> dict[str, Any]:
     per_criterion: list[dict[str, Any]] = []
     blocks: dict[str, dict[str, Any]] = {}
     total = 0
+    max_points = 0
 
     for crit in rubric.scored_criteria:
+        # No objection occurred -> the objection block wasn't testable; exclude it
+        # from the score entirely (not in numerator nor denominator) so the percent
+        # reflects only what the call actually exercised.
+        if crit.block_id == "objections" and not result.objections_present:
+            continue
         cs = by_id.get(crit.id)
         score = cs.score if cs else 0
-        # Enforce: full marks for objection criteria when no objection occurred.
-        if crit.block_id == "objections" and not result.objections_present:
-            score = crit.max
         score = max(0, min(int(score), crit.max))
         total += score
+        max_points += crit.max
         per_criterion.append(
             {
                 "id": crit.id,
@@ -67,7 +71,6 @@ def _assemble(result: CallScore, rubric: Rubric) -> dict[str, Any]:
         b["score"] += score
         b["max"] += crit.max
 
-    max_points = rubric.max_conversational
     percent = round(100.0 * total / max_points, 2) if max_points else 0.0
     return {
         "per_criterion": per_criterion,

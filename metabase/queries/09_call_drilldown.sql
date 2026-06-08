@@ -1,6 +1,8 @@
 -- Single-call drill-down header: scores + summary + sentiment + transcript + links.
--- Metabase: native question with a required {{call_id}} parameter; put it on a
--- dashboard that the flagged-queue / scorecard click-throughs filter.
+-- Metabase: native question with an OPTIONAL {{call_id}} parameter. The flagged-
+-- queue / scorecard click-throughs supply call_id; opened directly with no value it
+-- falls back to the most recently scored call so the dashboard is never blank (a
+-- required parameter with no value makes every card error and looks "broken").
 SELECT
     cs.call_id,
     cs.scored_at::date            AS scored_on,
@@ -32,4 +34,7 @@ SELECT
 FROM call_scores_latest cs
 JOIN calls ca       ON ca.id = cs.call_id
 LEFT JOIN transcripts t ON t.call_id = cs.call_id
-WHERE cs.call_id = {{call_id}};
+WHERE 1 = 1
+    [[AND cs.call_id = {{call_id}}]]
+ORDER BY cs.scored_at DESC
+LIMIT 1;

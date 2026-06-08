@@ -82,3 +82,4 @@ All settings live in `AtamuraOKK/settings.py` (`pydantic-settings`). Every env v
 - `AtamuraOKK/spike/` is the Phase-0 transcription/WER evaluation harness; not part of the production path.
 
 There is no README-documented "common tasks" list beyond the above; deeper per-stage docs live in `docs/` (`ingestion.md`, `transcription.md`, `scoring.md`, `dashboard.md`, `reports.md`, `operations.md`, `deployment.md`).
+Use comments sparingly. Only comment complex code.
