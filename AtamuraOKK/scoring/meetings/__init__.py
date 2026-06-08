@@ -12,6 +12,12 @@ from AtamuraOKK.scoring.meetings.base import (
     ScoreResult,
 )
 from AtamuraOKK.scoring.meetings.chunking import chunk_transcript
+from AtamuraOKK.scoring.meetings.disk import (
+    BitrixDisk,
+    MeetingDiskSource,
+    MeetingFile,
+)
+from AtamuraOKK.scoring.meetings.download import download_pending
 from AtamuraOKK.scoring.meetings.errors import (
     MalformedOutputError,
     ProviderUnavailableError,
@@ -19,18 +25,30 @@ from AtamuraOKK.scoring.meetings.errors import (
 )
 from AtamuraOKK.scoring.meetings.llm import BaseLLMScorer
 from AtamuraOKK.scoring.meetings.meeting import MeetingScorer
+from AtamuraOKK.scoring.meetings.recordings import (
+    ingest_recordings,
+    run_pipeline,
+    score_pending,
+)
 from AtamuraOKK.scoring.meetings.router import build_meeting_scorer
 from AtamuraOKK.scoring.meetings.rubric import Criterion, Rubric, load_rubric
 from AtamuraOKK.scoring.meetings.script import Script, load_script
+from AtamuraOKK.scoring.meetings.store import MeetingStatus, MeetingStore
+from AtamuraOKK.scoring.meetings.transcribe import transcribe_pending
 
 __all__ = [
     "AnthropicScorer",
     "BaseLLMScorer",
+    "BitrixDisk",
     "CallForScoring",
     "Criterion",
     "CriterionScore",
     "MalformedOutputError",
+    "MeetingDiskSource",
+    "MeetingFile",
     "MeetingScorer",
+    "MeetingStatus",
+    "MeetingStore",
     "ProviderUnavailableError",
     "Rubric",
     "ScoreResult",
@@ -39,6 +57,11 @@ __all__ = [
     "Script",
     "build_meeting_scorer",
     "chunk_transcript",
+    "download_pending",
+    "ingest_recordings",
     "load_rubric",
     "load_script",
+    "run_pipeline",
+    "score_pending",
+    "transcribe_pending",
 ]

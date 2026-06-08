@@ -144,6 +144,9 @@ cython_debug/
 # Phase 0 transcription-spike artifacts (audio, transcripts, refs)
 .spike/
 
+# ОП meeting-recording pipeline: downloaded audio + SQLite state
+.meetings/
+
 # Generated QA reports
 reports/
 
