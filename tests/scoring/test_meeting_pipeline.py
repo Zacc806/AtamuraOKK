@@ -195,6 +195,36 @@ async def test_transcribe_empty_text_bumps_attempt(
     store.close()
 
 
+async def test_transcribe_falls_back_when_ffmpeg_missing(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    """No ffmpeg binary: the original audio is fed to the transcriber as-is."""
+    audio = tmp_path / "1.ogg"
+    audio.write_bytes(b"x")
+
+    def _no_ffmpeg(_src: Path, _dest: Path) -> Path:
+        raise FileNotFoundError("ffmpeg")
+
+    seen: list[Path] = []
+
+    class _Recorder:
+        async def transcribe(self, wav_path: Path) -> TranscriptText:
+            seen.append(wav_path)
+            return TranscriptText(text="ок", language="ru")
+
+    monkeypatch.setattr(transcribe, "to_mono_wav", _no_ffmpeg)
+    store = MeetingStore(tmp_path / "m.db")
+    store.upsert_new(_file())
+    store.mark_downloaded(1, str(audio), 120)
+
+    stats = await transcribe.transcribe_pending(store=store, transcriber=_Recorder())
+
+    assert stats.transcribed == 1
+    assert seen == [audio]  # the original file, not a mono.wav
+    store.close()
+
+
 # --- ingest ---
 
 
