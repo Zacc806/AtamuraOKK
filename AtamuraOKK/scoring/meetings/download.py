@@ -60,11 +60,13 @@ async def download_pending(
     own_store = store is None
     own_disk = disk is None
     own_http = http is None
-    store = store or MeetingStore()
-    disk = disk or BitrixDisk()
-    http = http or httpx.AsyncClient(timeout=300.0, follow_redirects=True)
-    audio_dir = _audio_dir()
+    # Construct owned resources inside try so a constructor failure (e.g. a bad
+    # webhook URL) can't leak an already-opened client/connection.
     try:
+        store = store or MeetingStore()
+        disk = disk or BitrixDisk()
+        http = http or httpx.AsyncClient(timeout=300.0, follow_redirects=True)
+        audio_dir = _audio_dir()
         for row in store.claim(MeetingStatus.NEW, limit):
             stats.attempted += 1
             file_id = int(row["file_id"])
@@ -93,11 +95,11 @@ async def download_pending(
                     "Meeting download failed for {id}: {e}", id=file_id, e=exc
                 )
     finally:
-        if own_http:
+        if own_http and http is not None:
             await http.aclose()
-        if own_disk:
+        if own_disk and disk is not None:
             await disk.aclose()
-        if own_store:
+        if own_store and store is not None:
             store.close()
 
     logger.info(
@@ -114,6 +116,10 @@ def _atomic_write(dest: Path, data: bytes) -> None:
     """Write bytes via a temp file + rename so partial downloads never persist."""
     fd, tmp = tempfile.mkstemp(dir=dest.parent, suffix=".part")
     tmp_path = Path(tmp)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(data)
-    tmp_path.replace(dest)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        tmp_path.replace(dest)
+    except OSError:
+        tmp_path.unlink(missing_ok=True)  # don't orphan a half-written .part
+        raise

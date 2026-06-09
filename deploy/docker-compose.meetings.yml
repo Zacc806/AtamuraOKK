@@ -1,0 +1,28 @@
+# Isolated compose for the ОП meeting-recording worker. Runs parallel to the
+# call pipeline and shares no services with it (own SQLite state, no Postgres).
+#
+# Usage (from the repo root):
+#   docker compose -f deploy/docker-compose.meetings.yml up -d --build
+#   docker compose -f deploy/docker-compose.meetings.yml logs -f
+#
+# Requires ffmpeg in the image for the best transcription path (faster-whisper
+# can decode without it, but the downmix helps the OpenAI engine + duration probe).
+
+services:
+  meetings-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: python -m AtamuraOKK.scoring.meetings.worker
+    env_file:
+      - ../.env
+    environment:
+      ATAMURAOKK_MEETINGS_WORK_DIR: /data/meetings
+    volumes:
+      - meetings-state:/data/meetings
+      - whisper-cache:/root/.cache/huggingface
+    restart: unless-stopped
+
+volumes:
+  meetings-state:
+  whisper-cache:

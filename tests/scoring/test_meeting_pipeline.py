@@ -359,3 +359,86 @@ async def test_run_pipeline_wires_all_stages(
 
     assert called == ["ingest", "download", "transcribe", "score"]
     assert "counts" in result
+
+
+# --- retry / drain ---
+
+
+async def test_requeue_failed_reopens(tmp_path: Path) -> None:
+    """requeue_failed re-opens a FAILED recording that already has a transcript."""
+    store = MeetingStore(tmp_path / "m.db")
+    store.upsert_new(_file())
+    store.mark_downloaded(1, "/a.ogg", 120)
+    store.mark_transcribed(1, "[agent] привет", "ru")
+    for _ in range(4):
+        store.bump_attempt(1, "credits", max_attempts=4)
+    assert store.get(1)["status"] == MeetingStatus.FAILED.value
+
+    n = await recordings.requeue_failed(store=store)
+
+    assert n == 1
+    assert store.get(1)["status"] == MeetingStatus.TRANSCRIBED.value
+    store.close()
+
+
+async def test_drain_processes_until_empty(tmp_path: Path, monkeypatch: Any) -> None:
+    """drain_pipeline loops the stages until nothing is left in flight."""
+    monkeypatch.setattr(config, "meetings_work_dir", tmp_path)
+    monkeypatch.setattr(config, "meetings_db_path", "drain.db")
+    with MeetingStore(tmp_path / "drain.db") as seed:
+        seed.upsert_new(_file(1))
+        seed.upsert_new(_file(2, name="b.ogg"))
+
+    async def _dl(*, store: MeetingStore, limit: Any = None) -> Any:
+        rows = store.claim(MeetingStatus.NEW, 100)
+        for r in rows:
+            store.mark_downloaded(int(r["file_id"]), "/a", 100)
+        return download_mod.DownloadStats(downloaded=len(rows))
+
+    async def _tr(*, store: MeetingStore, limit: Any = None) -> Any:
+        rows = store.claim(MeetingStatus.DOWNLOADED, 100)
+        for r in rows:
+            store.mark_transcribed(int(r["file_id"]), "t", "ru")
+        return transcribe.TranscribeStats(transcribed=len(rows))
+
+    async def _sc(*, store: MeetingStore, limit: Any = None) -> Any:
+        rows = store.claim(MeetingStatus.TRANSCRIBED, 100)
+        for r in rows:
+            store.mark_scored(int(r["file_id"]), "{}", 80.0, passed=True)
+        return recordings.ScoreStats(scored=len(rows))
+
+    monkeypatch.setattr(recordings, "download_pending", _dl)
+    monkeypatch.setattr(recordings, "transcribe_pending", _tr)
+    monkeypatch.setattr(recordings, "score_pending", _sc)
+
+    result = await recordings.drain_pipeline(ingest=False)
+
+    assert result["passes"] == 1
+    assert result["counts"].get("SCORED") == 2
+
+
+async def test_drain_stops_on_no_progress(tmp_path: Path, monkeypatch: Any) -> None:
+    """drain_pipeline stops after a pass that makes no forward progress."""
+    monkeypatch.setattr(config, "meetings_work_dir", tmp_path)
+    monkeypatch.setattr(config, "meetings_db_path", "drain.db")
+    with MeetingStore(tmp_path / "drain.db") as seed:
+        seed.upsert_new(_file(1))
+
+    async def _noop_dl(*, store: MeetingStore, limit: Any = None) -> Any:
+        return download_mod.DownloadStats()
+
+    async def _noop_tr(*, store: MeetingStore, limit: Any = None) -> Any:
+        return transcribe.TranscribeStats()
+
+    async def _noop_sc(*, store: MeetingStore, limit: Any = None) -> Any:
+        return recordings.ScoreStats()
+
+    monkeypatch.setattr(recordings, "download_pending", _noop_dl)
+    monkeypatch.setattr(recordings, "transcribe_pending", _noop_tr)
+    monkeypatch.setattr(recordings, "score_pending", _noop_sc)
+
+    result = await recordings.drain_pipeline(ingest=False, max_passes=50)
+
+    # One no-progress pass is tolerated (transient blip); it stops after two.
+    assert result["passes"] == 2
+    assert result["counts"].get("NEW") == 1

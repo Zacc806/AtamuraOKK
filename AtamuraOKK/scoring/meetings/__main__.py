@@ -10,7 +10,11 @@ Two modes:
       python -m AtamuraOKK.scoring.meetings download    # NEW → DOWNLOADED
       python -m AtamuraOKK.scoring.meetings transcribe  # DOWNLOADED → TRANSCRIBED
       python -m AtamuraOKK.scoring.meetings score       # TRANSCRIBED → SCORED
+      python -m AtamuraOKK.scoring.meetings drain       # loop stages until drained
+      python -m AtamuraOKK.scoring.meetings retry       # re-open FAILED recordings
       python -m AtamuraOKK.scoring.meetings status      # print state counts
+
+  Or run it on a schedule: python -m AtamuraOKK.scoring.meetings.worker
 
 * **One transcript** (legacy) — score a single speaker-tagged transcript::
 
@@ -26,13 +30,14 @@ import argparse
 import asyncio
 import json
 import sys
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from AtamuraOKK.scoring.meetings.base import CallForScoring
 from AtamuraOKK.scoring.meetings.router import build_meeting_scorer
 
 _PIPELINE_CMDS = frozenset(
-    {"ingest", "download", "transcribe", "score", "run", "status"},
+    {"ingest", "download", "transcribe", "score", "run", "drain", "retry", "status"},
 )
 
 
@@ -54,16 +59,18 @@ async def _run_pipeline_cmd(cmd: str, limit: int | None) -> str:
     if cmd == "status":
         with open_store() as store:
             return json.dumps(store.counts(), ensure_ascii=False, indent=2)
-    if cmd == "ingest":
-        return _fmt(await recordings.ingest_recordings(limit=limit))
-    if cmd == "download":
-        return _fmt(await download_pending(limit=limit))
-    if cmd == "transcribe":
-        return _fmt(await transcribe_pending(limit=limit))
-    if cmd == "score":
-        return _fmt(await recordings.score_pending(limit=limit))
-    result = await recordings.run_pipeline(limit=limit)
-    return _fmt(result)
+    if cmd == "retry":
+        return _fmt({"requeued": await recordings.requeue_failed()})
+
+    handlers: dict[str, Callable[[], Awaitable[object]]] = {
+        "ingest": lambda: recordings.ingest_recordings(limit=limit),
+        "download": lambda: download_pending(limit=limit),
+        "transcribe": lambda: transcribe_pending(limit=limit),
+        "score": lambda: recordings.score_pending(limit=limit),
+        "drain": lambda: recordings.drain_pipeline(limit=limit),
+        "run": lambda: recordings.run_pipeline(limit=limit),
+    }
+    return _fmt(await handlers[cmd]())
 
 
 def _fmt(obj: object) -> str:

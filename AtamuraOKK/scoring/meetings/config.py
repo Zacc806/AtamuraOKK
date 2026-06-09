@@ -87,6 +87,16 @@ class MeetingScoringConfig(BaseSettings):
     # Give up on a recording after this many failed download/transcribe attempts.
     meetings_max_attempts: int = 4
 
+    # --- Scheduler worker (python -m AtamuraOKK.scoring.meetings.worker) ---
+    # How often the full pipeline pass runs, in hours.
+    meetings_worker_interval_hours: float = 3.0
+    # How often FAILED recordings are re-queued, in hours.
+    meetings_worker_retry_interval_hours: float = 6.0
+    # Run one pipeline pass immediately on startup instead of waiting a full cycle.
+    meetings_worker_run_on_start: bool = True
+    # Timezone for the scheduler (matches the ОП reporting tz).
+    meetings_worker_timezone: str = "Asia/Qyzylorda"
+
     # Transcription engine for meetings: "whisper" (local faster-whisper, no API
     # quota — the default) or "openai" (gpt-4o-transcribe).
     meetings_transcribe_engine: str = "whisper"

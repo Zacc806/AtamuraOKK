@@ -140,3 +140,63 @@ async def run_pipeline(*, limit: int | None = None) -> dict[str, object]:
         "score": scored,
         "counts": counts,
     }
+
+
+async def requeue_failed(*, store: MeetingStore | None = None) -> int:
+    """Re-open FAILED recordings for another attempt; returns how many."""
+    own_store = store is None
+    store = store or MeetingStore()
+    try:
+        n = store.reset_failed()
+    finally:
+        if own_store:
+            store.close()
+    if n:
+        logger.info("Meeting retry: re-queued {n} FAILED recordings", n=n)
+    return n
+
+
+async def drain_pipeline(
+    *,
+    limit: int | None = None,
+    ingest: bool = True,
+    max_passes: int = 1000,
+) -> dict[str, object]:
+    """Process the whole backlog: scan once, then loop the stages until drained.
+
+    Stops when nothing is left in flight (NEW/DOWNLOADED/TRANSCRIBED all zero) or
+    a pass makes no forward progress (e.g. every remaining row keeps failing on a
+    transient outage), so it never spins forever.
+    """
+    with MeetingStore() as store:
+        if ingest:
+            await ingest_recordings(limit=None, store=store)
+        passes = 0
+        stalled = 0
+        while passes < max_passes:
+            passes += 1
+            downloaded = await download_pending(limit=limit, store=store)
+            transcribed = await transcribe_pending(limit=limit, store=store)
+            scored = await score_pending(limit=limit, store=store)
+            counts = store.counts()
+            active = (
+                counts.get(MeetingStatus.NEW.value, 0)
+                + counts.get(MeetingStatus.DOWNLOADED.value, 0)
+                + counts.get(MeetingStatus.TRANSCRIBED.value, 0)
+            )
+            progressed = downloaded.downloaded + transcribed.transcribed + scored.scored
+            logger.info(
+                "Drain pass {p}: active={a} progressed={g} {c}",
+                p=passes,
+                a=active,
+                g=progressed,
+                c=counts,
+            )
+            if active == 0:
+                break
+            # Tolerate one no-progress pass (a transient blip), but stop after two
+            # in a row so a persistent outage (e.g. no Anthropic credit) can't spin.
+            stalled = stalled + 1 if progressed == 0 else 0
+            if stalled >= 2:
+                break
+        return {"passes": passes, "counts": store.counts()}

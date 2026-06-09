@@ -81,3 +81,33 @@ def test_counts_groups_by_status(tmp_path: Path) -> None:
         store.upsert_new(_file(2, name="b.ogg"))
         store.mark_skipped(2, "too_short:5s")
         assert store.counts() == {"NEW": 1, "SKIPPED": 1}
+
+
+def _fail(store: MeetingStore, file_id: int) -> None:
+    """Drive a row to FAILED via exhausted attempts."""
+    for _ in range(4):
+        store.bump_attempt(file_id, "boom", max_attempts=4)
+
+
+def test_reset_failed_reopens_by_available_data(tmp_path: Path) -> None:
+    """reset_failed resumes each FAILED row at the furthest stage its data supports."""
+    audio = tmp_path / "a.ogg"
+    audio.write_bytes(b"x")
+    with MeetingStore(tmp_path / "m.db") as store:
+        store.upsert_new(_file(1))  # has transcript -> TRANSCRIBED
+        store.mark_downloaded(1, str(audio), 100)
+        store.mark_transcribed(1, "txt", "ru")
+        _fail(store, 1)
+        store.upsert_new(_file(2, name="b.ogg"))  # audio present -> DOWNLOADED
+        store.mark_downloaded(2, str(audio), 100)
+        _fail(store, 2)
+        store.upsert_new(_file(3, name="c.ogg"))  # nothing -> NEW
+        _fail(store, 3)
+
+        assert store.counts().get("FAILED") == 3
+        assert store.reset_failed() == 3
+        assert store.get(1)["status"] == MeetingStatus.TRANSCRIBED.value
+        assert store.get(2)["status"] == MeetingStatus.DOWNLOADED.value
+        assert store.get(3)["status"] == MeetingStatus.NEW.value
+        assert store.get(1)["attempts"] == 0
+        assert store.get(1)["error"] is None

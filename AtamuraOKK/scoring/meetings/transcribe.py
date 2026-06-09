@@ -89,9 +89,12 @@ class OpenAITranscriber:
         """Transcribe via the OpenAI audio API."""
         from openai import AsyncOpenAI  # noqa: PLC0415
 
-        client = AsyncOpenAI(api_key=self._api_key)
-        with wav_path.open("rb") as fh:
-            resp = await client.audio.transcriptions.create(model=self._model, file=fh)
+        async with AsyncOpenAI(api_key=self._api_key) as client:
+            with wav_path.open("rb") as fh:
+                resp = await client.audio.transcriptions.create(
+                    model=self._model,
+                    file=fh,
+                )
         return TranscriptText(text=resp.text.strip(), language="auto")
 
 

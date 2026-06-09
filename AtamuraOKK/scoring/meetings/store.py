@@ -80,6 +80,9 @@ class MeetingStore:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self._path)
         self._conn.row_factory = sqlite3.Row
+        # WAL lets a `status` read run while the worker is mid-write, instead of
+        # tripping "database is locked".
+        self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
 
@@ -224,6 +227,27 @@ class MeetingStore:
             fields["status"] = MeetingStatus.FAILED.value
         self._set(file_id, **fields)
         return failed
+
+    def reset_failed(self) -> int:
+        """Re-queue every FAILED recording for another attempt; return the count.
+
+        Each row resumes at the furthest stage its data supports — a stored
+        transcript → TRANSCRIBED, else a present audio file → DOWNLOADED, else
+        NEW — with the error and attempt counter cleared.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM recordings WHERE status = ?",
+            (MeetingStatus.FAILED.value,),
+        ).fetchall()
+        for row in rows:
+            if row["transcript"]:
+                status = MeetingStatus.TRANSCRIBED
+            elif row["audio_path"] and Path(row["audio_path"]).exists():
+                status = MeetingStatus.DOWNLOADED
+            else:
+                status = MeetingStatus.NEW
+            self._set(int(row["file_id"]), status=status.value, attempts=0, error=None)
+        return len(rows)
 
     # --- reporting ---
 

@@ -1,0 +1,17 @@
+# Atamura OKK — one ОП meeting pipeline pass (oneshot, driven by the timer).
+# Use this + okk-meetings.timer instead of the long-lived worker if you prefer
+# a periodic cron-style run.
+#
+# Install:
+#   sudo cp deploy/okk-meetings.service deploy/okk-meetings.timer /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now okk-meetings.timer
+
+[Unit]
+Description=Atamura OKK - one OP meeting pipeline pass
+
+[Service]
+Type=oneshot
+User=okk
+WorkingDirectory=/opt/AtamuraOKK
+ExecStart=/opt/AtamuraOKK/.venv/bin/python -m AtamuraOKK.scoring.meetings run --limit 50

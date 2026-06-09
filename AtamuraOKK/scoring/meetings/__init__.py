@@ -26,7 +26,9 @@ from AtamuraOKK.scoring.meetings.errors import (
 from AtamuraOKK.scoring.meetings.llm import BaseLLMScorer
 from AtamuraOKK.scoring.meetings.meeting import MeetingScorer
 from AtamuraOKK.scoring.meetings.recordings import (
+    drain_pipeline,
     ingest_recordings,
+    requeue_failed,
     run_pipeline,
     score_pending,
 )
@@ -58,9 +60,11 @@ __all__ = [
     "build_meeting_scorer",
     "chunk_transcript",
     "download_pending",
+    "drain_pipeline",
     "ingest_recordings",
     "load_rubric",
     "load_script",
+    "requeue_failed",
     "run_pipeline",
     "score_pending",
     "transcribe_pending",
