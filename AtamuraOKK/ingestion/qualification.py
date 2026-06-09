@@ -128,11 +128,15 @@ class ContactDealStageQualificationChecker:
         bx: BitrixClient,
         filter_: dict[str, Any],
     ) -> list[str]:
-        deals = await bx.call(
-            "crm.deal.list",
-            {"filter": filter_, "select": ["ID"]},
-        )
-        return [str(d["ID"]) for d in (deals or [])]
+        # Page through every deal: a client with >50 deals would otherwise have
+        # later deals dropped, and the qualifying deal could be among them.
+        return [
+            str(d["ID"])
+            async for d in bx.list(
+                "crm.deal.list",
+                {"filter": filter_, "select": ["ID"]},
+            )
+        ]
 
     async def _any_deal_qualified(
         self,
@@ -140,8 +144,12 @@ class ContactDealStageQualificationChecker:
         deal_ids: list[str],
         stage_ids: set[str],
     ) -> bool:
-        """True if any deal has a stage-history entry in a qualified stage."""
-        env = await bx.call(
+        """True if any deal has a stage-history entry in a qualified stage.
+
+        Uses the envelope ``total`` rather than the first page of ``items`` so a
+        qualifying entry on page 2+ (many deals / stage transitions) isn't missed.
+        """
+        env = await bx.call_raw(
             "crm.stagehistory.list",
             {
                 "entityTypeId": _DEAL_ENTITY_TYPE_ID,
@@ -149,7 +157,10 @@ class ContactDealStageQualificationChecker:
                 "select": ["STAGE_ID"],
             },
         )
-        items = env.get("items", []) if isinstance(env, dict) else (env or [])
+        if env.get("total") is not None:
+            return int(env["total"]) > 0
+        result = env.get("result")
+        items = result.get("items", []) if isinstance(result, dict) else (result or [])
         return len(items) > 0
 
 

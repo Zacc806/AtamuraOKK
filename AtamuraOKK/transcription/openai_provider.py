@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 class OpenAITranscriber:
     """Transcribe a single mono audio file via the OpenAI audio API."""
 
+    handles_kazakh = False
+
     def __init__(
         self,
         model: str | None = None,

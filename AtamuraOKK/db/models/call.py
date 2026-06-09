@@ -97,6 +97,10 @@ class Call(Base):
     skip_reason: Mapped[str | None] = mapped_column(String(length=64))
     error: Mapped[str | None] = mapped_column(Text)
     attempts: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    # When a worker claimed this call into an in-flight status (DOWNLOADING/
+    # TRANSCRIBING/SCORING). NULL once the call reaches a settled status. The
+    # stale-claim reconciler reverts claims older than a per-stage TTL.
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

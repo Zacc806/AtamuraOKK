@@ -12,6 +12,7 @@ from typing import Any
 
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from AtamuraOKK.db.models.call import Call
@@ -19,6 +20,7 @@ from AtamuraOKK.db.models.enums import CallStatus
 from AtamuraOKK.db.models.score import Score
 from AtamuraOKK.db.models.transcript import Transcript
 from AtamuraOKK.db.session import session_scope
+from AtamuraOKK.dispatch.claim import claim_ready
 from AtamuraOKK.scoring.base import CallScore, Scorer
 from AtamuraOKK.scoring.factory import get_scorer
 from AtamuraOKK.scoring.rubric import Rubric, load_rubric
@@ -38,6 +40,7 @@ def _assemble(result: CallScore, rubric: Rubric) -> dict[str, Any]:
     by_id = {c.id: c for c in result.criteria}
     per_criterion: list[dict[str, Any]] = []
     blocks: dict[str, dict[str, Any]] = {}
+    missing: list[int] = []
     total = 0
     max_points = 0
 
@@ -48,7 +51,12 @@ def _assemble(result: CallScore, rubric: Rubric) -> dict[str, Any]:
         if crit.block_id == "objections" and not result.objections_present:
             continue
         cs = by_id.get(crit.id)
-        score = cs.score if cs else 0
+        if cs is None:
+            # A criterion the model didn't return would be silently scored 0,
+            # deflating the result; fail the call instead so it retries.
+            missing.append(crit.id)
+            continue
+        score = cs.score
         score = max(0, min(int(score), crit.max))
         total += score
         max_points += crit.max
@@ -60,8 +68,8 @@ def _assemble(result: CallScore, rubric: Rubric) -> dict[str, Any]:
                 "text": crit.text,
                 "score": score,
                 "max": crit.max,
-                "justification": cs.justification if cs else "не оценено",
-                "evidence": cs.evidence if cs else "",
+                "justification": cs.justification,
+                "evidence": cs.evidence,
             },
         )
         b = blocks.setdefault(
@@ -70,6 +78,9 @@ def _assemble(result: CallScore, rubric: Rubric) -> dict[str, Any]:
         )
         b["score"] += score
         b["max"] += crit.max
+
+    if missing:
+        raise ValueError(f"scorer omitted criteria: {missing}")
 
     percent = round(100.0 * total / max_points, 2) if max_points else 0.0
     return {
@@ -103,19 +114,26 @@ async def _score_one(
         direction=str(call.direction),
     )
     payload = _assemble(result, rubric)
-    session.add(
-        Score(
-            call_id=call.id,
-            rubric_version=rubric.version,
-            total_score=payload["percent"],
-            criteria=payload,
-            sentiment={
-                "customer": result.sentiment_customer,
-                "agent": result.sentiment_agent,
-            },
-            summary=result.summary,
-            flags=result.red_flags,
-            model=scorer.model_label,
+    values = {
+        "call_id": call.id,
+        "rubric_version": rubric.version,
+        "total_score": payload["percent"],
+        "criteria": payload,
+        "sentiment": {
+            "customer": result.sentiment_customer,
+            "agent": result.sentiment_agent,
+        },
+        "summary": result.summary,
+        "flags": result.red_flags,
+        "model": scorer.model_label,
+    }
+    # Upsert: a re-claim or duplicate delivery must not create a second row.
+    stmt = insert(Score).values(**values)
+    update_cols = {c: stmt.excluded[c] for c in values if c not in ("call_id",)}
+    await session.execute(
+        stmt.on_conflict_do_update(
+            constraint="uq_scores_call_rubric",
+            set_=update_cols,
         ),
     )
     call.status = CallStatus.SCORED
@@ -128,43 +146,72 @@ async def _score_one(
     )
 
 
+async def _score_claimed(
+    session: AsyncSession,
+    call: Call,
+    transcript: Transcript,
+    scorer: Scorer,
+    rubric: Rubric,
+) -> str:
+    """Score one already-claimed (SCORING) call. Caller commits.
+
+    Mutates ``call`` to SCORED / FAILED, clears the claim; returns the status.
+    """
+    try:
+        await _score_one(session, call, transcript, scorer, rubric)
+    except Exception as exc:  # record + move on
+        call.attempts += 1
+        call.status = CallStatus.FAILED
+        call.error = f"scoring: {exc}"
+        logger.warning("Scoring failed for {id}: {e}", id=call.bitrix_call_id, e=exc)
+    call.claimed_at = None
+    return call.status.value
+
+
+async def score_one(
+    call_id: int,
+    *,
+    scorer: Scorer | None = None,
+    rubric: Rubric | None = None,
+) -> str:
+    """Score one claimed (SCORING) call in its own session.
+
+    The unit of work for the broker task. Returns the resulting status value, or
+    ``"skipped"`` if no longer claimed for scoring.
+    """
+    scorer = scorer or get_scorer()
+    rubric = rubric or load_rubric()
+    async with session_scope() as session:
+        call = await session.get(Call, call_id)
+        if call is None or call.status != CallStatus.SCORING:
+            return "skipped"
+        transcript = await session.scalar(
+            select(Transcript).where(Transcript.call_id == call_id),
+        )
+        if transcript is None:
+            call.status = CallStatus.FAILED
+            call.error = "no transcript"
+            call.claimed_at = None
+            return call.status.value
+        return await _score_claimed(session, call, transcript, scorer, rubric)
+
+
 async def score_pending(*, limit: int = 50) -> ScoreStats:
-    """Score analyzable TRANSCRIBED calls against the active rubric."""
+    """Claim and score analyzable TRANSCRIBED calls against the active rubric."""
     stats = ScoreStats()
     rubric = load_rubric()
     scorer = get_scorer()
 
-    async with session_scope() as session:
-        rows = (
-            await session.execute(
-                select(Call, Transcript)
-                .join(Transcript, Transcript.call_id == Call.id)
-                .where(
-                    Call.status == CallStatus.TRANSCRIBED,
-                    Call.analyzable.is_(True),
-                )
-                .order_by(Call.started_at.asc())
-                .limit(limit),
-            )
-        ).all()
-
-        for call, transcript in rows:
-            stats.attempted += 1
-            try:
-                await _score_one(session, call, transcript, scorer, rubric)
-                stats.scored += 1
-            except Exception as exc:  # record + continue to next call
-                call.attempts += 1
-                call.status = CallStatus.FAILED
-                call.error = f"scoring: {exc}"
-                stats.failed += 1
-                logger.warning(
-                    "Scoring failed for {id}: {e}",
-                    id=call.bitrix_call_id,
-                    e=exc,
-                )
-            # Commit per call: durable progress, no re-spend on a later failure.
-            await session.commit()
+    call_ids = await claim_ready(CallStatus.TRANSCRIBED, CallStatus.SCORING, limit)
+    for call_id in call_ids:
+        status = await score_one(call_id, scorer=scorer, rubric=rubric)
+        if status == "skipped":
+            continue
+        stats.attempted += 1
+        if status == CallStatus.SCORED.value:
+            stats.scored += 1
+        elif status == CallStatus.FAILED.value:
+            stats.failed += 1
 
     logger.info(
         "Scoring done: attempted={a} scored={s} failed={f}",

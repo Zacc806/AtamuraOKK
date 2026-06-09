@@ -5,7 +5,15 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import (
+    DateTime,
+    ForeignKey,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -13,9 +21,14 @@ from AtamuraOKK.db.base import Base
 
 
 class Score(Base):
-    """One QA score per call (re-scoring creates a new row; latest wins)."""
+    """One QA score per call per rubric version (re-scoring upserts the row)."""
 
     __tablename__ = "scores"
+    __table_args__ = (
+        # One score row per (call, rubric); re-scoring upserts rather than
+        # accumulating duplicates from a re-claim or duplicate task delivery.
+        UniqueConstraint("call_id", "rubric_version", name="uq_scores_call_rubric"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     call_id: Mapped[int] = mapped_column(

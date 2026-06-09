@@ -103,6 +103,13 @@ class AnthropicScorer:
             tools=[tool],
             tool_choice={"type": "tool", "name": _TOOL_NAME},
         )
+        if resp.stop_reason == "max_tokens":
+            # The tool input is truncated JSON; validating it would either raise or
+            # silently drop criteria (scored 0 downstream). Fail loudly to retry.
+            raise RuntimeError(
+                "Anthropic scoring truncated (stop_reason=max_tokens); "
+                "raise ATAMURAOKK_ANTHROPIC_MAX_TOKENS.",
+            )
         for block in resp.content:
             if block.type == "tool_use" and block.name == _TOOL_NAME:
                 parsed = CallScore.model_validate(block.input)

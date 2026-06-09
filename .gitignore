@@ -149,3 +149,8 @@ reports/
 
 # Ad-hoc backlog transcription log
 .transcribe_backlog.log
+
+# Yandex service-account authorized key (secret — never commit)
+yandex-sa-key*.json
+*.sa-key.json
+authorized_key*.json

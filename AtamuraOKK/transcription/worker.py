@@ -14,7 +14,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from loguru import logger
-from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +22,7 @@ from AtamuraOKK.db.models.call import Call
 from AtamuraOKK.db.models.enums import CallStatus
 from AtamuraOKK.db.models.transcript import Transcript
 from AtamuraOKK.db.session import session_scope
+from AtamuraOKK.dispatch.claim import claim_ready
 from AtamuraOKK.settings import settings
 from AtamuraOKK.storage import get_storage
 from AtamuraOKK.storage.base import ObjectStorage
@@ -101,61 +101,115 @@ async def _persist_transcript(
     await session.execute(stmt)
 
 
-async def _process_call(
-    call_id: int,
+async def _transcribe_claimed(
+    session: AsyncSession,
+    call: Call,
     transcriber: AsyncTranscriber,
     storage: ObjectStorage,
-    stats: TranscribeStats,
-    progress: dict[str, int],
-) -> None:
-    """Transcribe one call in its own session (safe to run concurrently)."""
+) -> str:
+    """Transcribe one already-claimed (TRANSCRIBING) call. Caller commits.
+
+    Mutates ``call`` to its settled status (TRANSCRIBED / PENDING_KK / FAILED)
+    and clears the claim; returns the resulting status value.
+    """
+    bx_id = call.bitrix_call_id
+    if not call.audio_object_key:
+        call.status = CallStatus.FAILED
+        call.error = "no audio_object_key"
+    else:
+        try:
+            audio_bytes = await storage.download(call.audio_object_key)
+            with tempfile.TemporaryDirectory() as tmp:
+                tmpdir = Path(tmp)
+                src = tmpdir / Path(call.audio_object_key).name
+                src.write_bytes(audio_bytes)
+                result = await _transcribe_audio(transcriber, src, tmpdir)
+
+            call.language = result.language
+            handles_kazakh = getattr(transcriber, "handles_kazakh", False)
+            if result.language == "kk" and not handles_kazakh:
+                # Park Kazakh when the engine can't handle it (whisper/openai).
+                call.status = CallStatus.PENDING_KK
+                call.error = None
+            else:
+                await _persist_transcript(session, call.id, result)
+                call.status = CallStatus.TRANSCRIBED
+                call.error = None
+        except Exception as exc:  # record + move on
+            call.attempts += 1
+            call.status = CallStatus.FAILED
+            call.error = f"transcription: {exc}"
+            logger.warning("Transcription failed for {id}: {e}", id=bx_id, e=exc)
+    call.claimed_at = None
+    return call.status.value
+
+
+def _load_transcriber() -> AsyncTranscriber:
+    """Build the configured transcriber and load its model (whisper) once."""
+    transcriber = get_transcriber()
+    load = getattr(transcriber, "load", None)
+    if callable(load):
+        load()
+    return transcriber
+
+
+async def transcribe_one(
+    call_id: int,
+    *,
+    transcriber: AsyncTranscriber | None = None,
+    storage: ObjectStorage | None = None,
+) -> str:
+    """Transcribe one claimed (TRANSCRIBING) call in its own session.
+
+    The unit of work for the broker task. Pass a pre-loaded ``transcriber`` to
+    reuse the model across calls; otherwise it is built and loaded here. Returns
+    the resulting status value, or ``"skipped"`` if no longer claimed.
+    """
+    if transcriber is None:
+        transcriber = await asyncio.to_thread(_load_transcriber)
+    storage = storage or get_storage()
     async with session_scope() as session:
         call = await session.get(Call, call_id)
-        if call is None or call.status != CallStatus.DOWNLOADED:
-            return  # already handled (e.g. by a concurrent/previous pass)
-        stats.attempted += 1
-        bx_id = call.bitrix_call_id
-        if not call.audio_object_key:
-            call.status = CallStatus.FAILED
-            call.error = "no audio_object_key"
-            stats.failed += 1
-        else:
-            try:
-                audio_bytes = await storage.download(call.audio_object_key)
-                with tempfile.TemporaryDirectory() as tmp:
-                    tmpdir = Path(tmp)
-                    src = tmpdir / Path(call.audio_object_key).name
-                    src.write_bytes(audio_bytes)
-                    result = await _transcribe_audio(transcriber, src, tmpdir)
+        if call is None or call.status != CallStatus.TRANSCRIBING:
+            return "skipped"
+        return await _transcribe_claimed(session, call, transcriber, storage)
 
-                call.language = result.language
-                if result.language == "kk":
-                    # Park Kazakh: kept parked per the current product decision.
-                    call.status = CallStatus.PENDING_KK
-                    call.error = None
-                    stats.pending_kk += 1
-                else:
-                    await _persist_transcript(session, call.id, result)
-                    call.status = CallStatus.TRANSCRIBED
-                    call.error = None
-                    stats.transcribed += 1
-            except Exception as exc:  # record + continue to the next call
-                call.attempts += 1
-                call.status = CallStatus.FAILED
-                call.error = f"transcription: {exc}"
-                stats.failed += 1
-                logger.warning("Transcription failed for {id}: {e}", id=bx_id, e=exc)
-        final_status = call.status.value
-        # session_scope commits this call's outcome on block exit (durable per call).
 
-    progress["done"] += 1
-    logger.info(
-        "Transcribed {n}/{total}: call {id} -> {st}",
-        n=progress["done"],
-        total=progress["total"],
-        id=bx_id,
-        st=final_status,
-    )
+def _tally(stats: TranscribeStats, status: str) -> None:
+    stats.attempted += 1
+    if status == CallStatus.TRANSCRIBED.value:
+        stats.transcribed += 1
+    elif status == CallStatus.PENDING_KK.value:
+        stats.pending_kk += 1
+    elif status == CallStatus.FAILED.value:
+        stats.failed += 1
+
+
+async def requeue_pending_kk(*, limit: int | None = None) -> int:
+    """Revert parked Kazakh calls (PENDING_KK -> DOWNLOADED) for re-transcription.
+
+    Used after switching to a Kazakh-capable engine (SpeechKit): the next
+    transcription pass re-claims them. They still hold their ``audio_object_key``
+    from the original download, so nothing needs re-fetching. Returns the count
+    requeued.
+    """
+    from sqlalchemy import select, update  # noqa: PLC0415
+
+    async with session_scope() as session:
+        stmt = select(Call.id).where(Call.status == CallStatus.PENDING_KK)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        ids = list((await session.execute(stmt)).scalars().all())
+        if not ids:
+            logger.info("No PENDING_KK calls to requeue.")
+            return 0
+        await session.execute(
+            update(Call)
+            .where(Call.id.in_(ids))
+            .values(status=CallStatus.DOWNLOADED, error=None, claimed_at=None),
+        )
+    logger.info("Requeued {n} PENDING_KK call(s) -> DOWNLOADED", n=len(ids))
+    return len(ids)
 
 
 async def transcribe_pending(
@@ -163,31 +217,21 @@ async def transcribe_pending(
     limit: int = 50,
     concurrency: int | None = None,
 ) -> TranscribeStats:
-    """Transcribe analyzable DOWNLOADED calls concurrently; Kazakh -> PENDING_KK."""
+    """Claim and transcribe analyzable DOWNLOADED calls concurrently."""
     concurrency = concurrency or settings.transcribe_concurrency
     stats = TranscribeStats()
     storage = get_storage()
-    transcriber = get_transcriber()
 
     # Pre-load the model once (whisper) so concurrent tasks don't race the load.
-    load = getattr(transcriber, "load", None)
-    if callable(load):
-        await asyncio.to_thread(load)
+    transcriber = await asyncio.to_thread(_load_transcriber)
 
-    async with session_scope() as session:
-        call_ids = list(
-            (
-                await session.scalars(
-                    select(Call.id)
-                    .where(
-                        Call.status == CallStatus.DOWNLOADED,
-                        Call.analyzable.is_(True),
-                    )
-                    .order_by(Call.started_at.asc())
-                    .limit(limit),
-                )
-            ).all(),
-        )
+    call_ids = await claim_ready(
+        CallStatus.DOWNLOADED,
+        CallStatus.TRANSCRIBING,
+        limit,
+    )
+    if not call_ids:
+        return stats
 
     progress = {"done": 0, "total": len(call_ids)}
     sem = asyncio.Semaphore(concurrency)
@@ -197,7 +241,17 @@ async def transcribe_pending(
 
     async def run(cid: int) -> None:
         async with sem:
-            await _process_call(cid, transcriber, storage, stats, progress)
+            status = await transcribe_one(cid, transcriber=transcriber, storage=storage)
+        if status != "skipped":
+            _tally(stats, status)
+        progress["done"] += 1
+        logger.info(
+            "Transcribed {n}/{total}: call {id} -> {st}",
+            n=progress["done"],
+            total=progress["total"],
+            id=cid,
+            st=status,
+        )
 
     await asyncio.gather(*(run(cid) for cid in call_ids))
 

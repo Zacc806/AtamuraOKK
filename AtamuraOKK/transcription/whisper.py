@@ -24,6 +24,9 @@ if TYPE_CHECKING:
 class FasterWhisperTranscriber:
     """Transcribe with a faster-whisper model (default Whisper large-v3)."""
 
+    # Whisper's Kazakh quality is poor; kk calls stay parked at PENDING_KK.
+    handles_kazakh = False
+
     def __init__(
         self,
         model_name: str | None = None,

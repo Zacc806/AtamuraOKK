@@ -17,6 +17,12 @@ def _cmd_run(args: argparse.Namespace) -> None:
     )
 
 
+def _cmd_requeue_kk(args: argparse.Namespace) -> None:
+    from AtamuraOKK.transcription.worker import requeue_pending_kk  # noqa: PLC0415
+
+    asyncio.run(requeue_pending_kk(limit=args.limit))
+
+
 def _cmd_progress(args: argparse.Namespace) -> None:
     from AtamuraOKK.transcription.progress import (  # noqa: PLC0415
         db_snapshot,
@@ -54,6 +60,13 @@ def main() -> None:
         help="calls in parallel (default: settings.transcribe_concurrency)",
     )
     p_run.set_defaults(func=_cmd_run)
+
+    p_kk = sub.add_parser(
+        "requeue-kk",
+        help="revert parked PENDING_KK calls to DOWNLOADED (re-transcribe with kk)",
+    )
+    p_kk.add_argument("--limit", type=int, default=None)
+    p_kk.set_defaults(func=_cmd_requeue_kk)
 
     p_prog = sub.add_parser("progress", help="show backlog transcription progress")
     p_prog.add_argument("--log", default=".transcribe_backlog.log")

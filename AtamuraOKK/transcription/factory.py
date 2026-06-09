@@ -34,5 +34,17 @@ def get_transcriber() -> AsyncTranscriber:
             c=settings.whisper_compute_type,
         )
         return FasterWhisperTranscriber()
-    msg = f"Unknown transcribe_provider {provider!r} (use 'whisper' or 'openai')."
+    if provider in ("yandex", "speechkit"):
+        from AtamuraOKK.transcription.yandex_provider import (  # noqa: PLC0415
+            YandexSpeechKitTranscriber,
+        )
+
+        logger.info(
+            "Transcriber: Yandex SpeechKit v3 ({m})", m=settings.yandex_stt_model
+        )
+        return YandexSpeechKitTranscriber()
+    msg = (
+        f"Unknown transcribe_provider {provider!r} "
+        "(use 'whisper', 'openai', or 'yandex')."
+    )
     raise ValueError(msg)

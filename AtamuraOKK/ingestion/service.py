@@ -23,7 +23,7 @@ from AtamuraOKK.db.models.enums import CallStatus
 from AtamuraOKK.db.models.ingest_state import IngestState
 from AtamuraOKK.db.session import session_scope
 from AtamuraOKK.ingestion.managers import ensure_managers
-from AtamuraOKK.ingestion.mapping import to_call_fields
+from AtamuraOKK.ingestion.mapping import parse_started_at, to_call_fields
 from AtamuraOKK.ingestion.qualification import QualificationChecker, default_checker
 from AtamuraOKK.settings import settings
 
@@ -68,19 +68,29 @@ async def _set_cursor(session: AsyncSession, value: str) -> None:
         session.add(IngestState(key=CURSOR_KEY, last_cursor=value))
 
 
+def _parse_cursor(cursor: str | None) -> datetime | None:
+    """Stored cursor -> aware datetime (older naive cursors are read as UTC)."""
+    if not cursor:
+        return None
+    try:
+        dt = datetime.fromisoformat(cursor)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
 def _since_filter(cursor: str | None) -> str:
-    """Lower bound for CALL_START_DATE, with overlap so nothing slips the cursor."""
-    if cursor:
-        try:
-            base = datetime.fromisoformat(cursor)
-        except ValueError:
-            base = datetime.now(tz=UTC) - timedelta(
-                days=settings.ingest_initial_days_back
-            )
-        base -= timedelta(minutes=settings.ingest_overlap_minutes)
-    else:
+    """Lower bound for CALL_START_DATE, with overlap so nothing slips the cursor.
+
+    Emitted as ISO-8601 *with offset* so Bitrix interprets the instant
+    unambiguously; lexicographic/naive comparison could otherwise skip calls.
+    """
+    base = _parse_cursor(cursor)
+    if base is None:
         base = datetime.now(tz=UTC) - timedelta(days=settings.ingest_initial_days_back)
-    return base.strftime("%Y-%m-%dT%H:%M:%S")
+    else:
+        base -= timedelta(minutes=settings.ingest_overlap_minutes)
+    return base.isoformat()
 
 
 async def _upsert_call(session: AsyncSession, fields: dict[str, Any]) -> None:
@@ -211,7 +221,7 @@ async def run_ingestion(
         }
         client_keys: set[str] = set()
         user_ids: set[int] = set()
-        max_started: str | None = cursor
+        max_started: datetime | None = _parse_cursor(cursor)
 
         async for row in bx.list("voximplant.statistic.get", params, max_items=limit):
             stats.scanned += 1
@@ -225,7 +235,7 @@ async def run_ingestion(
             client_keys.add(fields["client_key"])
             if fields.get("portal_user_id"):
                 user_ids.add(int(fields["portal_user_id"]))
-            started = row.get("CALL_START_DATE")
+            started = parse_started_at(row)
             if started and (max_started is None or started > max_started):
                 max_started = started
 
@@ -234,8 +244,9 @@ async def run_ingestion(
         await _recompute_scope(session, client_keys, checker, bx, stats)
 
         if max_started:
-            await _set_cursor(session, max_started)
-            stats.cursor = max_started
+            cursor_value = max_started.isoformat()
+            await _set_cursor(session, cursor_value)
+            stats.cursor = cursor_value
 
     logger.info(
         "Ingestion done: scanned={s} upserted={u} analyzable={a} skipped={k} {r}",

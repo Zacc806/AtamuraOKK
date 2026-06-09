@@ -16,11 +16,19 @@ class CallStatus(enum.StrEnum):
 
     Non-analyzable calls (not the client's first call, or client not qualified)
     are parked in ``SKIPPED`` with a ``skip_reason`` and never downloaded.
+
+    The ``*ING`` states (``DOWNLOADING``/``TRANSCRIBING``/``SCORING``) are the
+    in-flight claims: a worker atomically flips a row into one of them (see
+    ``dispatch.claim``) so no other worker re-processes it. A crashed worker's
+    claim is reverted by the stale-claim reconciler (``claimed_at`` + TTL).
     """
 
     NEW = "NEW"  # ingested, awaiting download
+    DOWNLOADING = "DOWNLOADING"  # claimed for download by a worker (in flight)
     DOWNLOADED = "DOWNLOADED"  # audio in object storage
+    TRANSCRIBING = "TRANSCRIBING"  # claimed for transcription by a worker (in flight)
     TRANSCRIBED = "TRANSCRIBED"  # transcript persisted
+    SCORING = "SCORING"  # claimed for scoring by a worker (in flight)
     SCORED = "SCORED"  # QA score persisted
     PUSHED = "PUSHED"  # optional writeback to Bitrix done
     FAILED = "FAILED"  # gave up after retries (see error)

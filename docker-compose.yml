@@ -1,3 +1,39 @@
+# Shared config for every broker role (dispatcher + stage workers). Each role is
+# its own service/container so the CPU-bound transcribe pool scales independently
+# from the IO-bound download/score pools. Scale a stage with, e.g.:
+#   docker compose up --scale score=3 --scale download=2
+x-worker-base: &worker_base
+  build:
+    context: .
+    target: dev
+    dockerfile: ./Dockerfile
+  image: atamuraokk:${ATAMURAOKK_VERSION:-latest}
+  restart: always
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    ATAMURAOKK_DB_HOST: AtamuraOKK-db
+    ATAMURAOKK_DB_PORT: 5432
+    ATAMURAOKK_DB_USER: AtamuraOKK
+    ATAMURAOKK_DB_PASS: AtamuraOKK
+    ATAMURAOKK_DB_BASE: AtamuraOKK
+    # Reach MinIO + Redis over the compose network (override any .env host:port).
+    ATAMURAOKK_S3_ENDPOINT_URL: http://AtamuraOKK-minio:9000
+    ATAMURAOKK_REDIS_URL: redis://AtamuraOKK-redis:6379/0
+  depends_on:
+    db:
+      condition: service_healthy
+    migrator:
+      condition: service_completed_successfully
+    minio:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  volumes:
+    # Persist generated reports (.md/.docx) to the host.
+    - ./reports:/app/src/reports
+
 services:
   api: &main_app
     build:
@@ -59,28 +95,49 @@ services:
       db:
         condition: service_healthy
 
-  # Always-on pipeline worker: ingestion, transcription, scoring, twice-daily
-  # reports, auto-recovery and the daily summary — all on one schedule.
-  # Standalone (not the api anchor) so it publishes no port and won't clash.
-  worker:
-    build:
-      context: .
-      target: dev
-      dockerfile: ./Dockerfile
-    image: atamuraokk:${ATAMURAOKK_VERSION:-latest}
+  # Redis: a *transient* work-dispatch layer between the dispatcher and the stage
+  # workers. Postgres stays the source of truth, so Redis runs cache-only (no
+  # persistence) — the dispatcher rebuilds the queue from Postgres after a wipe.
+  redis:
+    image: redis:7-alpine
+    hostname: AtamuraOKK-redis
+    command: redis-server --save "" --appendonly no
     restart: always
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Singleton beat: ingestion + requalification + claim/fan-out + cron jobs
+  # (reports, retry, daily summary). Run exactly one of these.
+  dispatcher:
+    <<: *worker_base
+    command: python -m AtamuraOKK.dispatch dispatcher
+
+  # IO-bound: fetch recordings to object storage.
+  download:
+    <<: *worker_base
+    command: python -m AtamuraOKK.dispatch download
+
+  # CPU-bound: ffmpeg channel split + local whisper. Keep ~1 replica (the model
+  # saturates the CPU); tune throughput via ATAMURAOKK_TRANSCRIBE_CONCURRENCY.
+  transcribe:
+    <<: *worker_base
+    command: python -m AtamuraOKK.dispatch transcribe
+
+  # IO-bound: LLM scoring. Safe to scale out (ceiling = the LLM rate limit).
+  score:
+    <<: *worker_base
+    command: python -m AtamuraOKK.dispatch score
+
+  # Legacy all-in-one APScheduler worker, superseded by the dispatcher + stage
+  # workers above. Kept as a single-process fallback (e.g. local dev without
+  # Redis). Start with: docker compose --profile legacy up worker
+  worker:
+    <<: *worker_base
     command: python -m AtamuraOKK.worker
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      ATAMURAOKK_DB_HOST: AtamuraOKK-db
-      ATAMURAOKK_DB_PORT: 5432
-      ATAMURAOKK_DB_USER: AtamuraOKK
-      ATAMURAOKK_DB_PASS: AtamuraOKK
-      ATAMURAOKK_DB_BASE: AtamuraOKK
-      # Reach MinIO over the compose network (override any .env host:port).
-      ATAMURAOKK_S3_ENDPOINT_URL: http://AtamuraOKK-minio:9000
+    profiles: ["legacy"]
     depends_on:
       db:
         condition: service_healthy
@@ -88,9 +145,6 @@ services:
         condition: service_completed_successfully
       minio:
         condition: service_healthy
-    volumes:
-      # Persist generated reports (.md/.docx) to the host.
-      - ./reports:/app/src/reports
 
   # BI dashboard over Postgres (per-manager / per-department QA scorecards).
   metabase:

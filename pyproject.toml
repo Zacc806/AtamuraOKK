@@ -36,6 +36,12 @@ spike = [
   "jiwer >=3.0.0,<4",
   "soundfile >=0.12.1,<1",
 ]
+# Broker-based distributed workers (python -m AtamuraOKK.dispatch).
+# Install with: uv sync --group broker
+broker = [
+  "arq >=0.26,<1",
+  "redis >=5.0,<6",
+]
 dev = [
   "pytest >=9.0.1,<10",
   "ruff >=0.14.6,<1",
@@ -45,6 +51,11 @@ dev = [
   "anyio >=4.11.0,<5",
   "pytest-env >=1.2.0,<2",
   "httpx >=0.28.1,<1",
+]
+yandex = [
+    "grpcio>=1.60,<2",
+    "pyjwt[crypto]>=2.8,<3",
+    "yandexcloud>=0.300,<1",
 ]
 
 
@@ -130,11 +141,11 @@ lint.ignore = [
     "UP043",   # Unnecessary default argument specified (conflicts with mypy).
     "N999",    # Invalid module name (project package is intentionally CamelCase).
 ]
+lint.mccabe = { max-complexity = 10 }
 exclude = [
     "AtamuraOKK/db/migrations",
     ".venv/"
 ]
-lint.mccabe = { max-complexity = 10 }
 line-length = 88
 
 [tool.ruff.lint.per-file-ignores]
