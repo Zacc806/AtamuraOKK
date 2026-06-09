@@ -70,6 +70,7 @@ def _assemble(result: CallScore, rubric: Rubric) -> dict[str, Any]:
                 "max": crit.max,
                 "justification": cs.justification,
                 "evidence": cs.evidence,
+                "recommendation": cs.recommendation,
             },
         )
         b = blocks.setdefault(

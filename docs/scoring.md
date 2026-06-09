@@ -10,12 +10,24 @@ TRANSCRIBED call → load transcript → LLM scores vs active rubric (Structured
      + strengths/growth/training) → status SCORED
 ```
 
-## Rubric (exact, from `docs/измененные поля.xlsx`)
-`AtamuraOKK/scoring/rubrics/tm_call_v1.json` — the 21-criterion / 100-point TM-call
-checklist, versioned and editable without code changes. **Conversational v1 scores
-the 18 transcript-derivable criteria (max 91)**; the 3 CRM/WhatsApp items (#13 send,
-#19 CRM data, #20 tasks) are marked `source: crm` and excluded for now. Final metric
-= points / 91 × 100. Zones: **85+ strong / 80–84 normal / 75–79 borderline / <75 risk**.
+## Rubric (`tm-call-v2` — 5 holistic criteria)
+`AtamuraOKK/scoring/rubrics/tm_call_v2.json` — the active rubric collapses the old
+20-line checklist into **5 big criteria**, each scored holistically over its own
+0..max scale, weights = the sum of that block's former line-items:
+
+| # | Criterion (`block_id`) | Max |
+|---|------------------------|-----|
+| 1 | Приветствие (`greeting`) | 5 |
+| 2 | Выявление потребности (`needs`) | 17 |
+| 3 | Презентация (`presentation`) | 11 |
+| 4 | Закрытие на КЭВ (`closing`) — folds in the old «дожим» item | 37 |
+| 5 | Отработка возражений (`objections`) — full marks if no objection | 21 |
+
+Total **91**. The 3 CRM/WhatsApp items (WhatsApp send, CRM-card data, tasks/касания)
+are **not audio-scorable** and stay out of the rubric (the parked 9 pts to 100).
+Final metric = points / 91 × 100. Zones: **85+ strong / 80–84 normal / 75–79
+borderline / <75 risk**. The prior `tm_call_v1.json` (21-item) is kept for history;
+re-score calls (`make score` / re-run the score stage) to move them onto v2.
 
 ## Call-type classification (avoids polluting the metric)
 Not every answered+recorded "first call" is a qualification call. The scorer
@@ -34,7 +46,9 @@ manager from content — fixing a class of mislabeled-speaker mis-scores.
 > inherent to the company checklist, not a bug.
 
 ## What the scorer returns (per call)
-Per-criterion `{score, max, justification, evidence-quote}`; block subtotals; total
+Per-criterion `{score, max, justification, evidence-quote, recommendation}` (the
+recommendation = Claude's concrete "improve this next call" feedback per criterion);
+block subtotals; total
 % + zone; **target/non-target**; customer & agent **sentiment**; 2–3 sentence
 **summary**; **red flags**; and the **strengths / growth-zone / training
 recommendation** the reports need — all in Russian.
@@ -74,8 +88,8 @@ distributions stay correct after re-scoring:
   strengths/growth/training, red_flags`. Drives scorecards, zone roll-ups,
   target/non-target, trends.
 - **`call_criteria_latest`** — one row per (call, criterion): `score, max,
-  percent_of_max, block, justification, evidence`. Drives per-criterion/block
-  distributions and "team's weakest criteria".
+  percent_of_max, block, justification, evidence, recommendation`. Drives
+  per-criterion/block distributions and "team's weakest criteria".
 
 (Migration `b2c3d4e5f6a7`. Views aren't autogen-tracked, so `alembic check` stays
 clean.)

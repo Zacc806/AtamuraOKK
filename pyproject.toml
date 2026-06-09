@@ -159,6 +159,9 @@ line-length = 88
 "AtamuraOKK/scoring/*" = ["RUF001", "RUF002", "RUF003"]
 # Report narrative/render are intentionally in Russian.
 "AtamuraOKK/reporting/*" = ["RUF001", "RUF002", "RUF003"]
+# Companion API DTOs/docs carry Russian business terms (ОКК, Звонки, авто-разбор).
+"AtamuraOKK/web/api/v1/*" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_companion_api.py" = ["RUF001", "RUF002", "RUF003", "S105"]
 # Ops scripts print to the operator's console by design.
 "metabase/*" = ["T201"]
 

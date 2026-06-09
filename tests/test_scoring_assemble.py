@@ -6,7 +6,7 @@ from AtamuraOKK.scoring.base import CallScore, CriterionScore
 from AtamuraOKK.scoring.rubric import Rubric, load_rubric
 from AtamuraOKK.scoring.worker import _assemble
 
-_OBJECTIONS_MAX = 21  # sum of objection-block criteria maxima in tm-call-v1
+_OBJECTIONS_MAX = 21  # max of the objection criterion in tm-call-v2
 
 
 def _call_score(rubric: Rubric, *, objections_present: bool) -> CallScore:
@@ -16,7 +16,13 @@ def _call_score(rubric: Rubric, *, objections_present: bool) -> CallScore:
         is_qualification_call=True,
         manager_identified=True,
         criteria=[
-            CriterionScore(id=c.id, score=c.max, justification="ok", evidence="")
+            CriterionScore(
+                id=c.id,
+                score=c.max,
+                justification="ok",
+                evidence="",
+                recommendation="-",
+            )
             for c in rubric.scored_criteria
         ],
         objections_present=objections_present,
@@ -51,3 +57,19 @@ def test_objections_scored_when_present() -> None:
     assert "objections" in payload["blocks"]
     assert payload["max_points"] == rubric.max_conversational
     assert payload["percent"] == 100.0
+
+
+def test_five_criteria_with_recommendation() -> None:
+    """tm-call-v2 collapses to 5 criteria, each carrying a recommendation."""
+    rubric = load_rubric()
+    payload = _assemble(_call_score(rubric, objections_present=True), rubric)
+
+    assert len(payload["per_criterion"]) == 5
+    assert {c["block_id"] for c in payload["per_criterion"]} == {
+        "greeting",
+        "needs",
+        "presentation",
+        "closing",
+        "objections",
+    }
+    assert all("recommendation" in c for c in payload["per_criterion"])

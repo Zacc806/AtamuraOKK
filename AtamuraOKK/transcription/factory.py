@@ -35,12 +35,23 @@ def get_transcriber() -> AsyncTranscriber:
         )
         return FasterWhisperTranscriber()
     if provider in ("yandex", "speechkit"):
+        if settings.yandex_stt_mode.lower() == "async":
+            from AtamuraOKK.transcription.yandex_async_provider import (  # noqa: PLC0415
+                YandexAsyncTranscriber,
+            )
+
+            logger.info(
+                "Transcriber: Yandex SpeechKit v3 async ({m})",
+                m=settings.yandex_stt_model,
+            )
+            return YandexAsyncTranscriber()
         from AtamuraOKK.transcription.yandex_provider import (  # noqa: PLC0415
             YandexSpeechKitTranscriber,
         )
 
         logger.info(
-            "Transcriber: Yandex SpeechKit v3 ({m})", m=settings.yandex_stt_model
+            "Transcriber: Yandex SpeechKit v3 streaming ({m})",
+            m=settings.yandex_stt_model,
         )
         return YandexSpeechKitTranscriber()
     msg = (

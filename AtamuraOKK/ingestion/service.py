@@ -179,7 +179,12 @@ def _apply_scope(
         return  # already in flight / done; leave it
 
     reason: str | None = None
-    if not call.is_first_call:
+    # Duration gate first: a sub-threshold call is never a scorable conversation,
+    # no matter how it entered the table (legacy rows, requalification, etc.).
+    # Defense in depth behind the ingestion-scan filter (_is_answered_recorded).
+    if call.duration_sec < settings.ingest_min_duration_sec:
+        reason = "too_short"
+    elif not call.is_first_call:
         reason = "not_first_call"
     elif settings.ingest_require_qualified and qualified is not True:
         reason = "not_qualified" if qualified is False else "qualification_unknown"

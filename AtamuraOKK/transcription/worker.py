@@ -53,6 +53,12 @@ async def _transcribe_audio(
     workdir: Path,
 ) -> TranscriptResult:
     """Transcribe one recording into a speaker-labeled result."""
+    # Some engines (Yandex async) take the whole multi-channel file in one
+    # request and return per-channel results — skip the ffmpeg split for them.
+    transcribe_file = getattr(transcriber, "transcribe_file", None)
+    if getattr(transcriber, "wants_full_file", False) and transcribe_file:
+        return await transcribe_file(audio_path)
+
     channels = probe_channels(audio_path)
     segments: list[Segment] = []
     model_label = ""

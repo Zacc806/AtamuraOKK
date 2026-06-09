@@ -110,6 +110,15 @@ class Settings(BaseSettings):
     # IAM token-exchange endpoint (KZ installation; use iam.api.cloud.yandex.net
     # for the global region).
     yandex_iam_endpoint: str = "https://iam.api.yandexcloud.kz/iam/v1/tokens"
+    # Recognition mode: "async" (RecognizeFile — whole stereo file, no 5-min cap,
+    # the default) or "stream" (RecognizeStreaming — mono, 5-min/session limit).
+    yandex_stt_mode: str = "async"
+    # Operations API endpoint for polling async recognition (KZ installation;
+    # use operation.api.cloud.yandex.net:443 for the global region).
+    yandex_operation_endpoint: str = "operation.api.yandexcloud.kz:443"
+    # Async polling cadence + per-call ceiling (status checks are quota'd at 5/s).
+    yandex_async_poll_interval: float = 2.0
+    yandex_async_timeout: float = 900.0
     yandex_stt_model: str = "general"
     # Apply text normalization (numbers, punctuation, capitalization) to finals.
     yandex_stt_normalize: bool = True
@@ -219,6 +228,32 @@ class Settings(BaseSettings):
     report_dir: Path = PROJECT_ROOT / "reports"
     # Team-average score norm (below = underperforming), from the QA-dept docs.
     report_score_norm: int = 75
+
+    # --- Companion read API (/api/v1) ---
+    # Shared bearer token the sales-companion BFF must present on every /api/v1
+    # request. Empty = fail closed (the API returns 503 until a token is set), so
+    # call-quality data is never served unauthenticated by accident.
+    companion_api_token: str = ""
+
+    # --- Companion "Мой день" read-through (live Bitrix Zvandau TM funnel) ---
+    # The "Zvandau" deal category (24) whose stages ARE the TM's day signals
+    # (кому звонить / недозвон / записан на встречу / факт. визит). Deals here are
+    # owned by the telemarketer via ASSIGNED_BY_ID, so the day view attributes to
+    # the manager directly. This is the funnel the scored TMs actually work in
+    # (the "Телемаркетинг" cat 0 is legacy/closed-out; cat 2 "Отдел продаж" belongs
+    # to the sales closer). See docs/companion-day.md.
+    companion_tm_category_id: int = 24
+    # The Zvandau stage STATUS_ID that marks a conducted meeting (conversion num.).
+    companion_meeting_stage_id: str = "C24:WON"  # "Фактический визит (успешная сделка)"
+    # Monthly meeting plan target per manager (a Положение policy input, NOT in
+    # Bitrix) — used for plan_pct and the ≥60% bonus gate. Honest config, not data.
+    companion_plan_target_meetings: int = 45
+    # Action list is capped at max_actions; the three stat counters are computed
+    # over up to max_scan open deals (so they reflect the whole pipeline, not just
+    # the shown slice). max_scan bounds the paged read for a huge pipeline.
+    companion_day_max_actions: int = 50
+    companion_day_max_scan: int = 500
+    companion_day_cache_ttl_seconds: int = 60
 
     # --- Phase 0 spike ---
     # Where the transcription-eval spike writes calls metadata, audio, and

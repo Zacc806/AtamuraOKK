@@ -36,6 +36,7 @@ async def _engine(anyio_backend: Any) -> AsyncGenerator[AsyncEngine, None]:
     """
     from AtamuraOKK.db.meta import meta
     from AtamuraOKK.db.models import load_all_models
+    from AtamuraOKK.db.views import create_reporting_views
 
     load_all_models()
 
@@ -44,6 +45,9 @@ async def _engine(anyio_backend: Any) -> AsyncGenerator[AsyncEngine, None]:
     engine = create_async_engine(str(settings.db_url))
     async with engine.begin() as conn:
         await conn.run_sync(meta.create_all)
+        # Reporting views are migration-owned in prod; recreate them here since
+        # the test schema is built from metadata, not migrations.
+        await create_reporting_views(conn)
 
     try:
         yield engine

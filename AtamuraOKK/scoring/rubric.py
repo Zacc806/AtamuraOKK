@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 _RUBRIC_DIR = Path(__file__).parent / "rubrics"
-DEFAULT_VERSION = "tm-call-v1"
+DEFAULT_VERSION = "tm-call-v2"
 
 
 @dataclass(frozen=True)

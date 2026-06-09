@@ -63,6 +63,14 @@ services:
       ATAMURAOKK_DB_BASE: AtamuraOKK
     volumes:
       - .:/app/src/
+    networks:
+      # Default compose network (db/minio/redis reachable by hostname) ...
+      default: {}
+      # ... plus the shared bridge the sales-companion joins. The companion's
+      # nginx reaches this service as http://okk-web:8000 (the alias below).
+      atamura-net:
+        aliases:
+          - okk-web
 
   db:
     image: postgres:18.3-trixie
@@ -196,3 +204,9 @@ volumes:
     name: AtamuraOKK-db-data
   AtamuraOKK-minio-data:
     name: AtamuraOKK-minio-data
+
+networks:
+  # Shared bridge both this stack and sales-companion join — the "marriage".
+  # Create once before `up`:  docker network create atamura-net
+  atamura-net:
+    external: true

@@ -39,6 +39,10 @@ class CriterionScore(BaseModel):
     evidence: str = Field(
         description="Цитата из разговора на языке оригинала (или пусто)"
     )
+    recommendation: str = Field(
+        description="Конкретная рекомендация менеджеру: что улучшить по этому "
+        "критерию на следующем звонке (на русском)"
+    )
 
 
 class CallScore(BaseModel):
