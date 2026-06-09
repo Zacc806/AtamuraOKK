@@ -25,6 +25,7 @@ from AtamuraOKK.scoring.meetings.errors import (
 )
 from AtamuraOKK.scoring.meetings.llm import BaseLLMScorer
 from AtamuraOKK.scoring.meetings.meeting import MeetingScorer
+from AtamuraOKK.scoring.meetings.openai import OpenAIScorer
 from AtamuraOKK.scoring.meetings.recordings import (
     drain_pipeline,
     ingest_recordings,
@@ -51,6 +52,7 @@ __all__ = [
     "MeetingScorer",
     "MeetingStatus",
     "MeetingStore",
+    "OpenAIScorer",
     "ProviderUnavailableError",
     "Rubric",
     "ScoreResult",

@@ -29,6 +29,10 @@ class MeetingScoringConfig(BaseSettings):
         ),
     )
     anthropic_model: str = "claude-sonnet-4-6"
+    # Which LLM scores meetings: "anthropic" (Claude, the default) or "openai".
+    # OpenAI is the fallback when the Anthropic key is out of credit.
+    meetings_scoring_engine: str = "anthropic"
+    openai_scoring_model: str = "gpt-4o"
 
     # Scoring engine knobs.
     score_pass_threshold: int = 75
