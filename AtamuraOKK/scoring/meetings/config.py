@@ -86,6 +86,8 @@ class MeetingScoringConfig(BaseSettings):
     meetings_work_dir: Path = _REPO_ROOT / ".meetings"
     # SQLite state file; relative paths resolve under ``meetings_work_dir``.
     meetings_db_path: str = "meetings.db"
+    # CSV export of scored meetings (`report` command); relative → work dir.
+    meetings_report_path: str = "meetings_report.csv"
     # How many recordings each stage processes per invocation.
     meetings_batch_limit: int = 50
     # Give up on a recording after this many failed download/transcribe attempts.

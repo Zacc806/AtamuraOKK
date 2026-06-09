@@ -33,6 +33,7 @@ from AtamuraOKK.scoring.meetings.recordings import (
     run_pipeline,
     score_pending,
 )
+from AtamuraOKK.scoring.meetings.report import export_scored
 from AtamuraOKK.scoring.meetings.router import build_meeting_scorer
 from AtamuraOKK.scoring.meetings.rubric import Criterion, Rubric, load_rubric
 from AtamuraOKK.scoring.meetings.script import Script, load_script
@@ -63,6 +64,7 @@ __all__ = [
     "chunk_transcript",
     "download_pending",
     "drain_pipeline",
+    "export_scored",
     "ingest_recordings",
     "load_rubric",
     "load_script",

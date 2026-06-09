@@ -258,6 +258,18 @@ class MeetingStore:
         ).fetchall()
         return {r["status"]: r["n"] for r in rows}
 
+    def scored(self) -> list[sqlite3.Row]:
+        """All SCORED recordings, newest meeting first."""
+        return list(
+            self._conn.execute(
+                """
+                SELECT * FROM recordings WHERE status = ?
+                ORDER BY COALESCE(meeting_at, created_at) DESC, file_id DESC
+                """,
+                (MeetingStatus.SCORED.value,),
+            ).fetchall(),
+        )
+
 
 @contextmanager
 def open_store(db_path: Path | None = None) -> Iterator[MeetingStore]:

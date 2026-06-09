@@ -12,6 +12,7 @@ Two modes:
       python -m AtamuraOKK.scoring.meetings score       # TRANSCRIBED → SCORED
       python -m AtamuraOKK.scoring.meetings drain       # loop stages until drained
       python -m AtamuraOKK.scoring.meetings retry       # re-open FAILED recordings
+      python -m AtamuraOKK.scoring.meetings report      # export scored meetings → CSV
       python -m AtamuraOKK.scoring.meetings status      # print state counts
 
   Or run it on a schedule: python -m AtamuraOKK.scoring.meetings.worker
@@ -37,7 +38,17 @@ from AtamuraOKK.scoring.meetings.base import CallForScoring
 from AtamuraOKK.scoring.meetings.router import build_meeting_scorer
 
 _PIPELINE_CMDS = frozenset(
-    {"ingest", "download", "transcribe", "score", "run", "drain", "retry", "status"},
+    {
+        "ingest",
+        "download",
+        "transcribe",
+        "score",
+        "run",
+        "drain",
+        "retry",
+        "report",
+        "status",
+    },
 )
 
 
@@ -61,6 +72,10 @@ async def _run_pipeline_cmd(cmd: str, limit: int | None) -> str:
             return json.dumps(store.counts(), ensure_ascii=False, indent=2)
     if cmd == "retry":
         return _fmt({"requeued": await recordings.requeue_failed()})
+    if cmd == "report":
+        from AtamuraOKK.scoring.meetings.report import export_scored  # noqa: PLC0415
+
+        return _fmt(export_scored())
 
     handlers: dict[str, Callable[[], Awaitable[object]]] = {
         "ingest": lambda: recordings.ingest_recordings(limit=limit),
