@@ -1,0 +1,13 @@
+# Runs okk-meetings.service every 30 minutes (5 min after boot).
+
+[Unit]
+Description=Run the OP meeting pipeline every 30 minutes
+
+[Timer]
+Unit=okk-meetings.service
+OnBootSec=5min
+OnUnitActiveSec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
