@@ -156,10 +156,11 @@ class MeetingStore:
 
     def get(self, file_id: int) -> sqlite3.Row | None:
         """Fetch one recording row by id."""
-        return self._conn.execute(
+        row: sqlite3.Row | None = self._conn.execute(
             "SELECT * FROM recordings WHERE file_id = ?",
             (file_id,),
         ).fetchone()
+        return row
 
     # --- transitions ---
 
