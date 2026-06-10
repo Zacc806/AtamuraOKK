@@ -102,18 +102,14 @@ def _assemble(result: CallScore, rubric: Rubric) -> dict[str, Any]:
     }
 
 
-async def _score_one(
+async def _persist_score(
     session: AsyncSession,
     call: Call,
-    transcript: Transcript,
-    scorer: Scorer,
+    result: CallScore,
     rubric: Rubric,
+    model_label: str,
 ) -> None:
-    result = await scorer.score(
-        transcript=transcript.full_text,
-        rubric=rubric,
-        direction=str(call.direction),
-    )
+    """Assemble + upsert the Score row for a call. Caller sets status / commits."""
     payload = _assemble(result, rubric)
     values = {
         "call_id": call.id,
@@ -126,7 +122,7 @@ async def _score_one(
         },
         "summary": result.summary,
         "flags": result.red_flags,
-        "model": scorer.model_label,
+        "model": model_label,
     }
     # Upsert: a re-claim or duplicate delivery must not create a second row.
     stmt = insert(Score).values(**values)
@@ -137,8 +133,6 @@ async def _score_one(
             set_=update_cols,
         ),
     )
-    call.status = CallStatus.SCORED
-    call.error = None
     logger.info(
         "Scored {id}: {pct}% ({zone})",
         id=call.bitrix_call_id,
@@ -147,26 +141,21 @@ async def _score_one(
     )
 
 
-async def _score_claimed(
+async def _score_one(
     session: AsyncSession,
     call: Call,
     transcript: Transcript,
     scorer: Scorer,
     rubric: Rubric,
-) -> str:
-    """Score one already-claimed (SCORING) call. Caller commits.
-
-    Mutates ``call`` to SCORED / FAILED, clears the claim; returns the status.
-    """
-    try:
-        await _score_one(session, call, transcript, scorer, rubric)
-    except Exception as exc:  # record + move on
-        call.attempts += 1
-        call.status = CallStatus.FAILED
-        call.error = f"scoring: {exc}"
-        logger.warning("Scoring failed for {id}: {e}", id=call.bitrix_call_id, e=exc)
-    call.claimed_at = None
-    return call.status.value
+) -> None:
+    result = await scorer.score(
+        transcript=transcript.full_text,
+        rubric=rubric,
+        direction=str(call.direction),
+    )
+    await _persist_score(session, call, result, rubric, scorer.model_label)
+    call.status = CallStatus.SCORED
+    call.error = None
 
 
 async def score_one(
@@ -175,13 +164,16 @@ async def score_one(
     scorer: Scorer | None = None,
     rubric: Rubric | None = None,
 ) -> str:
-    """Score one claimed (SCORING) call in its own session.
+    """Score one claimed (SCORING) call without holding a DB connection.
 
-    The unit of work for the broker task. Returns the resulting status value, or
-    ``"skipped"`` if no longer claimed for scoring.
+    Three short transactions bracket the slow LLM call: verify the claim and read
+    the transcript, release the connection for the LLM round-trip, then reacquire
+    to persist the score (re-verifying the claim so a duplicate delivery returns
+    ``"skipped"``). Returns the resulting status value.
     """
     scorer = scorer or get_scorer()
     rubric = rubric or load_rubric()
+
     async with session_scope() as session:
         call = await session.get(Call, call_id)
         if call is None or call.status != CallStatus.SCORING:
@@ -194,7 +186,43 @@ async def score_one(
             call.error = "no transcript"
             call.claimed_at = None
             return call.status.value
-        return await _score_claimed(session, call, transcript, scorer, rubric)
+        transcript_text = transcript.full_text
+        direction = str(call.direction)
+
+    result: CallScore | None = None
+    error: str | None = None
+    try:
+        result = await scorer.score(
+            transcript=transcript_text,
+            rubric=rubric,
+            direction=direction,
+        )
+    except Exception as exc:  # record + move on
+        error = f"scoring: {exc}"
+        logger.warning("Scoring failed for call {id}: {e}", id=call_id, e=exc)
+
+    async with session_scope() as session:
+        call = await session.get(Call, call_id)
+        if call is None or call.status != CallStatus.SCORING:
+            return "skipped"
+        if result is not None:
+            try:
+                await _persist_score(session, call, result, rubric, scorer.model_label)
+                call.status = CallStatus.SCORED
+                call.error = None
+            except Exception as exc:  # record + move on
+                call.attempts += 1
+                call.status = CallStatus.FAILED
+                call.error = f"scoring: {exc}"
+                logger.warning(
+                    "Scoring failed for {id}: {e}", id=call.bitrix_call_id, e=exc
+                )
+        else:
+            call.attempts += 1
+            call.status = CallStatus.FAILED
+            call.error = error
+        call.claimed_at = None
+        return call.status.value
 
 
 async def score_pending(*, limit: int = 50) -> ScoreStats:

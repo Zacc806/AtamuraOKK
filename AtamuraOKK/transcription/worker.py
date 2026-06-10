@@ -107,47 +107,22 @@ async def _persist_transcript(
     await session.execute(stmt)
 
 
-async def _transcribe_claimed(
-    session: AsyncSession,
-    call: Call,
+async def _transcribe_external(
+    audio_object_key: str,
     transcriber: AsyncTranscriber,
     storage: ObjectStorage,
-) -> str:
-    """Transcribe one already-claimed (TRANSCRIBING) call. Caller commits.
+) -> TranscriptResult:
+    """Download + transcribe one recording. Holds no DB connection.
 
-    Mutates ``call`` to its settled status (TRANSCRIBED / PENDING_KK / FAILED)
-    and clears the claim; returns the resulting status value.
+    Runs between the claim-verify and result-commit transactions; raises on any
+    failure so the caller records it against the call.
     """
-    bx_id = call.bitrix_call_id
-    if not call.audio_object_key:
-        call.status = CallStatus.FAILED
-        call.error = "no audio_object_key"
-    else:
-        try:
-            audio_bytes = await storage.download(call.audio_object_key)
-            with tempfile.TemporaryDirectory() as tmp:
-                tmpdir = Path(tmp)
-                src = tmpdir / Path(call.audio_object_key).name
-                src.write_bytes(audio_bytes)
-                result = await _transcribe_audio(transcriber, src, tmpdir)
-
-            call.language = result.language
-            handles_kazakh = getattr(transcriber, "handles_kazakh", False)
-            if result.language == "kk" and not handles_kazakh:
-                # Park Kazakh when the engine can't handle it (whisper/openai).
-                call.status = CallStatus.PENDING_KK
-                call.error = None
-            else:
-                await _persist_transcript(session, call.id, result)
-                call.status = CallStatus.TRANSCRIBED
-                call.error = None
-        except Exception as exc:  # record + move on
-            call.attempts += 1
-            call.status = CallStatus.FAILED
-            call.error = f"transcription: {exc}"
-            logger.warning("Transcription failed for {id}: {e}", id=bx_id, e=exc)
-    call.claimed_at = None
-    return call.status.value
+    audio_bytes = await storage.download(audio_object_key)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmpdir = Path(tmp)
+        src = tmpdir / Path(audio_object_key).name
+        src.write_bytes(audio_bytes)
+        return await _transcribe_audio(transcriber, src, tmpdir)
 
 
 def _load_transcriber() -> AsyncTranscriber:
@@ -174,11 +149,53 @@ async def transcribe_one(
     if transcriber is None:
         transcriber = await asyncio.to_thread(_load_transcriber)
     storage = storage or get_storage()
+
     async with session_scope() as session:
         call = await session.get(Call, call_id)
         if call is None or call.status != CallStatus.TRANSCRIBING:
             return "skipped"
-        return await _transcribe_claimed(session, call, transcriber, storage)
+        audio_object_key = call.audio_object_key
+        bx_id = call.bitrix_call_id
+
+    if not audio_object_key:
+        async with session_scope() as session:
+            call = await session.get(Call, call_id)
+            if call is None or call.status != CallStatus.TRANSCRIBING:
+                return "skipped"
+            call.status = CallStatus.FAILED
+            call.error = "no audio_object_key"
+            call.claimed_at = None
+            return call.status.value
+
+    result: TranscriptResult | None = None
+    error: str | None = None
+    try:
+        result = await _transcribe_external(audio_object_key, transcriber, storage)
+    except Exception as exc:  # record + move on
+        error = f"transcription: {exc}"
+        logger.warning("Transcription failed for {id}: {e}", id=bx_id, e=exc)
+
+    async with session_scope() as session:
+        call = await session.get(Call, call_id)
+        if call is None or call.status != CallStatus.TRANSCRIBING:
+            return "skipped"
+        if result is not None:
+            call.language = result.language
+            handles_kazakh = getattr(transcriber, "handles_kazakh", False)
+            if result.language == "kk" and not handles_kazakh:
+                # Park Kazakh when the engine can't handle it (whisper/openai).
+                call.status = CallStatus.PENDING_KK
+                call.error = None
+            else:
+                await _persist_transcript(session, call.id, result)
+                call.status = CallStatus.TRANSCRIBED
+                call.error = None
+        else:
+            call.attempts += 1
+            call.status = CallStatus.FAILED
+            call.error = error
+        call.claimed_at = None
+        return call.status.value
 
 
 def _tally(stats: TranscribeStats, status: str) -> None:
@@ -259,7 +276,12 @@ async def transcribe_pending(
             st=status,
         )
 
-    await asyncio.gather(*(run(cid) for cid in call_ids))
+    results = await asyncio.gather(
+        *(run(cid) for cid in call_ids), return_exceptions=True
+    )
+    for cid, res in zip(call_ids, results, strict=True):
+        if isinstance(res, Exception):
+            logger.error("Transcription task crashed for call {id}: {e}", id=cid, e=res)
 
     logger.info(
         "Transcription done: attempted={a} transcribed={t} pending_kk={k} failed={f}",

@@ -68,10 +68,15 @@ def parse_period(period: str | None) -> tuple[datetime, datetime, str]:
                 f"period must be 'YYYY-MM' (got {period!r})",
             ) from exc
 
-    start = datetime(year, month, 1, tzinfo=tz)
-    # Exclusive upper bound: midnight of the first day of the next month.
-    if month == 12:
-        end = datetime(year + 1, 1, 1, tzinfo=tz)
-    else:
-        end = datetime(year, month + 1, 1, tzinfo=tz)
+    # Exclusive upper bound: midnight of the first day of the next month. Guard
+    # the constructors: an out-of-range year (e.g. ?period=9999999999-01) raises
+    # ValueError/OverflowError, which must surface as a 422, not a 500.
+    try:
+        start = datetime(year, month, 1, tzinfo=tz)
+        if month == 12:
+            end = datetime(year + 1, 1, 1, tzinfo=tz)
+        else:
+            end = datetime(year, month + 1, 1, tzinfo=tz)
+    except (ValueError, OverflowError) as exc:
+        raise PeriodError(f"period must be 'YYYY-MM' (got {period!r})") from exc
     return start, end, f"{year:04d}-{month:02d}"

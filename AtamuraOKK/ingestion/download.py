@@ -33,47 +33,53 @@ class DownloadStats:
     failed: int = 0
 
 
-def _object_key(call: Call) -> str:
-    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in call.bitrix_call_id)
+def _object_key(bitrix_call_id: str) -> str:
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in bitrix_call_id)
     return f"calls/{safe}.mp3"
 
 
-async def _resolve_url(call: Call, bx: BitrixClient) -> str | None:
-    if call.recording_url:
-        return call.recording_url
-    if call.record_file_id:
-        info = await bx.call("disk.file.get", {"id": call.record_file_id})
-        if info:
-            return info.get("DOWNLOAD_URL")
-    return None
-
-
-async def _download_call(
-    call: Call,
+async def _fetch_recording(
+    recording_url: str | None,
+    record_file_id: int | None,
+    bitrix_call_id: str,
     bx: BitrixClient,
     http: httpx.AsyncClient,
     storage: ObjectStorage,
 ) -> str:
-    """Download one already-claimed call. Mutates ``call``; caller commits.
+    """Resolve the recording URL, download it, and store it in object storage.
+
+    Holds **no** DB connection — runs between the claim-verify and result-commit
+    transactions. Returns the object-storage key; raises on any failure so the
+    caller records it against the call.
+    """
+    url = recording_url
+    if not url and record_file_id:
+        info = await bx.call("disk.file.get", {"id": record_file_id})
+        if info:
+            url = info.get("DOWNLOAD_URL")
+    if not url:
+        raise ValueError("no recording url / file id")
+    resp = await http.get(url)
+    resp.raise_for_status()
+    key = _object_key(bitrix_call_id)
+    await storage.put_bytes(key, resp.content, content_type=_AUDIO_CONTENT_TYPE)
+    return key
+
+
+def _apply_download(call: Call, key: str | None, error: str | None) -> str:
+    """Settle a claimed call after a download attempt. Mutates ``call``; caller commits.
 
     On failure under the attempt cap the claim is released back to ``NEW`` so a
     later pass retries it; once the cap is hit the call is dead-lettered to
     ``FAILED``. Returns the resulting status value.
     """
     call.attempts += 1
-    try:
-        url = await _resolve_url(call, bx)
-        if not url:
-            raise ValueError("no recording url / file id")
-        resp = await http.get(url)
-        resp.raise_for_status()
-        key = _object_key(call)
-        await storage.put_bytes(key, resp.content, content_type=_AUDIO_CONTENT_TYPE)
+    if error is None and key is not None:
         call.audio_object_key = key
         call.status = CallStatus.DOWNLOADED
         call.error = None
-    except (BitrixError, httpx.HTTPError, ValueError, OSError) as exc:
-        call.error = str(exc)
+    else:
+        call.error = error
         call.status = (
             CallStatus.FAILED if call.attempts >= _MAX_ATTEMPTS else CallStatus.NEW
         )
@@ -81,29 +87,49 @@ async def _download_call(
             "Download failed for {id} (attempt {n}): {err}",
             id=call.bitrix_call_id,
             n=call.attempts,
-            err=exc,
+            err=error,
         )
     call.claimed_at = None
     return call.status.value
 
 
 async def download_one(call_id: int) -> str:
-    """Download one claimed (DOWNLOADING) call in its own session/clients.
+    """Download one claimed (DOWNLOADING) call without holding a DB connection.
 
-    The unit of work for the broker task. Returns the resulting status value, or
-    ``"skipped"`` if the row is no longer claimed for download.
+    Three short transactions bracket the slow transfer: verify the claim and read
+    the source refs, release the connection for the Bitrix/HTTP/S3 round-trip,
+    then reacquire to record the outcome (re-verifying the claim so a duplicate
+    delivery returns ``"skipped"``). Returns the resulting status value.
     """
     storage = get_storage()
     await storage.ensure_bucket()
-    async with (
-        session_scope() as session,
-        BitrixClient() as bx,
-        httpx.AsyncClient(timeout=120.0, follow_redirects=True) as http,
-    ):
+
+    async with session_scope() as session:
         call = await session.get(Call, call_id)
         if call is None or call.status != CallStatus.DOWNLOADING:
             return "skipped"
-        return await _download_call(call, bx, http, storage)
+        recording_url = call.recording_url
+        record_file_id = call.record_file_id
+        bitrix_call_id = call.bitrix_call_id
+
+    key: str | None = None
+    error: str | None = None
+    async with (
+        BitrixClient() as bx,
+        httpx.AsyncClient(timeout=120.0, follow_redirects=True) as http,
+    ):
+        try:
+            key = await _fetch_recording(
+                recording_url, record_file_id, bitrix_call_id, bx, http, storage
+            )
+        except (BitrixError, httpx.HTTPError, ValueError, OSError) as exc:
+            error = str(exc)
+
+    async with session_scope() as session:
+        call = await session.get(Call, call_id)
+        if call is None or call.status != CallStatus.DOWNLOADING:
+            return "skipped"
+        return _apply_download(call, key, error)
 
 
 async def download_pending(*, limit: int = 200) -> DownloadStats:
@@ -113,23 +139,15 @@ async def download_pending(*, limit: int = 200) -> DownloadStats:
     if not call_ids:
         return stats
 
-    storage = get_storage()
-    await storage.ensure_bucket()
-    async with (
-        BitrixClient() as bx,
-        httpx.AsyncClient(timeout=120.0, follow_redirects=True) as http,
-    ):
-        for call_id in call_ids:
-            async with session_scope() as session:
-                call = await session.get(Call, call_id)
-                if call is None or call.status != CallStatus.DOWNLOADING:
-                    continue
-                stats.attempted += 1
-                status = await _download_call(call, bx, http, storage)
-            if status == CallStatus.DOWNLOADED.value:
-                stats.downloaded += 1
-            elif status == CallStatus.FAILED.value:
-                stats.failed += 1
+    for call_id in call_ids:
+        status = await download_one(call_id)
+        if status == "skipped":
+            continue
+        stats.attempted += 1
+        if status == CallStatus.DOWNLOADED.value:
+            stats.downloaded += 1
+        elif status == CallStatus.FAILED.value:
+            stats.failed += 1
 
     logger.info(
         "Download done: attempted={a} downloaded={d} failed={f}",
