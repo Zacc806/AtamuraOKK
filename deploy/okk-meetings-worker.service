@@ -1,0 +1,26 @@
+# Atamura OKK — ОП meeting-recording scoring worker (long-lived scheduler).
+#
+# Install:
+#   sudo cp deploy/okk-meetings-worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now okk-meetings-worker
+#   journalctl -u okk-meetings-worker -f
+#
+# The app reads .env from WorkingDirectory (pydantic-settings), so no
+# EnvironmentFile is needed. Adjust User / paths to your deploy.
+
+[Unit]
+Description=Atamura OKK - OP meeting-recording scoring worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=okk
+WorkingDirectory=/opt/AtamuraOKK
+ExecStart=/opt/AtamuraOKK/.venv/bin/python -m AtamuraOKK.scoring.meetings.worker
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

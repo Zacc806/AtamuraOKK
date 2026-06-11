@@ -152,6 +152,9 @@ line-length = 88
 "tests/*" = [
     "S101",    # Use of assert detected
 	"PLC0415", # Import outside toplevel
+	"RUF001",  # Ambiguous unicode — RU/KK test fixtures (Cyrillic).
+	"RUF002",  # Ambiguous unicode in docstrings — same.
+	"RUF003",  # Ambiguous unicode in comments — same.
 ]
 # Intentionally full of Cyrillic (Kazakh) letters for language detection.
 "AtamuraOKK/transcription/language.py" = ["RUF001", "RUF002", "RUF003"]
