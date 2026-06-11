@@ -41,6 +41,13 @@ class BitrixDiskError(RuntimeError):
     """A Bitrix Disk REST call returned an ``error`` payload."""
 
 
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass(slots=True)
 class MeetingFile:
     """One meeting recording found on the Disk."""
@@ -53,6 +60,9 @@ class MeetingFile:
     download_url: str | None
     created_at: str | None  # Bitrix CREATE_TIME (when dumped into the folder)
     meeting_at: datetime | None  # parsed from the filename (real meeting time)
+    # Bitrix user id of whoever uploaded the file (CREATED_BY) — the meeting is
+    # attributed to this manager when pushed to Postgres.
+    created_by: int | None = None
 
 
 def parse_meeting_time(name: str) -> datetime | None:
@@ -184,6 +194,7 @@ class MeetingDiskSource:
                     download_url=child.get("DOWNLOAD_URL"),
                     created_at=child.get("CREATE_TIME"),
                     meeting_at=parse_meeting_time(name),
+                    created_by=_int_or_none(child.get("CREATED_BY")),
                 )
                 yielded += 1
                 if max_items is not None and yielded >= max_items:

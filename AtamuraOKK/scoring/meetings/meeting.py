@@ -76,6 +76,7 @@ class MeetingScorer:
         pass_threshold: int = 75,
         overlap_lines: int = 1,
         kev_bonus_points: int = 10,
+        chunk_concurrency: int = 3,
     ) -> None:
         self.base = base
         self.rubric = rubric
@@ -83,6 +84,7 @@ class MeetingScorer:
         self.pass_threshold = pass_threshold
         self.overlap_lines = overlap_lines
         self.kev_bonus_points = kev_bonus_points
+        self.chunk_concurrency = max(1, chunk_concurrency)
         self._min_merge_blocks = frozenset(rubric.min_merge_blocks)
 
     async def score(self, call: CallForScoring) -> ScoreResult:
@@ -109,7 +111,15 @@ class MeetingScorer:
             )
             for i, chunk in enumerate(chunks)
         ]
-        results = await asyncio.gather(*(self.base.score(c) for c in sub_calls))
+        # Bound the fan-out: a 90-min meeting is several chunks, and each chunk
+        # already retries internally — all of them at once invites rate limits.
+        gate = asyncio.Semaphore(self.chunk_concurrency)
+
+        async def _scored(sub: CallForScoring) -> ScoreResult:
+            async with gate:
+                return await self.base.score(sub)
+
+        results = await asyncio.gather(*(_scored(c) for c in sub_calls))
         return self._merge(list(results), call)
 
     def _merge(self, results: list[ScoreResult], call: CallForScoring) -> ScoreResult:

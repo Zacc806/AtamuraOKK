@@ -57,7 +57,13 @@ class S3Storage:
                 client.head_bucket(Bucket=self.bucket)
             except ClientError:
                 logger.info("Creating bucket {bucket}", bucket=self.bucket)
-                client.create_bucket(Bucket=self.bucket)
+                try:
+                    client.create_bucket(Bucket=self.bucket)
+                except ClientError as exc:
+                    # Concurrent workers race head->create; losing is fine.
+                    code = exc.response.get("Error", {}).get("Code", "")
+                    if code not in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
+                        raise
 
         await asyncio.to_thread(_ensure)
 

@@ -70,7 +70,10 @@ class WhisperTranscriber:
         self.load()
         assert self._model is not None  # noqa: S101 (loaded above)
         segments, info = self._model.transcribe(str(wav_path), vad_filter=True)
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        # One segment (≈ utterance) per line — chunking and the duplicate-line
+        # cleanup both split on newlines, so a space-joined transcript would be
+        # one giant "line" that can only be truncated, never chunked.
+        text = "\n".join(s for s in (seg.text.strip() for seg in segments) if s)
         return TranscriptText(text=text, language=str(info.language or "auto"))
 
     async def transcribe(self, wav_path: Path) -> TranscriptText:

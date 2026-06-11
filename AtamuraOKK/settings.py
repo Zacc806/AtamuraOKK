@@ -234,6 +234,12 @@ class Settings(BaseSettings):
     # request. Empty = fail closed (the API returns 503 until a token is set), so
     # call-quality data is never served unauthenticated by accident.
     companion_api_token: str = ""
+    # Static personal key for the РОП (head of sales). Set once in the
+    # environment; logging in with it grants the HEAD role without a
+    # companion_users row. The head then issues manager keys from the cabinet
+    # (POST /api/v1/users) — no CLI access needed. Empty = disabled (heads can
+    # still be created via the CLI).
+    companion_head_key: str = ""
 
     # --- Companion "Мой день" read-through (live Bitrix Zvandau TM funnel) ---
     # The "Zvandau" deal category (24) whose stages ARE the TM's day signals

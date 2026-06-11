@@ -1,8 +1,10 @@
 """Companion read API (/api/v1) — the sales-companion integration contract.
 
 Verifies the anti-corruption read layer over call_scores_latest: ОКК 1–5
-mapping, the call feed, per-call авто-разбор, the РОП team rollup, bearer-token
-auth (incl. fail-closed when unset), and not-found / bad-period handling.
+mapping, the call feed, per-call авто-разбор, the РОП team rollup, two-layer
+auth (service bearer incl. fail-closed when unset + personal user keys), the
+manager/head role scoping, the static РОП key + cabinet-issued manager keys
+(/users access management), and not-found / bad-period handling.
 """
 
 from __future__ import annotations
@@ -16,11 +18,16 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from AtamuraOKK.db.models.call import Call
+from AtamuraOKK.db.models.companion_user import CompanionUser
 from AtamuraOKK.db.models.department import Department
-from AtamuraOKK.db.models.enums import CallDirection, CallStatus
+from AtamuraOKK.db.models.enums import CallDirection, CallStatus, CompanionRole
 from AtamuraOKK.db.models.manager import Manager
+from AtamuraOKK.db.models.meeting import Meeting
+from AtamuraOKK.db.models.rubric_version import RubricVersion
 from AtamuraOKK.db.models.score import Score
 from AtamuraOKK.settings import settings
+from AtamuraOKK.web.api.v1 import service
+from AtamuraOKK.web.api.v1.auth import hash_key
 
 pytestmark = pytest.mark.anyio
 
@@ -28,11 +35,48 @@ _TOKEN = "test-companion-token"
 _TZ = ZoneInfo(settings.report_timezone)
 _PERIOD = "2026-03"
 _AUTH = {"Authorization": f"Bearer {_TOKEN}"}
+_HEAD_KEY = "head-personal-key"
+_MANAGER_KEY = "manager-personal-key"
+
+
+def _headers(user_key: str) -> dict[str, str]:
+    return {**_AUTH, "X-Companion-User-Key": user_key}
 
 
 @pytest.fixture
 def _token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "companion_api_token", _TOKEN)
+
+
+async def _seed_companion_user(
+    session: AsyncSession,
+    *,
+    key: str,
+    role: CompanionRole,
+    bitrix_user_id: int | None = None,
+    name: str = "Пользователь",
+) -> CompanionUser:
+    user = CompanionUser(
+        key_sha256=hash_key(key),
+        role=role,
+        bitrix_user_id=bitrix_user_id,
+        name=name,
+    )
+    session.add(user)
+    await session.flush()
+    return user
+
+
+@pytest.fixture
+async def head_auth(dbsession: AsyncSession, _token: None) -> dict[str, str]:
+    """Headers for a head-of-sales session (sees everything)."""
+    await _seed_companion_user(
+        dbsession,
+        key=_HEAD_KEY,
+        role=CompanionRole.HEAD,
+        name="РОП",
+    )
+    return _headers(_HEAD_KEY)
 
 
 def _criteria_payload(percent: float, *, is_qual: bool = True) -> dict[str, Any]:
@@ -145,7 +189,7 @@ async def test_fails_closed_when_token_unset(
 async def test_scorecard_maps_okk_1_to_5(
     client: AsyncClient,
     dbsession: AsyncSession,
-    _token: None,
+    head_auth: dict[str, str],
 ) -> None:
     """Average percent maps to the 1–5 ОКК modifier and zone."""
     mgr = await _seed_manager(dbsession, bitrix_user_id=501)
@@ -154,7 +198,7 @@ async def test_scorecard_maps_okk_1_to_5(
 
     resp = await client.get(
         f"/api/v1/managers/{mgr.bitrix_user_id}/scorecard?period={_PERIOD}",
-        headers=_AUTH,
+        headers=head_auth,
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -172,7 +216,7 @@ async def test_scorecard_maps_okk_1_to_5(
 async def test_scorecard_excludes_non_qualification(
     client: AsyncClient,
     dbsession: AsyncSession,
-    _token: None,
+    head_auth: dict[str, str],
 ) -> None:
     """Non-qualification calls don't count toward the score."""
     mgr = await _seed_manager(dbsession, bitrix_user_id=502)
@@ -187,7 +231,7 @@ async def test_scorecard_excludes_non_qualification(
 
     resp = await client.get(
         f"/api/v1/managers/502/scorecard?period={_PERIOD}",
-        headers=_AUTH,
+        headers=head_auth,
     )
     body = resp.json()
     assert body["calls_scored"] == 1  # reminder excluded
@@ -197,23 +241,23 @@ async def test_scorecard_excludes_non_qualification(
 
 async def test_scorecard_unknown_manager_404(
     client: AsyncClient,
-    _token: None,
+    head_auth: dict[str, str],
 ) -> None:
     """An unknown Bitrix user id returns 404."""
-    resp = await client.get("/api/v1/managers/999999/scorecard", headers=_AUTH)
+    resp = await client.get("/api/v1/managers/999999/scorecard", headers=head_auth)
     assert resp.status_code == 404
 
 
 async def test_scorecard_bad_period_422(
     client: AsyncClient,
     dbsession: AsyncSession,
-    _token: None,
+    head_auth: dict[str, str],
 ) -> None:
     """A malformed period returns 422."""
     await _seed_manager(dbsession, bitrix_user_id=503)
     resp = await client.get(
         "/api/v1/managers/503/scorecard?period=2026-13",
-        headers=_AUTH,
+        headers=head_auth,
     )
     assert resp.status_code == 422
 
@@ -224,7 +268,7 @@ async def test_scorecard_bad_period_422(
 async def test_calls_feed_and_feedback(
     client: AsyncClient,
     dbsession: AsyncSession,
-    _token: None,
+    head_auth: dict[str, str],
 ) -> None:
     """The call feed and per-call авто-разбор expose the scored fields."""
     mgr = await _seed_manager(dbsession, bitrix_user_id=504)
@@ -235,7 +279,7 @@ async def test_calls_feed_and_feedback(
         percent=86.0,
     )
 
-    feed = await client.get("/api/v1/managers/504/calls", headers=_AUTH)
+    feed = await client.get("/api/v1/managers/504/calls", headers=head_auth)
     assert feed.status_code == 200
     items = feed.json()
     assert len(items) == 1
@@ -243,7 +287,7 @@ async def test_calls_feed_and_feedback(
     assert items[0]["okk_5"] == 4  # 86 -> strong band
     assert items[0]["summary"]
 
-    detail = await client.get(f"/api/v1/calls/{call.id}/feedback", headers=_AUTH)
+    detail = await client.get(f"/api/v1/calls/{call.id}/feedback", headers=head_auth)
     assert detail.status_code == 200
     fb = detail.json()
     assert fb["strengths"] == "Хороший контакт"
@@ -255,10 +299,117 @@ async def test_calls_feed_and_feedback(
 
 async def test_feedback_unknown_call_404(
     client: AsyncClient,
-    _token: None,
+    head_auth: dict[str, str],
 ) -> None:
     """Feedback for an unscored call returns 404."""
-    resp = await client.get("/api/v1/calls/424242/feedback", headers=_AUTH)
+    resp = await client.get("/api/v1/calls/424242/feedback", headers=head_auth)
+    assert resp.status_code == 404
+
+
+# --- meetings feed + feedback (ОП) ------------------------------------------
+
+
+async def _seed_meeting(
+    session: AsyncSession,
+    *,
+    bitrix_file_id: int,
+    uploaded_by: int | None,
+    manager: Manager | None = None,
+    percent: float = 82.0,
+    day: int = 15,
+    needs_review: bool = False,
+) -> Meeting:
+    meeting = Meeting(
+        bitrix_file_id=bitrix_file_id,
+        name=f"WhatsApp Audio 2026-03-{day:02d} at 12.00.00.mp4",
+        folder_path="Встречи ОП/Март",
+        source="op",
+        uploaded_by_bitrix_id=uploaded_by,
+        manager_id=manager.id if manager else None,
+        meeting_at=datetime(2026, 3, day, 12, 0, tzinfo=_TZ),
+        duration_sec=1800,
+        language="ru",
+        rubric_version="okk_meeting_v1",
+        score_pct=percent,
+        passed=percent >= 75,
+        call_type="первичный",
+        manager_tone="вежливый",
+        needs_human_review=needs_review,
+        summary="Клиент выбрал планировку, ждёт расчёт.",
+        red_flags=["обещал скидку без согласования"],
+        score={
+            "criteria": [
+                {
+                    "id": 1,
+                    "block": "Контакт",
+                    "name": "Приветствие",
+                    "score": 4,
+                    "max_score": 5,
+                    "auto": False,
+                },
+            ],
+            "script_adherence": 70.0,
+            "script_deviations": ["пропустил презентацию ЖК"],
+        },
+    )
+    session.add(meeting)
+    await session.flush()
+    return meeting
+
+
+async def test_meetings_feed_and_feedback(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """The meetings feed + авто-разбор expose the scored ОП-meeting fields."""
+    mgr = await _seed_manager(dbsession, bitrix_user_id=505)
+    older = await _seed_meeting(
+        dbsession,
+        bitrix_file_id=9001,
+        uploaded_by=505,
+        manager=mgr,
+        day=10,
+    )
+    newest = await _seed_meeting(
+        dbsession,
+        bitrix_file_id=9002,
+        uploaded_by=505,
+        manager=mgr,
+        percent=64.0,
+        day=20,
+    )
+
+    feed = await client.get("/api/v1/managers/505/meetings", headers=head_auth)
+    assert feed.status_code == 200
+    items = feed.json()
+    assert [i["meeting_id"] for i in items] == [newest.id, older.id]  # newest first
+    assert items[0]["percent"] == 64.0
+    assert items[0]["passed"] is False
+    assert items[0]["source"] == "op"
+    assert items[0]["red_flags"] == ["обещал скидку без согласования"]
+
+    detail = await client.get(
+        f"/api/v1/meetings/{older.id}/feedback",
+        headers=head_auth,
+    )
+    assert detail.status_code == 200
+    fb = detail.json()
+    assert fb["manager"]["bitrix_user_id"] == 505
+    assert fb["percent"] == 82.0
+    assert fb["script_adherence"] == 70.0
+    assert fb["script_deviations"] == ["пропустил презентацию ЖК"]
+    assert len(fb["criteria"]) == 1
+    assert fb["criteria"][0]["name"] == "Приветствие"
+    assert fb["criteria"][0]["max"] == 5.0
+
+
+async def test_meeting_feedback_unknown_404(
+    client: AsyncClient,
+    head_auth: dict[str, str],
+) -> None:
+    """Feedback for an unknown meeting returns 404."""
+    resp = await client.get("/api/v1/meetings/424242/feedback", headers=head_auth)
     assert resp.status_code == 404
 
 
@@ -268,7 +419,7 @@ async def test_feedback_unknown_call_404(
 async def test_team_summary_rollup(
     client: AsyncClient,
     dbsession: AsyncSession,
-    _token: None,
+    head_auth: dict[str, str],
 ) -> None:
     """РОП-вид rolls up per-manager scorecards and the group average."""
     dept = Department(bitrix_id=77, name="Отдел ТМ")
@@ -281,7 +432,7 @@ async def test_team_summary_rollup(
 
     resp = await client.get(
         f"/api/v1/teams/77/summary?period={_PERIOD}",
-        headers=_AUTH,
+        headers=head_auth,
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -292,3 +443,581 @@ async def test_team_summary_rollup(
     # Roster sorted best-first.
     assert body["roster"][0]["manager"]["bitrix_user_id"] == 601
     assert body["roster"][0]["okk"]["score_5"] == 5
+
+
+# --- meetings in scorecard / team summary (per-department items) ------------
+
+
+async def test_scorecard_includes_meetings_aggregate(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """An ОП manager's scorecard carries the meetings block (pct/pass)."""
+    mgr = await _seed_manager(dbsession, bitrix_user_id=511)
+    await _seed_meeting(
+        dbsession,
+        bitrix_file_id=9201,
+        uploaded_by=511,
+        manager=mgr,
+        percent=90.0,
+        day=5,
+    )
+    await _seed_meeting(
+        dbsession,
+        bitrix_file_id=9202,
+        uploaded_by=511,
+        manager=mgr,
+        percent=60.0,
+        day=6,
+        needs_review=True,
+    )
+
+    resp = await client.get(
+        f"/api/v1/managers/511/scorecard?period={_PERIOD}",
+        headers=head_auth,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["calls_scored"] == 0
+    meetings = body["meetings"]
+    assert meetings["meetings_scored"] == 2
+    assert meetings["avg_score_pct"] == 75.0
+    assert meetings["passed"] == 1
+    assert meetings["failed"] == 1
+    assert meetings["needs_human_review"] == 1
+
+
+async def test_scorecard_meetings_block_defaults_to_zero(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """A calls-only (ТМ) manager still gets the meetings block, zeroed."""
+    mgr = await _seed_manager(dbsession, bitrix_user_id=512)
+    await _seed_scored_call(dbsession, bitrix_call_id="tm1", manager=mgr, percent=90.0)
+
+    resp = await client.get(
+        f"/api/v1/managers/512/scorecard?period={_PERIOD}",
+        headers=head_auth,
+    )
+    meetings = resp.json()["meetings"]
+    assert meetings["meetings_scored"] == 0
+    assert meetings["avg_score_pct"] is None
+
+
+async def test_team_summary_includes_meetings(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """An ОП department rolls up its meetings; placeholder managers excluded."""
+    dept = Department(bitrix_id=78, name="Отдел продаж")
+    dbsession.add(dept)
+    await dbsession.flush()
+    caller = await _seed_manager(dbsession, bitrix_user_id=611, department=dept)
+    meeter = await _seed_manager(dbsession, bitrix_user_id=612, department=dept)
+    # Unenriched placeholder: no department yet, so invisible in the rollup.
+    orphan = await _seed_manager(dbsession, bitrix_user_id=613)
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="u1",
+        manager=caller,
+        percent=88.0,
+    )
+    await _seed_meeting(
+        dbsession,
+        bitrix_file_id=9301,
+        uploaded_by=612,
+        manager=meeter,
+        percent=80.0,
+    )
+    await _seed_meeting(
+        dbsession,
+        bitrix_file_id=9302,
+        uploaded_by=613,
+        manager=orphan,
+        percent=10.0,
+    )
+
+    resp = await client.get(
+        f"/api/v1/teams/78/summary?period={_PERIOD}",
+        headers=head_auth,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["group"]["calls_scored"] == 1
+    assert body["group"]["meetings"]["meetings_scored"] == 1  # orphan excluded
+    assert body["group"]["meetings"]["avg_score_pct"] == 80.0
+
+    by_uid = {m["manager"]["bitrix_user_id"]: m for m in body["roster"]}
+    assert set(by_uid) == {611, 612}  # union: call- and meeting-managers
+    assert by_uid[611]["okk"]["percent"] == 88.0
+    assert by_uid[612]["calls_scored"] == 0
+    assert by_uid[612]["meetings"]["meetings_scored"] == 1
+    # Sorted by primary score: 88 (calls) before 80 (meetings).
+    assert [m["manager"]["bitrix_user_id"] for m in body["roster"]] == [611, 612]
+
+
+# --- unified feed -----------------------------------------------------------
+
+
+async def test_unified_feed_merges_calls_and_meetings(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """/feed interleaves kind-tagged calls + meetings, newest first."""
+    mgr = await _seed_manager(dbsession, bitrix_user_id=513)
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="f1",
+        manager=mgr,
+        percent=85.0,
+        day=12,
+    )
+    await _seed_meeting(
+        dbsession,
+        bitrix_file_id=9401,
+        uploaded_by=513,
+        manager=mgr,
+        day=15,
+    )
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="f2",
+        manager=mgr,
+        percent=70.0,
+        day=20,
+    )
+
+    resp = await client.get("/api/v1/managers/513/feed", headers=head_auth)
+    assert resp.status_code == 200
+    items = resp.json()
+    assert [i["kind"] for i in items] == ["call", "meeting", "call"]
+    assert items[0]["call"]["bitrix_call_id"] == "f2"
+    assert items[0]["meeting"] is None
+    assert items[1]["meeting"]["bitrix_file_id"] == 9401
+
+    truncated = await client.get(
+        "/api/v1/managers/513/feed?limit=2",
+        headers=head_auth,
+    )
+    assert [i["kind"] for i in truncated.json()] == ["call", "meeting"]
+
+
+async def test_unified_feed_is_scoped(
+    client: AsyncClient,
+    manager_auth: dict[str, str],
+) -> None:
+    """A manager cannot read another manager's unified feed."""
+    resp = await client.get("/api/v1/managers/999/feed", headers=manager_auth)
+    assert resp.status_code == 403
+
+
+# --- active rubrics (per-department criteria) --------------------------------
+
+
+async def test_rubrics_returns_active_criteria_per_source(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """GET /rubrics normalizes both rubric shapes; crm criteria excluded."""
+    dbsession.add(
+        RubricVersion(
+            source="tm",
+            version="tm-call-v2",
+            active=True,
+            definition={
+                "version": "tm-call-v2",
+                "name": "Чек-лист ТМ",
+                "zones": {"strong": 85, "normal": 80, "borderline": 75},
+                "blocks": [
+                    {
+                        "id": "B1",
+                        "name": "Контакт",
+                        "criteria": [
+                            {"id": 1, "text": "Поздоровался", "max": 5},
+                            {
+                                "id": 2,
+                                "text": "Заполнил CRM",
+                                "max": 3,
+                                "source": "crm",
+                            },
+                        ],
+                    },
+                ],
+            },
+        ),
+    )
+    dbsession.add(
+        RubricVersion(
+            source="op",
+            version="okk_meeting_v1",
+            active=True,
+            definition={
+                "id": "okk_meeting_v1",
+                "version": "1.0",
+                "max_total_score": 50,
+                "criteria": [
+                    {
+                        "id": 1,
+                        "block": "Контакт",
+                        "name": "Приветствие",
+                        "max_score": 5,
+                        "check": "Поздоровался и представился",
+                    },
+                ],
+            },
+        ),
+    )
+    await dbsession.flush()
+
+    resp = await client.get("/api/v1/rubrics", headers=head_auth)
+    assert resp.status_code == 200
+    tm, op = resp.json()  # tm first by contract
+    assert tm["source"] == "tm"
+    assert tm["version"] == "tm-call-v2"
+    assert tm["max_total"] == 5.0  # crm criterion excluded
+    assert [c["name"] for c in tm["criteria"]] == ["Поздоровался"]
+    assert tm["criteria"][0]["block"] == "Контакт"
+    assert op["source"] == "op"
+    assert op["max_total"] == 50.0
+    assert op["criteria"][0]["name"] == "Приветствие"
+    assert op["criteria"][0]["max"] == 5.0
+
+
+# --- roles: personal keys + manager/head scoping ----------------------------
+
+
+@pytest.fixture
+async def manager_auth(
+    dbsession: AsyncSession,
+    _token: None,
+) -> dict[str, str]:
+    """Headers for a manager session linked to Bitrix user 701."""
+    await _seed_manager(dbsession, bitrix_user_id=701, name="Олжас", last_name="М.")
+    await _seed_companion_user(
+        dbsession,
+        key=_MANAGER_KEY,
+        role=CompanionRole.MANAGER,
+        bitrix_user_id=701,
+        name="Олжас М.",
+    )
+    return _headers(_MANAGER_KEY)
+
+
+async def test_requires_user_key(client: AsyncClient, _token: None) -> None:
+    """A valid service bearer without a personal key is rejected."""
+    resp = await client.get("/api/v1/managers/1/scorecard", headers=_AUTH)
+    assert resp.status_code == 401
+
+
+async def test_revoked_key_rejected(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    _token: None,
+) -> None:
+    """A deactivated user's key no longer authenticates."""
+    user = await _seed_companion_user(
+        dbsession,
+        key="revoked-key",
+        role=CompanionRole.HEAD,
+    )
+    user.active = False
+    await dbsession.flush()
+    resp = await client.get("/api/v1/me", headers=_headers("revoked-key"))
+    assert resp.status_code == 401
+
+
+async def test_me_resolves_role_and_profile(
+    client: AsyncClient,
+    manager_auth: dict[str, str],
+    head_auth: dict[str, str],
+) -> None:
+    """/me returns the role + linked manager profile the cabinet boots from."""
+    me = (await client.get("/api/v1/me", headers=manager_auth)).json()
+    assert me["role"] == "manager"
+    assert me["bitrix_user_id"] == 701
+    assert me["manager"]["name"] == "Олжас М."
+
+    me = (await client.get("/api/v1/me", headers=head_auth)).json()
+    assert me["role"] == "head"
+    assert me["manager"] is None
+
+
+async def test_manager_sees_own_data_only(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+) -> None:
+    """A manager gets their own scorecard/calls but 403 on anyone else's."""
+    own = await client.get(
+        f"/api/v1/managers/701/scorecard?period={_PERIOD}",
+        headers=manager_auth,
+    )
+    assert own.status_code == 200
+
+    other = await _seed_manager(dbsession, bitrix_user_id=702)
+    for path in (
+        f"/api/v1/managers/{other.bitrix_user_id}/scorecard",
+        f"/api/v1/managers/{other.bitrix_user_id}/calls",
+        f"/api/v1/managers/{other.bitrix_user_id}/meetings",
+        f"/api/v1/managers/{other.bitrix_user_id}/day",
+    ):
+        resp = await client.get(path, headers=manager_auth)
+        assert resp.status_code == 403, path
+
+
+async def test_manager_cannot_read_others_feedback(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+) -> None:
+    """Per-call авто-разбор is scoped: another manager's call returns 403."""
+    other = await _seed_manager(dbsession, bitrix_user_id=703)
+    call = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="other1",
+        manager=other,
+        percent=88.0,
+    )
+    resp = await client.get(f"/api/v1/calls/{call.id}/feedback", headers=manager_auth)
+    assert resp.status_code == 403
+
+
+async def test_meetings_scoped_to_uploader(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+) -> None:
+    """A manager reads their own meetings; others' (and unattributed) are 403."""
+    own = await _seed_meeting(dbsession, bitrix_file_id=9101, uploaded_by=701)
+    other = await _seed_meeting(dbsession, bitrix_file_id=9102, uploaded_by=703)
+    orphan = await _seed_meeting(dbsession, bitrix_file_id=9103, uploaded_by=None)
+
+    feed = await client.get("/api/v1/managers/701/meetings", headers=manager_auth)
+    assert feed.status_code == 200
+    assert [i["meeting_id"] for i in feed.json()] == [own.id]
+
+    detail = await client.get(
+        f"/api/v1/meetings/{own.id}/feedback",
+        headers=manager_auth,
+    )
+    assert detail.status_code == 200
+
+    for meeting in (other, orphan):
+        resp = await client.get(
+            f"/api/v1/meetings/{meeting.id}/feedback",
+            headers=manager_auth,
+        )
+        assert resp.status_code == 403
+
+
+async def test_team_summary_is_head_only(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+) -> None:
+    """Managers cannot pull the team-wide rollup."""
+    dept = Department(bitrix_id=88, name="Отдел ТМ")
+    dbsession.add(dept)
+    await dbsession.flush()
+    resp = await client.get("/api/v1/teams/88/summary", headers=manager_auth)
+    assert resp.status_code == 403
+
+
+async def test_head_sees_any_manager(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """The head of sales reads any manager's scorecard."""
+    await _seed_manager(dbsession, bitrix_user_id=704)
+    resp = await client.get(
+        f"/api/v1/managers/704/scorecard?period={_PERIOD}",
+        headers=head_auth,
+    )
+    assert resp.status_code == 200
+
+
+# --- static РОП key + cabinet access management ------------------------------
+
+_STATIC_HEAD_KEY = "static-rop-code"
+
+
+@pytest.fixture
+def static_head_auth(
+    monkeypatch: pytest.MonkeyPatch,
+    _token: None,
+) -> dict[str, str]:
+    """Headers for the РОП logged in with the static configured key (no DB row)."""
+    monkeypatch.setattr(settings, "companion_head_key", _STATIC_HEAD_KEY)
+    return _headers(_STATIC_HEAD_KEY)
+
+
+async def test_static_head_key_grants_head(
+    client: AsyncClient,
+    static_head_auth: dict[str, str],
+) -> None:
+    """The configured static key logs in as HEAD without a companion_users row."""
+    me = (await client.get("/api/v1/me", headers=static_head_auth)).json()
+    assert me["role"] == "head"
+
+    resp = await client.get("/api/v1/users", headers=static_head_auth)
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+async def test_static_head_key_inert_when_unset(
+    client: AsyncClient,
+    _token: None,
+) -> None:
+    """With companion_head_key unset, the would-be static code is a 401."""
+    resp = await client.get("/api/v1/me", headers=_headers(_STATIC_HEAD_KEY))
+    assert resp.status_code == 401
+
+
+async def test_head_issues_manager_key(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    static_head_auth: dict[str, str],
+) -> None:
+    """POST /users issues a working manager key, scoped to its Bitrix user."""
+    await _seed_manager(dbsession, bitrix_user_id=705, name="Айгуль", last_name="С.")
+    resp = await client.post(
+        "/api/v1/users",
+        json={"bitrix_user_id": 705, "name": "Айгуль С."},
+        headers=static_head_auth,
+    )
+    assert resp.status_code == 201
+    created = resp.json()
+    assert created["user"]["role"] == "manager"
+    assert created["user"]["active"] is True
+
+    mgr_headers = _headers(created["key"])
+    me = (await client.get("/api/v1/me", headers=mgr_headers)).json()
+    assert me["role"] == "manager"
+    assert me["bitrix_user_id"] == 705
+
+    own = await client.get("/api/v1/managers/705/scorecard", headers=mgr_headers)
+    assert own.status_code == 200
+    other = await client.get("/api/v1/managers/999/scorecard", headers=mgr_headers)
+    assert other.status_code == 403
+
+
+async def test_issue_key_name_resolved_from_managers_table(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    static_head_auth: dict[str, str],
+) -> None:
+    """Omitting 'name' pulls it from Bitrix data (OKK's managers table)."""
+    await _seed_manager(dbsession, bitrix_user_id=707, name="Динара", last_name="К.")
+    resp = await client.post(
+        "/api/v1/users",
+        json={"bitrix_user_id": 707},
+        headers=static_head_auth,
+    )
+    assert resp.status_code == 201
+    assert resp.json()["user"]["name"] == "Динара К."
+
+
+async def test_issue_key_name_resolved_via_live_bitrix(
+    client: AsyncClient,
+    static_head_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manager the pipeline hasn't seen yet is resolved by live user.get."""
+
+    async def _fake_bitrix(_uid: int) -> str:
+        return "Айдар Н."
+
+    monkeypatch.setattr(service, "_bitrix_user_name", _fake_bitrix)
+    resp = await client.post(
+        "/api/v1/users",
+        json={"bitrix_user_id": 708},
+        headers=static_head_auth,
+    )
+    assert resp.status_code == 201
+    assert resp.json()["user"]["name"] == "Айдар Н."
+
+
+async def test_issue_key_unresolvable_name_is_422(
+    client: AsyncClient,
+    static_head_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No managers row and Bitrix can't resolve the id → explicit 422."""
+
+    async def _no_bitrix(_uid: int) -> None:
+        return None
+
+    monkeypatch.setattr(service, "_bitrix_user_name", _no_bitrix)
+    resp = await client.post(
+        "/api/v1/users",
+        json={"bitrix_user_id": 999999},
+        headers=static_head_auth,
+    )
+    assert resp.status_code == 422
+
+
+async def test_users_endpoints_are_head_only(
+    client: AsyncClient,
+    manager_auth: dict[str, str],
+) -> None:
+    """Managers cannot list, issue, or revoke cabinet keys."""
+    assert (await client.get("/api/v1/users", headers=manager_auth)).status_code == 403
+    assert (
+        await client.post(
+            "/api/v1/users",
+            json={"bitrix_user_id": 9, "name": "x"},
+            headers=manager_auth,
+        )
+    ).status_code == 403
+    assert (
+        await client.post("/api/v1/users/1/revoke", headers=manager_auth)
+    ).status_code == 403
+
+
+async def test_revoked_manager_key_stops_working(
+    client: AsyncClient,
+    static_head_auth: dict[str, str],
+) -> None:
+    """Revoking from the cabinet deactivates the key immediately."""
+    created = (
+        await client.post(
+            "/api/v1/users",
+            json={"bitrix_user_id": 706, "name": "Темп"},
+            headers=static_head_auth,
+        )
+    ).json()
+    mgr_headers = _headers(created["key"])
+    assert (await client.get("/api/v1/me", headers=mgr_headers)).status_code == 200
+
+    revoked = await client.post(
+        f"/api/v1/users/{created['user']['id']}/revoke",
+        headers=static_head_auth,
+    )
+    assert revoked.status_code == 200
+    assert revoked.json()["active"] is False
+    assert (await client.get("/api/v1/me", headers=mgr_headers)).status_code == 401
+
+
+async def test_head_rows_not_revocable_from_cabinet(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    static_head_auth: dict[str, str],
+) -> None:
+    """DB head keys stay CLI-managed — the cabinet cannot revoke them."""
+    head_row = await _seed_companion_user(
+        dbsession,
+        key="db-head-key",
+        role=CompanionRole.HEAD,
+        name="Второй РОП",
+    )
+    resp = await client.post(
+        f"/api/v1/users/{head_row.id}/revoke",
+        headers=static_head_auth,
+    )
+    assert resp.status_code == 403

@@ -111,3 +111,39 @@ def test_reset_failed_reopens_by_available_data(tmp_path: Path) -> None:
         assert store.get(3)["status"] == MeetingStatus.NEW.value
         assert store.get(1)["attempts"] == 0
         assert store.get(1)["error"] is None
+
+
+def test_reset_for_rescore_targets_long_transcripts(tmp_path: Path) -> None:
+    """Rescore re-opens only over-threshold SCORED rows, clearing score + push."""
+    with MeetingStore(tmp_path / "m.db") as store:
+        for fid, transcript in ((1, "к" * 200), (2, "короткая встреча")):
+            store.upsert_new(_file(fid))
+            store.mark_downloaded(fid, f"/audio/{fid}.ogg", 1800)
+            store.mark_transcribed(fid, transcript, "ru")
+            store.mark_scored(fid, '{"score_pct": 80.0}', 80.0, passed=True)
+            store.mark_pushed(fid)
+
+        assert store.reset_for_rescore(min_transcript_chars=100) == 1
+
+        long_row = store.get(1)
+        assert long_row["status"] == MeetingStatus.TRANSCRIBED.value
+        assert long_row["score_json"] is None
+        assert long_row["pushed_at"] is None  # will be re-pushed after re-scoring
+        assert long_row["transcript"]  # the transcript itself is kept
+
+        short_row = store.get(2)
+        assert short_row["status"] == MeetingStatus.SCORED.value
+        assert short_row["pushed_at"] is not None
+
+
+def test_reset_for_rescore_all(tmp_path: Path) -> None:
+    """Without a threshold every SCORED row is re-opened."""
+    with MeetingStore(tmp_path / "m.db") as store:
+        for fid in (1, 2):
+            store.upsert_new(_file(fid))
+            store.mark_downloaded(fid, f"/audio/{fid}.ogg", 1800)
+            store.mark_transcribed(fid, "текст", "ru")
+            store.mark_scored(fid, "{}", 70.0, passed=False)
+
+        assert store.reset_for_rescore() == 2
+        assert store.counts() == {MeetingStatus.TRANSCRIBED.value: 2}

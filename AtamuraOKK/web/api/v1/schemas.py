@@ -29,6 +29,50 @@ class ManagerRef(BaseModel):
     department_name: str | None = None
 
 
+class MeView(BaseModel):
+    """Who the cabinet session belongs to — drives the role-aware UI.
+
+    ``role`` is ``manager`` (own data only) or ``head`` (head of sales, sees
+    every manager). ``manager`` is the linked profile when the user maps to a
+    ``managers`` row (always for managers, optional for the head).
+    """
+
+    role: str
+    bitrix_user_id: int | None
+    name: str | None = None
+    manager: ManagerRef | None = None
+
+
+class CompanionUserView(BaseModel):
+    """One cabinet user as shown in the head's access-management screen."""
+
+    id: int
+    role: str
+    bitrix_user_id: int | None
+    name: str | None
+    active: bool
+    created_at: datetime | None = None
+
+
+class CompanionUserCreate(BaseModel):
+    """Request to issue a manager key (the role is always ``manager``)."""
+
+    bitrix_user_id: int = Field(description="Bitrix user id the key is scoped to")
+    name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+        description="Display name; omit to pull it from Bitrix by the user id",
+    )
+
+
+class CompanionUserCreated(BaseModel):
+    """A freshly issued key. ``key`` is returned ONCE — only its hash is stored."""
+
+    user: CompanionUserView
+    key: str
+
+
 class OkkScore(BaseModel):
     """The ОКК call-quality result the bonus modifier is derived from."""
 
@@ -69,6 +113,21 @@ class MoneyAxis(BaseModel):
     )
 
 
+class MeetingsScore(BaseModel):
+    """Aggregate over scored ОП meetings in a period.
+
+    Meetings keep their own scoring semantics (score %, pass/fail against the
+    meeting rubric) — deliberately not the calls' zone/okk_5 scale, because
+    each department scores against its own criteria.
+    """
+
+    meetings_scored: int = 0
+    avg_score_pct: float | None = None
+    passed: int = 0
+    failed: int = 0
+    needs_human_review: int = 0
+
+
 class ManagerScorecard(BaseModel):
     """Everything the Деньги/KPI screens need for one manager in a period."""
 
@@ -77,6 +136,13 @@ class ManagerScorecard(BaseModel):
     okk: OkkScore
     calls_scored: int
     zone_distribution: dict[str, int]
+    meetings: MeetingsScore = Field(
+        default_factory=MeetingsScore,
+        description=(
+            "Scored-meeting aggregate (встречи); distinct from the planned "
+            "MoneyAxis.meetings deal counter"
+        ),
+    )
     money: MoneyAxis
 
 
@@ -136,12 +202,104 @@ class CallFeedback(BaseModel):
     criteria: list[CriterionFeedback] = Field(default_factory=list)
 
 
+class MeetingFeedItem(BaseModel):
+    """One scored ОП meeting in a manager's Встречи feed.
+
+    Attributed to whoever uploaded the recording to the Disk folder
+    (``manager.bitrix_user_id``). ``source`` distinguishes departments as more
+    of them start dropping recordings ("op" = отдел продаж).
+    """
+
+    meeting_id: int
+    bitrix_file_id: int
+    source: str
+    name: str
+    meeting_at: datetime | None
+    duration_sec: int | None
+    percent: float | None
+    passed: bool | None
+    call_type: str | None
+    manager_tone: str | None
+    needs_human_review: bool
+    red_flags: list[str] = Field(default_factory=list)
+    summary: str
+
+
+class MeetingCriterionFeedback(BaseModel):
+    """One meeting-rubric criterion as scored (okk_meeting rubric shape)."""
+
+    criterion_id: int
+    block: str | None
+    name: str | None
+    score: float | None
+    max: float | None
+    auto: bool = False
+
+
+class MeetingFeedback(BaseModel):
+    """Full авто-разбор for one scored meeting."""
+
+    meeting_id: int
+    bitrix_file_id: int
+    source: str
+    name: str
+    # None when the Disk upload carried no usable CREATED_BY (head-only view).
+    manager: ManagerRef | None
+    meeting_at: datetime | None
+    duration_sec: int | None
+    language: str | None
+    rubric_version: str | None
+    percent: float | None
+    passed: bool | None
+    call_type: str | None
+    manager_tone: str | None
+    needs_human_review: bool
+    script_adherence: float | None = None
+    script_deviations: list[str] = Field(default_factory=list)
+    red_flags: list[str] = Field(default_factory=list)
+    summary: str
+    criteria: list[MeetingCriterionFeedback] = Field(default_factory=list)
+
+
+class FeedItem(BaseModel):
+    """One kind-tagged entry in the unified Звонки+Встречи feed.
+
+    Exactly one of ``call``/``meeting`` is set, per ``kind``. ``at`` is the
+    merge key (call ``started_at`` / ``meeting_at``).
+    """
+
+    kind: str = Field(description="call | meeting")
+    at: datetime | None
+    call: CallFeedItem | None = None
+    meeting: MeetingFeedItem | None = None
+
+
+class RubricCriterionView(BaseModel):
+    """One criterion of an active rubric, normalized across rubric shapes."""
+
+    criterion_id: int
+    block: str | None
+    name: str
+    max: float
+
+
+class RubricView(BaseModel):
+    """The active criteria set for one source ("tm" calls / "op" meetings)."""
+
+    source: str
+    version: str
+    name: str | None
+    max_total: float
+    criteria: list[RubricCriterionView] = Field(default_factory=list)
+
+
 class TeamGroupStats(BaseModel):
     """Aggregate over a department in a period (РОП-вид header)."""
 
     calls_scored: int
     okk: OkkScore
     zone_distribution: dict[str, int]
+    meetings: MeetingsScore = Field(default_factory=MeetingsScore)
 
 
 class DepartmentRef(BaseModel):

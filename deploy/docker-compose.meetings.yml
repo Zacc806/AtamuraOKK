@@ -1,5 +1,11 @@
-# Isolated compose for the ОП meeting-recording worker. Runs parallel to the
-# call pipeline and shares no services with it (own SQLite state, no Postgres).
+# Isolated compose for the ОП meeting-recording worker (own SQLite state).
+#
+# NOTE: the pipeline's final stage pushes scored meetings into the call
+# pipeline's Postgres (`meetings` table) for the companion API. This isolated
+# stack has no route to that DB, so here the push stays pending (non-fatal,
+# logged) unless ATAMURAOKK_DB_HOST/PORT in .env point somewhere reachable.
+# For Postgres-connected deploys prefer the `meetings-worker` service in the
+# main docker-compose.yml.
 #
 # Usage (from the repo root):
 #   docker compose -f deploy/docker-compose.meetings.yml up -d --build
@@ -23,6 +29,10 @@ services:
       - whisper-cache:/root/.cache/huggingface
     restart: unless-stopped
 
+# Explicit names (shared with the main compose's meetings-worker) so switching
+# deploy modes keeps the pipeline state and the downloaded whisper model.
 volumes:
   meetings-state:
+    name: meetings-state
   whisper-cache:
+    name: whisper-cache

@@ -192,3 +192,57 @@ def test_worst_tone_ignores_off_schema_labels() -> None:
     assert _worst_tone(["вежливый", "polite"]) == "вежливый"
     assert _worst_tone(["вежливый", "грубый"]) == "грубый"
     assert _worst_tone(["мусор"]) == "нейтральный"
+
+
+class _RecordingScorer:
+    """Fake per-chunk scorer that records every transcript text it was given."""
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def score(self, call: CallForScoring) -> ScoreResult:
+        self.texts.append(call.text)
+        return _result({1: 1})
+
+
+async def test_long_single_line_meeting_is_chunked_not_truncated() -> None:
+    """A whisper-style transcript with no newlines fans out into chunks.
+
+    Regression for the truncation bug: the whole meeting — including the very
+    last sentence — must reach the per-chunk scorer.
+    """
+    sentences = [f"Менеджер рассказывает про этап {i} сделки." for i in range(200)]
+    text = " ".join(sentences)
+    fake = _RecordingScorer()
+    scorer = MeetingScorer(fake, rubric=RUBRIC, chunk_chars=600)
+
+    out = await scorer.score(CallForScoring(text=text, duration_sec=5400, call_ref="m"))
+
+    assert len(fake.texts) > 1  # actually chunked, not a single oversized pass
+    assert all(len(t) <= 600 for t in fake.texts)  # no chunk can be truncated
+    seen = " ".join(" ".join(t.splitlines()) for t in fake.texts)
+    assert sentences[-1] in seen  # the tail of the meeting was scored
+    assert out.meta["n_chunks"] == len(fake.texts)
+
+
+async def test_chunk_concurrency_is_bounded() -> None:
+    """No more than chunk_concurrency chunks are in flight at once."""
+    import asyncio
+
+    class _GaugeScorer:
+        def __init__(self) -> None:
+            self.active = 0
+            self.peak = 0
+
+        async def score(self, call: CallForScoring) -> ScoreResult:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+            await asyncio.sleep(0)
+            self.active -= 1
+            return _result({1: 1})
+
+    fake = _GaugeScorer()
+    scorer = MeetingScorer(fake, rubric=RUBRIC, chunk_chars=200, chunk_concurrency=2)
+    await scorer.score(CallForScoring(text=_long_text(), duration_sec=5400))
+
+    assert fake.peak <= 2

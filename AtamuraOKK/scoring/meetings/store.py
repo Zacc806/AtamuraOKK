@@ -1,10 +1,12 @@
 """Self-contained SQLite state for the meeting-recording pipeline.
 
-Mirrors the call pipeline's status-driven design but in its own SQLite file, so
-this ОП automation never touches the other programmer's Postgres schema. One row
-per Disk recording, keyed by the Bitrix file id (idempotent re-ingestion):
+Mirrors the call pipeline's status-driven design but in its own SQLite file —
+this stays the pipeline's working state; scored results are additionally
+mirrored to the shared Postgres ``meetings`` table (see ``push.py``) so the
+companion cabinet can read them. One row per Disk recording, keyed by the
+Bitrix file id (idempotent re-ingestion):
 
-    NEW → DOWNLOADED → TRANSCRIBED → SCORED
+    NEW → DOWNLOADED → TRANSCRIBED → SCORED ──(pushed_at)──> Postgres
             ↘ SKIPPED (too short / not a meeting)
             ↘ FAILED  (exhausted attempts; see error)
 """
@@ -43,6 +45,7 @@ CREATE TABLE IF NOT EXISTS recordings (
     folder_path  TEXT,
     download_url TEXT,
     created_at   TEXT,
+    created_by   INTEGER,
     meeting_at   TEXT,
     status       TEXT NOT NULL DEFAULT 'NEW',
     audio_path   TEXT,
@@ -55,11 +58,19 @@ CREATE TABLE IF NOT EXISTS recordings (
     skip_reason  TEXT,
     error        TEXT,
     attempts     INTEGER NOT NULL DEFAULT 0,
+    pushed_at    TEXT,
     inserted_at  TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_recordings_status ON recordings(status);
 """
+
+# Columns added after the first release; ALTERed in on open so an existing
+# meetings.db keeps working without a manual migration step.
+_LATER_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("created_by", "INTEGER"),
+    ("pushed_at", "TEXT"),
+)
 
 
 def resolve_db_path() -> Path:
@@ -84,6 +95,15 @@ class MeetingStore:
         # tripping "database is locked".
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(recordings)")
+        }
+        for col, col_type in _LATER_COLUMNS:
+            if col not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE recordings ADD COLUMN {col} {col_type}",
+                )
         self._conn.commit()
 
     def close(self) -> None:
@@ -111,12 +131,14 @@ class MeetingStore:
         self._conn.execute(
             """
             INSERT INTO recordings (file_id, name, ext, size, folder_path,
-                download_url, created_at, meeting_at, status, inserted_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'NEW', ?, ?)
+                download_url, created_at, created_by, meeting_at, status,
+                inserted_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'NEW', ?, ?)
             ON CONFLICT(file_id) DO UPDATE SET
                 name=excluded.name, ext=excluded.ext, size=excluded.size,
                 folder_path=excluded.folder_path, download_url=excluded.download_url,
-                created_at=excluded.created_at, meeting_at=excluded.meeting_at,
+                created_at=excluded.created_at, created_by=excluded.created_by,
+                meeting_at=excluded.meeting_at,
                 updated_at=excluded.updated_at
             """,
             (
@@ -127,6 +149,7 @@ class MeetingStore:
                 rec.folder_path,
                 rec.download_url,
                 rec.created_at,
+                rec.created_by,
                 meeting_at,
                 now,
                 now,
@@ -248,6 +271,56 @@ class MeetingStore:
                 status = MeetingStatus.NEW
             self._set(int(row["file_id"]), status=status.value, attempts=0, error=None)
         return len(rows)
+
+    def reset_for_rescore(self, *, min_transcript_chars: int | None = None) -> int:
+        """SCORED → TRANSCRIBED so the next pass re-scores (and re-pushes).
+
+        Clears the score and the ``pushed_at`` marker — the Postgres upsert
+        then refreshes the same ``meetings`` row. With ``min_transcript_chars``
+        only rows whose transcript exceeds it are reset (e.g. meetings scored
+        while long transcripts were still being truncated).
+        """
+        where = "status = ?"
+        params: list[Any] = [MeetingStatus.SCORED.value]
+        if min_transcript_chars is not None:
+            where += " AND LENGTH(COALESCE(transcript, '')) > ?"
+            params.append(min_transcript_chars)
+        rows = self._conn.execute(
+            f"SELECT file_id FROM recordings WHERE {where}",  # noqa: S608 (static)
+            params,
+        ).fetchall()
+        for row in rows:
+            self._set(
+                int(row["file_id"]),
+                status=MeetingStatus.TRANSCRIBED.value,
+                score_json=None,
+                score_pct=None,
+                passed=None,
+                pushed_at=None,
+                error=None,
+                attempts=0,
+            )
+        return len(rows)
+
+    # --- Postgres push ---
+
+    def claim_unpushed(self, limit: int) -> list[sqlite3.Row]:
+        """SCORED rows not yet mirrored to Postgres, oldest meeting first."""
+        return list(
+            self._conn.execute(
+                """
+                SELECT * FROM recordings
+                WHERE status = ? AND pushed_at IS NULL
+                ORDER BY COALESCE(meeting_at, created_at) ASC, file_id ASC
+                LIMIT ?
+                """,
+                (MeetingStatus.SCORED.value, limit),
+            ).fetchall(),
+        )
+
+    def mark_pushed(self, file_id: int) -> None:
+        """Record that this recording's score now lives in Postgres too."""
+        self._set(file_id, pushed_at=_now())
 
     # --- reporting ---
 

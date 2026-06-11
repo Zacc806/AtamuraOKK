@@ -34,7 +34,6 @@ async def dispatch_tick(ctx: dict[str, Any]) -> int:
 
     try:
         await run_ingestion()
-        await refresh_qualification()
     except Exception:
         logger.exception("dispatch: ingestion pass failed")
 
@@ -62,6 +61,19 @@ async def dispatch_tick(ctx: dict[str, Any]) -> int:
             )
         enqueued += len(call_ids)
     return enqueued
+
+
+async def requalify_job(ctx: dict[str, Any]) -> None:
+    """Promote SKIPPED first-calls whose client has since qualified.
+
+    Its own cron, not part of the tick: one Bitrix round-trip per skipped client
+    makes this pass minutes-long, and inside the tick it starves claim/enqueue
+    past the arq job timeout.
+    """
+    try:
+        await refresh_qualification()
+    except Exception:
+        logger.exception("dispatch: requalification pass failed")
 
 
 async def retry_job(ctx: dict[str, Any]) -> None:

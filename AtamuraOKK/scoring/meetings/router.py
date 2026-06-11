@@ -63,4 +63,5 @@ def build_meeting_scorer(rubric: Rubric | None = None) -> Scorer:
         chunk_chars=settings.score_meeting_chunk_chars,
         pass_threshold=settings.score_pass_threshold,
         overlap_lines=settings.score_meeting_overlap_lines,
+        chunk_concurrency=settings.score_meeting_chunk_concurrency,
     )

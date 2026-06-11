@@ -62,9 +62,24 @@ class BaseLLMScorer(ABC):
 
     async def score(self, call: CallForScoring) -> ScoreResult:
         """Score one call, retrying transient and malformed-output failures."""
+        cleaned = clean_transcript(call.text)
+        # The prompt builder cuts at max_chars as a last-resort cost guard. The
+        # chunking layer (MeetingScorer) is supposed to keep inputs under the
+        # cap, so an actual cut means lost content — score it, but say so and
+        # flag the result for human review rather than fail silently.
+        truncated_chars = max(0, len(cleaned) - self.max_transcript_chars)
+        if truncated_chars:
+            logger.warning(
+                "scorer {p}: transcript for {ref} exceeds the {cap}-char cap "
+                "by {cut} chars — truncated, flagging needs_human_review",
+                p=self.provider,
+                ref=call.call_ref or "<no ref>",
+                cap=self.max_transcript_chars,
+                cut=truncated_chars,
+            )
         prompt = build_prompt(
             self.rubric,
-            text=clean_transcript(call.text),
+            text=cleaned,
             duration_sec=call.duration_sec,
             max_chars=self.max_transcript_chars,
             script=self.script,
@@ -92,7 +107,13 @@ class BaseLLMScorer(ABC):
                 delay *= 2
                 continue
 
-            return assemble_score(
+            meta: dict[str, object] = {
+                "attempts": attempt,
+                "latency_ms": round((time.monotonic() - started) * 1000),
+            }
+            if truncated_chars:
+                meta["truncated_chars"] = truncated_chars
+            result = assemble_score(
                 llm,
                 rubric=self.rubric,
                 call=call,
@@ -101,10 +122,10 @@ class BaseLLMScorer(ABC):
                 model=self.model,
                 pass_threshold=self.pass_threshold,
                 kev_bonus_points=self.kev_bonus_points,
-                meta={
-                    "attempts": attempt,
-                    "latency_ms": round((time.monotonic() - started) * 1000),
-                },
+                meta=meta,
             )
+            if truncated_chars:
+                result.needs_human_review = True
+            return result
 
         raise MalformedOutputError("retries exhausted")  # pragma: no cover

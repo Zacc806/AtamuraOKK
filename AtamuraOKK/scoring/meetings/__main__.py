@@ -10,8 +10,11 @@ Two modes:
       python -m AtamuraOKK.scoring.meetings download    # NEW → DOWNLOADED
       python -m AtamuraOKK.scoring.meetings transcribe  # DOWNLOADED → TRANSCRIBED
       python -m AtamuraOKK.scoring.meetings score       # TRANSCRIBED → SCORED
+      python -m AtamuraOKK.scoring.meetings push        # SCORED → Postgres (companion)
       python -m AtamuraOKK.scoring.meetings drain       # loop stages until drained
       python -m AtamuraOKK.scoring.meetings retry       # re-open FAILED recordings
+      python -m AtamuraOKK.scoring.meetings rescore     # re-score long meetings
+                                                        # (--all: every scored one)
       python -m AtamuraOKK.scoring.meetings report      # export scored meetings → CSV
       python -m AtamuraOKK.scoring.meetings status      # print state counts
 
@@ -21,8 +24,10 @@ Two modes:
 
       python -m AtamuraOKK.scoring.meetings --file meeting.txt
 
-Touches no Postgres and none of the call-scoring code. Needs the Anthropic key
-(scoring) and the Bitrix webhook (Disk ingestion) in ``.env``.
+Scored meetings are mirrored to the shared Postgres ``meetings`` table (the
+``push`` stage) so the companion cabinet shows them next to ТМ calls; every
+other stage runs without Postgres. Needs the Anthropic key (scoring) and the
+Bitrix webhook (Disk ingestion) in ``.env``.
 """
 
 from __future__ import annotations
@@ -43,9 +48,11 @@ _PIPELINE_CMDS = frozenset(
         "download",
         "transcribe",
         "score",
+        "push",
         "run",
         "drain",
         "retry",
+        "rescore",
         "report",
         "status",
     },
@@ -58,10 +65,11 @@ async def _score_transcript(text: str, duration_sec: int) -> str:
     return json.dumps(result.to_dict(), ensure_ascii=False, indent=2)
 
 
-async def _run_pipeline_cmd(cmd: str, limit: int | None) -> str:
+async def _run_pipeline_cmd(cmd: str, limit: int | None, *, all_scored: bool) -> str:
     # Imported lazily so the legacy --file path needs no Disk/httpx deps.
     from AtamuraOKK.scoring.meetings import recordings  # noqa: PLC0415
     from AtamuraOKK.scoring.meetings.download import download_pending  # noqa: PLC0415
+    from AtamuraOKK.scoring.meetings.push import push_pending  # noqa: PLC0415
     from AtamuraOKK.scoring.meetings.store import open_store  # noqa: PLC0415
     from AtamuraOKK.scoring.meetings.transcribe import (  # noqa: PLC0415
         transcribe_pending,
@@ -72,6 +80,8 @@ async def _run_pipeline_cmd(cmd: str, limit: int | None) -> str:
             return json.dumps(store.counts(), ensure_ascii=False, indent=2)
     if cmd == "retry":
         return _fmt({"requeued": await recordings.requeue_failed()})
+    if cmd == "rescore":
+        return _fmt({"rescored": await recordings.rescore(all_scored=all_scored)})
     if cmd == "report":
         from AtamuraOKK.scoring.meetings.report import export_scored  # noqa: PLC0415
 
@@ -82,6 +92,7 @@ async def _run_pipeline_cmd(cmd: str, limit: int | None) -> str:
         "download": lambda: download_pending(limit=limit),
         "transcribe": lambda: transcribe_pending(limit=limit),
         "score": lambda: recordings.score_pending(limit=limit),
+        "push": lambda: push_pending(limit=limit),
         "drain": lambda: recordings.drain_pipeline(limit=limit),
         "run": lambda: recordings.run_pipeline(limit=limit),
     }
@@ -107,6 +118,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=None, help="max recordings to process this pass"
     )
     parser.add_argument(
+        "--all",
+        action="store_true",
+        dest="all_scored",
+        help="rescore: re-queue every SCORED meeting, not just truncation-era ones",
+    )
+    parser.add_argument(
         "--file", help="speaker-tagged transcript ('-' or omit reads stdin)"
     )
     parser.add_argument(
@@ -123,7 +140,10 @@ def main() -> None:
     args = _build_parser().parse_args()
 
     if args.command in _PIPELINE_CMDS:
-        print(asyncio.run(_run_pipeline_cmd(args.command, args.limit)))  # noqa: T201
+        out = asyncio.run(
+            _run_pipeline_cmd(args.command, args.limit, all_scored=args.all_scored),
+        )
+        print(out)  # noqa: T201
         return
 
     text = (

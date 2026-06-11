@@ -60,3 +60,43 @@ def test_invalid_max_chars_raises() -> None:
     """A non-positive cap is rejected."""
     with pytest.raises(ValueError, match="max_chars"):
         chunk_transcript("x", max_chars=0)
+
+
+def test_single_giant_line_is_split_not_passed_through() -> None:
+    """A whisper-style space-joined transcript (no newlines) still chunks.
+
+    Regression: this used to come back as ONE oversized chunk, which the
+    prompt builder then silently truncated — long meetings were scored on
+    their opening minutes only.
+    """
+    sentences = [f"Менеджер обсуждает планировку номер {i}." for i in range(120)]
+    text = " ".join(sentences)  # one line, far over the cap
+    assert "\n" not in text
+
+    chunks = chunk_transcript(text, max_chars=500, overlap_lines=0)
+
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= 500
+    rejoined = " ".join(" ".join(c.splitlines()) for c in chunks)
+    for sentence in sentences:  # nothing dropped, including the tail
+        assert sentence in rejoined
+
+
+def test_giant_line_split_prefers_sentence_boundaries() -> None:
+    """Pieces of an oversized line end on sentence boundaries when possible."""
+    text = "Первое предложение длинное. Второе предложение тоже. Третье здесь."
+    chunks = chunk_transcript(text * 3, max_chars=70, overlap_lines=0)
+    assert all(len(c) <= 70 for c in chunks)
+    # No chunk breaks inside a word: every chunk is a sequence of whole words.
+    words = set((text * 3).replace(".", " .").split())
+    for chunk in chunks:
+        for word in chunk.replace("\n", " ").replace(".", " .").split():
+            assert word in words
+
+
+def test_unbreakable_token_is_hard_cut() -> None:
+    """A single token longer than the cap cannot produce an oversized chunk."""
+    chunks = chunk_transcript("x" * 250, max_chars=100, overlap_lines=0)
+    assert all(len(c) <= 100 for c in chunks)
+    assert sum(len(c.replace("\n", "")) for c in chunks) == 250

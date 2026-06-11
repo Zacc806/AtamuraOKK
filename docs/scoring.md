@@ -60,11 +60,14 @@ recommendation** the reports need — all in Russian.
   the *manager* regardless of channel labels and score only them.
 - `scoring/openai_scorer.py` — OpenAI **Structured Outputs** (`gpt-4o`, temp 0).
 - `scoring/worker.py` — `score_pending`: TRANSCRIBED → SCORED, applies rubric math.
-- `scoring/seed.py` — seed the active rubric into `rubric_versions`.
+- `scoring/seed.py` — seed the active rubrics into `rubric_versions`: the call
+  rubric under `source="tm"` **and** the ОП meeting rubric under `source="op"`
+  (one active row per source — departments score against their own criteria;
+  the companion `GET /api/v1/rubrics` reads these rows).
 
 ## Run
 ```bash
-make seed-rubric     # load the rubric into the DB (once / on change)
+make seed-rubric     # load both active rubrics into the DB (once / on change)
 make score           # score analyzable TRANSCRIBED calls
 ```
 Requires `ATAMURAOKK_OPENAI_API_KEY`.

@@ -29,8 +29,19 @@ class _ScriptedScorer(BaseLLMScorer):
 
     provider = "fake"
 
-    def __init__(self, script: list[str | Exception]) -> None:
-        super().__init__(RUBRIC, model="fake", max_retries=3, retry_base_delay=0.0)
+    def __init__(
+        self,
+        script: list[str | Exception],
+        *,
+        max_transcript_chars: int = 24000,
+    ) -> None:
+        super().__init__(
+            RUBRIC,
+            model="fake",
+            max_retries=3,
+            retry_base_delay=0.0,
+            max_transcript_chars=max_transcript_chars,
+        )
         self._script = list(script)
         self.calls = 0
 
@@ -95,3 +106,26 @@ async def test_provider_unavailable_exhausts() -> None:
     with pytest.raises(ProviderUnavailableError):
         await scorer.score(_call())
     assert scorer.calls == 3
+
+
+async def test_truncation_is_flagged_not_silent() -> None:
+    """A transcript over the cap still scores, but is flagged for human review."""
+    long_call = CallForScoring(
+        text="[agent] " + "очень длинная реплика менеджера. " * 20,
+        duration_sec=3600,
+        language="ru",
+    )
+    scorer = _ScriptedScorer([_valid_json()], max_transcript_chars=100)
+
+    result = await scorer.score(long_call)
+
+    assert result.needs_human_review is True
+    assert result.meta["truncated_chars"] > 0
+
+
+async def test_no_truncation_flag_when_text_fits() -> None:
+    """A transcript within the cap carries no truncation marker."""
+    scorer = _ScriptedScorer([_valid_json()])
+    result = await scorer.score(_call())
+    assert "truncated_chars" not in result.meta
+    assert result.needs_human_review is False

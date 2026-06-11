@@ -1,4 +1,4 @@
-"""Meeting-recording pipeline: Disk → download → transcribe → score → SQLite.
+"""Meeting-recording pipeline: Disk → download → transcribe → score → Postgres.
 
 Wires the self-contained stages together and feeds each transcript into the
 existing :func:`build_meeting_scorer` (okk_meeting_v1). This is the production
@@ -17,6 +17,7 @@ from AtamuraOKK.scoring.meetings.base import CallForScoring
 from AtamuraOKK.scoring.meetings.config import config
 from AtamuraOKK.scoring.meetings.disk import BitrixDisk, MeetingDiskSource
 from AtamuraOKK.scoring.meetings.download import download_pending
+from AtamuraOKK.scoring.meetings.push import push_pending
 from AtamuraOKK.scoring.meetings.router import build_meeting_scorer
 from AtamuraOKK.scoring.meetings.store import MeetingStatus, MeetingStore
 from AtamuraOKK.scoring.meetings.transcribe import transcribe_pending
@@ -125,12 +126,13 @@ async def score_pending(
 
 
 async def run_pipeline(*, limit: int | None = None) -> dict[str, object]:
-    """One full pass: ingest → download → transcribe → score, sharing a store."""
+    """One full pass: ingest → download → transcribe → score → push to Postgres."""
     with MeetingStore() as store:
         ingest = await ingest_recordings(limit=limit, store=store)
         downloaded = await download_pending(limit=limit, store=store)
         transcribed = await transcribe_pending(limit=limit, store=store)
         scored = await score_pending(limit=limit, store=store)
+        pushed = await push_pending(limit=limit, store=store)
         counts = store.counts()
     logger.info("Meeting pipeline done: {c}", c=counts)
     return {
@@ -138,6 +140,7 @@ async def run_pipeline(*, limit: int | None = None) -> dict[str, object]:
         "download": downloaded,
         "transcribe": transcribed,
         "score": scored,
+        "push": pushed,
         "counts": counts,
     }
 
@@ -153,6 +156,34 @@ async def requeue_failed(*, store: MeetingStore | None = None) -> int:
             store.close()
     if n:
         logger.info("Meeting retry: re-queued {n} FAILED recordings", n=n)
+    return n
+
+
+async def rescore(
+    *,
+    all_scored: bool = False,
+    store: MeetingStore | None = None,
+) -> int:
+    """Re-queue SCORED meetings for re-scoring (and re-pushing); returns count.
+
+    By default only meetings whose transcript exceeds one chunk — the ones
+    whose original score was computed from a truncated transcript before
+    chunking worked. ``all_scored=True`` re-queues every scored meeting (e.g.
+    after a rubric change).
+    """
+    threshold = None if all_scored else config.score_meeting_chunk_chars
+    own_store = store is None
+    store = store or MeetingStore()
+    try:
+        n = store.reset_for_rescore(min_transcript_chars=threshold)
+    finally:
+        if own_store:
+            store.close()
+    logger.info(
+        "Meeting rescore: re-queued {n} SCORED recordings ({scope})",
+        n=n,
+        scope="all" if all_scored else f"transcript > {threshold} chars",
+    )
     return n
 
 
@@ -178,6 +209,7 @@ async def drain_pipeline(
             downloaded = await download_pending(limit=limit, store=store)
             transcribed = await transcribe_pending(limit=limit, store=store)
             scored = await score_pending(limit=limit, store=store)
+            await push_pending(limit=limit, store=store)
             counts = store.counts()
             active = (
                 counts.get(MeetingStatus.NEW.value, 0)

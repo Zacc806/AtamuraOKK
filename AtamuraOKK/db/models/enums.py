@@ -11,6 +11,18 @@ class CallDirection(enum.StrEnum):
     UNKNOWN = "unknown"
 
 
+class CompanionRole(enum.StrEnum):
+    """Access level of a companion-cabinet user.
+
+    ``MANAGER`` sees only their own data (scorecard/calls/day/feedback);
+    ``HEAD`` (руководитель отдела продаж) sees every manager and the team
+    rollup.
+    """
+
+    MANAGER = "manager"
+    HEAD = "head"
+
+
 class CallStatus(enum.StrEnum):
     """Lifecycle status of an analyzable call.
 

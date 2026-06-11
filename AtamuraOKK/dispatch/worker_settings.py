@@ -22,6 +22,7 @@ from AtamuraOKK.dispatch.dispatcher import (
     dispatch_tick,
     report_afternoon,
     report_morning,
+    requalify_job,
     retry_job,
 )
 from AtamuraOKK.dispatch.tasks import (
@@ -62,6 +63,9 @@ class DispatcherSettings:
     functions: ClassVar[list[Any]] = []
     cron_jobs: ClassVar[list[Any]] = [
         cron(dispatch_tick, second=_tick_seconds(), run_at_startup=True),
+        # Requalification does one Bitrix round-trip per skipped client, so it
+        # needs a timeout far above the 300s arq default.
+        cron(requalify_job, minute={10, 40}, timeout=3600, run_at_startup=True),
         cron(retry_job, minute={0}),
         cron(report_morning, hour={settings.report_lunch_hour}, minute={0}),
         cron(report_afternoon, hour={settings.report_evening_hour}, minute={0}),

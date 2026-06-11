@@ -45,6 +45,8 @@ class MeetingScoringConfig(BaseSettings):
     score_meeting_rubric_version: str = "okk_meeting_v1"
     score_meeting_chunk_chars: int = 12000
     score_meeting_overlap_lines: int = 1
+    # Max chunks of one meeting scored concurrently (rate-limit guard).
+    score_meeting_chunk_concurrency: int = 3
 
     # --- Meeting-recording ingestion (Bitrix Disk → transcribe → score) ---
     # Inbound webhook (shared neutral infra; same value the call pipeline uses).
@@ -90,6 +92,9 @@ class MeetingScoringConfig(BaseSettings):
     meetings_report_path: str = "meetings_report.csv"
     # How many recordings each stage processes per invocation.
     meetings_batch_limit: int = 50
+    # ``meetings.source`` value stamped on rows pushed to Postgres — set per
+    # deployment when other departments start dropping recordings ("op" = ОП).
+    meetings_source: str = "op"
     # Give up on a recording after this many failed download/transcribe attempts.
     meetings_max_attempts: int = 4
 

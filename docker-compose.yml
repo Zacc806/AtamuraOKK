@@ -154,6 +154,38 @@ services:
       minio:
         condition: service_healthy
 
+  # ОП meeting pipeline (scoring/meetings/): Disk ingest → whisper transcribe →
+  # LLM score in its own SQLite state, then push scored meetings into Postgres
+  # (the `meetings` table) for the companion API. Runs on the main stack so the
+  # push stage can reach AtamuraOKK-db; needs no MinIO/Redis. Supersedes the
+  # isolated deploy/docker-compose.meetings.yml for Postgres-connected deploys.
+  meetings-worker:
+    build:
+      context: .
+      target: dev
+      dockerfile: ./Dockerfile
+    image: atamuraokk:${ATAMURAOKK_VERSION:-latest}
+    restart: always
+    command: python -m AtamuraOKK.scoring.meetings.worker
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ATAMURAOKK_DB_HOST: AtamuraOKK-db
+      ATAMURAOKK_DB_PORT: 5432
+      ATAMURAOKK_DB_USER: AtamuraOKK
+      ATAMURAOKK_DB_PASS: AtamuraOKK
+      ATAMURAOKK_DB_BASE: AtamuraOKK
+      ATAMURAOKK_MEETINGS_WORK_DIR: /data/meetings
+    depends_on:
+      db:
+        condition: service_healthy
+      migrator:
+        condition: service_completed_successfully
+    volumes:
+      - meetings-state:/data/meetings
+      - whisper-cache:/root/.cache/huggingface
+
   # BI dashboard over Postgres (per-manager / per-department QA scorecards).
   metabase:
     image: metabase/metabase:latest
@@ -204,6 +236,13 @@ volumes:
     name: AtamuraOKK-db-data
   AtamuraOKK-minio-data:
     name: AtamuraOKK-minio-data
+  # Meeting pipeline state (SQLite + downloaded audio) + the whisper model
+  # cache. Names match deploy/docker-compose.meetings.yml so switching deploy
+  # modes keeps the state.
+  meetings-state:
+    name: meetings-state
+  whisper-cache:
+    name: whisper-cache
 
 networks:
   # Shared bridge both this stack and sales-companion join — the "marriage".

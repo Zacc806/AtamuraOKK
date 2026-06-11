@@ -13,9 +13,9 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
 
 def _cmd_seed(_: argparse.Namespace) -> None:
-    from AtamuraOKK.scoring.seed import seed_active_rubric  # noqa: PLC0415
+    from AtamuraOKK.scoring.seed import seed_active_rubrics  # noqa: PLC0415
 
-    asyncio.run(seed_active_rubric())
+    asyncio.run(seed_active_rubrics())
 
 
 def main() -> None:
@@ -27,7 +27,7 @@ def main() -> None:
     p_run.add_argument("--limit", type=int, default=50)
     p_run.set_defaults(func=_cmd_run)
 
-    sub.add_parser("seed", help="seed the active rubric into the DB").set_defaults(
+    sub.add_parser("seed", help="seed the active rubrics (tm + op)").set_defaults(
         func=_cmd_seed,
     )
 

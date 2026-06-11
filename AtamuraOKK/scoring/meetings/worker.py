@@ -2,10 +2,12 @@
 
 ``python -m AtamuraOKK.scoring.meetings.worker`` runs the whole meeting pipeline
 on a schedule in one long-lived process — the parallel counterpart of the call
-pipeline's ``AtamuraOKK.worker``, but fully self-contained (own config, own SQLite
-state, no Postgres, no imports of the call pipeline). Two jobs:
+pipeline's ``AtamuraOKK.worker``, with its own config and SQLite working state.
+Scored results are mirrored into the shared Postgres ``meetings`` table (the
+push stage) for the companion cabinet; Postgres being down only delays that
+final stage. Two jobs:
 
-  * pipeline pass — ingest → download → transcribe → score every
+  * pipeline pass — ingest → download → transcribe → score → push every
     ``meetings_worker_interval_hours``
   * retry pass   — re-queue FAILED recordings every
     ``meetings_worker_retry_interval_hours``
