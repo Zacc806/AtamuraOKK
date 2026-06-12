@@ -3,8 +3,10 @@
 Verifies the anti-corruption read layer over call_scores_latest: ОКК 1–5
 mapping, the call feed, per-call авто-разбор, the РОП team rollup, two-layer
 auth (service bearer incl. fail-closed when unset + personal user keys), the
-manager/head role scoping, the static РОП key + cabinet-issued manager keys
-(/users access management), and not-found / bad-period handling.
+manager/head role scoping, the static РОП key + head-tiered /users access
+management (the global head mints manager and scoped-head keys; an office
+РОП manages their own department's manager keys, which tie the manager to
+that department), and not-found / bad-period handling.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from AtamuraOKK.db.models.call import Call
@@ -25,6 +28,7 @@ from AtamuraOKK.db.models.manager import Manager
 from AtamuraOKK.db.models.meeting import Meeting
 from AtamuraOKK.db.models.rubric_version import RubricVersion
 from AtamuraOKK.db.models.score import Score
+from AtamuraOKK.db.models.transcript import Transcript
 from AtamuraOKK.settings import settings
 from AtamuraOKK.web.api.v1 import service
 from AtamuraOKK.web.api.v1.auth import hash_key
@@ -54,12 +58,14 @@ async def _seed_companion_user(
     key: str,
     role: CompanionRole,
     bitrix_user_id: int | None = None,
+    department_id: int | None = None,
     name: str = "Пользователь",
 ) -> CompanionUser:
     user = CompanionUser(
         key_sha256=hash_key(key),
         role=role,
         bitrix_user_id=bitrix_user_id,
+        department_id=department_id,
         name=name,
     )
     session.add(user)
@@ -278,6 +284,24 @@ async def test_calls_feed_and_feedback(
         manager=mgr,
         percent=86.0,
     )
+    dbsession.add(
+        Transcript(
+            call_id=call.id,
+            language="ru",
+            full_text="[AGENT]\nДобрый день!\n\n[CUSTOMER]\nЗдравствуйте.",
+            segments=[
+                {"speaker": "agent", "start": 0.0, "end": 0.0, "text": "Добрый "},
+                {"speaker": "agent", "start": 0.0, "end": 0.0, "text": "день!"},
+                {
+                    "speaker": "customer",
+                    "start": 0.0,
+                    "end": 0.0,
+                    "text": "Здравствуйте.",
+                },
+            ],
+        ),
+    )
+    await dbsession.flush()
 
     feed = await client.get("/api/v1/managers/504/calls", headers=head_auth)
     assert feed.status_code == 200
@@ -295,6 +319,11 @@ async def test_calls_feed_and_feedback(
     assert fb["sentiment_customer"] == "позитивный"
     assert len(fb["criteria"]) == 1
     assert fb["criteria"][0]["percent_of_max"] == 80.0
+    # Consecutive same-speaker segments coalesce into one block per speaker.
+    assert fb["transcript"] == [
+        {"speaker": "agent", "text": "Добрый день!"},
+        {"speaker": "customer", "text": "Здравствуйте."},
+    ]
 
 
 async def test_feedback_unknown_call_404(
@@ -992,24 +1021,177 @@ async def test_dept_head_team_summary_scoped(
     assert foreign.status_code == 403
 
 
-async def test_dept_head_cannot_manage_access(
+async def test_dept_head_lists_only_own_dept_manager_keys(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    op_department: Department,
+    dept_head_auth: dict[str, str],
+    head_auth: dict[str, str],
+) -> None:
+    """An office РОП's /users shows only their department's manager keys."""
+    await _seed_manager(dbsession, bitrix_user_id=811, department=op_department)
+    other_dept = Department(bitrix_id=92, name="ОП Астана")
+    dbsession.add(other_dept)
+    await dbsession.flush()
+    await _seed_manager(dbsession, bitrix_user_id=812, department=other_dept)
+
+    own_key = await _seed_companion_user(
+        dbsession,
+        key="k-own",
+        role=CompanionRole.MANAGER,
+        bitrix_user_id=811,
+    )
+    await _seed_companion_user(
+        dbsession,
+        key="k-foreign",
+        role=CompanionRole.MANAGER,
+        bitrix_user_id=812,
+    )
+    # No managers row at all — stays global-head-only.
+    await _seed_companion_user(
+        dbsession,
+        key="k-orphan",
+        role=CompanionRole.MANAGER,
+        bitrix_user_id=813,
+    )
+
+    scoped = (await client.get("/api/v1/users", headers=dept_head_auth)).json()
+    assert [u["id"] for u in scoped] == [own_key.id]
+
+    global_list = (await client.get("/api/v1/users", headers=head_auth)).json()
+    assert len(global_list) >= 4  # all three manager keys + head rows
+
+
+async def test_dept_head_issues_key_tied_to_department(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    op_department: Department,
+    dept_head_auth: dict[str, str],
+) -> None:
+    """A scoped head's new manager key ties the manager to their department."""
+    resp = await client.post(
+        "/api/v1/users",
+        json={"bitrix_user_id": 821, "name": "Новый Менеджер"},
+        headers=dept_head_auth,
+    )
+    assert resp.status_code == 201
+    created = resp.json()
+    assert created["user"]["role"] == "manager"
+
+    mgr = await dbsession.scalar(
+        select(Manager).where(Manager.bitrix_user_id == 821),
+    )
+    assert mgr is not None
+    assert mgr.department_id == op_department.id
+    assert mgr.enriched is True  # ingestion must not re-derive the department
+
+    me = (await client.get("/api/v1/me", headers=_headers(created["key"]))).json()
+    assert me["role"] == "manager"
+    assert me["department"] == {"bitrix_id": 91, "name": "ОП Алматы-1"}
+
+
+async def test_dept_head_issue_overrides_existing_department(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    op_department: Department,
+    dept_head_auth: dict[str, str],
+) -> None:
+    """Cabinet wins: issuing a key moves the manager into the head's dept."""
+    other_dept = Department(bitrix_id=94, name="ОП Караганда")
+    dbsession.add(other_dept)
+    await dbsession.flush()
+    mgr = await _seed_manager(dbsession, bitrix_user_id=822, department=other_dept)
+
+    resp = await client.post(
+        "/api/v1/users",
+        json={"bitrix_user_id": 822},
+        headers=dept_head_auth,
+    )
+    assert resp.status_code == 201
+    await dbsession.refresh(mgr)
+    assert mgr.department_id == op_department.id
+    assert mgr.enriched is True
+
+
+async def test_dept_head_cannot_mint_head(
     client: AsyncClient,
     dept_head_auth: dict[str, str],
 ) -> None:
-    """Key issuance stays with the global head — scoped heads get 403."""
+    """Minting head keys stays with the global head — scoped heads get 403."""
+    resp = await client.post(
+        "/api/v1/users",
+        json={"role": "head", "department_id": 91, "name": "Самозванец"},
+        headers=dept_head_auth,
+    )
+    assert resp.status_code == 403
+
+
+async def test_manager_key_payload_rejects_department_id(
+    client: AsyncClient,
+    dept_head_auth: dict[str, str],
+) -> None:
+    """A manager key's department comes from the issuer's scope, not payload."""
+    resp = await client.post(
+        "/api/v1/users",
+        json={"bitrix_user_id": 9, "name": "x", "department_id": 91},
+        headers=dept_head_auth,
+    )
+    assert resp.status_code == 422
+
+
+async def test_dept_head_revokes_only_own_dept_keys(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    op_department: Department,
+    dept_head_auth: dict[str, str],
+) -> None:
+    """Revocation by a scoped head: own dept 200; foreign/orphan/head 403."""
+    await _seed_manager(dbsession, bitrix_user_id=831, department=op_department)
+    other_dept = Department(bitrix_id=95, name="ОП Актобе")
+    dbsession.add(other_dept)
+    await dbsession.flush()
+    await _seed_manager(dbsession, bitrix_user_id=832, department=other_dept)
+
+    own = await _seed_companion_user(
+        dbsession,
+        key="r-own",
+        role=CompanionRole.MANAGER,
+        bitrix_user_id=831,
+    )
+    foreign = await _seed_companion_user(
+        dbsession,
+        key="r-foreign",
+        role=CompanionRole.MANAGER,
+        bitrix_user_id=832,
+    )
+    orphan = await _seed_companion_user(
+        dbsession,
+        key="r-orphan",
+        role=CompanionRole.MANAGER,
+        bitrix_user_id=833,
+    )
+    own_head_row = await dbsession.scalar(
+        select(CompanionUser).where(
+            CompanionUser.key_sha256 == hash_key(_DEPT_HEAD_KEY),
+        ),
+    )
+    assert own_head_row is not None
+
+    resp = await client.post(
+        f"/api/v1/users/{own.id}/revoke",
+        headers=dept_head_auth,
+    )
+    assert resp.status_code == 200
     assert (
-        await client.get("/api/v1/users", headers=dept_head_auth)
-    ).status_code == 403
-    assert (
-        await client.post(
-            "/api/v1/users",
-            json={"bitrix_user_id": 9, "name": "x"},
+        await client.get("/api/v1/me", headers=_headers("r-own"))
+    ).status_code == 401
+
+    for row in (foreign, orphan, own_head_row):
+        resp = await client.post(
+            f"/api/v1/users/{row.id}/revoke",
             headers=dept_head_auth,
         )
-    ).status_code == 403
-    assert (
-        await client.post("/api/v1/users/1/revoke", headers=dept_head_auth)
-    ).status_code == 403
+        assert resp.status_code == 403, row.id
 
 
 async def test_global_head_unaffected_by_scoping(
@@ -1188,12 +1370,12 @@ async def test_revoked_manager_key_stops_working(
     assert (await client.get("/api/v1/me", headers=mgr_headers)).status_code == 401
 
 
-async def test_head_rows_not_revocable_from_cabinet(
+async def test_global_head_rows_not_revocable_from_cabinet(
     client: AsyncClient,
     dbsession: AsyncSession,
     static_head_auth: dict[str, str],
 ) -> None:
-    """DB head keys stay CLI-managed — the cabinet cannot revoke them."""
+    """Dept-NULL (global) head rows stay env/CLI-managed — cabinet 403."""
     head_row = await _seed_companion_user(
         dbsession,
         key="db-head-key",
@@ -1205,3 +1387,103 @@ async def test_head_rows_not_revocable_from_cabinet(
         headers=static_head_auth,
     )
     assert resp.status_code == 403
+
+
+async def test_global_head_mints_scoped_head_key(
+    client: AsyncClient,
+    op_department: Department,
+    static_head_auth: dict[str, str],
+) -> None:
+    """POST /users with role=head issues a working department-scoped РОП key."""
+    resp = await client.post(
+        "/api/v1/users",
+        json={"role": "head", "department_id": 91, "name": "РОП Алматы-1"},
+        headers=static_head_auth,
+    )
+    assert resp.status_code == 201
+    created = resp.json()
+    assert created["user"]["role"] == "head"
+    assert created["user"]["department_id"] == 91
+
+    rop_headers = _headers(created["key"])
+    me = (await client.get("/api/v1/me", headers=rop_headers)).json()
+    assert me["role"] == "head"
+    assert me["department"] == {"bitrix_id": 91, "name": "ОП Алматы-1"}
+
+    assert (
+        await client.get("/api/v1/teams/91/summary", headers=rop_headers)
+    ).status_code == 200
+    assert (
+        await client.get("/api/v1/teams/92/summary", headers=rop_headers)
+    ).status_code == 403
+
+
+async def test_cabinet_never_mints_global_head(
+    client: AsyncClient,
+    static_head_auth: dict[str, str],
+) -> None:
+    """role=head needs a department_id and a name source — both are 422."""
+    resp = await client.post(
+        "/api/v1/users",
+        json={"role": "head", "name": "Глобальный"},
+        headers=static_head_auth,
+    )
+    assert resp.status_code == 422
+
+    resp = await client.post(
+        "/api/v1/users",
+        json={"role": "head", "department_id": 91},
+        headers=static_head_auth,
+    )
+    assert resp.status_code == 422
+
+
+async def test_global_head_revokes_scoped_head_key(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    static_head_auth: dict[str, str],
+) -> None:
+    """Scoped-head keys are cabinet-revocable by the global head."""
+    row = await _seed_companion_user(
+        dbsession,
+        key="scoped-rop-key",
+        role=CompanionRole.HEAD,
+        department_id=96,
+        name="РОП офиса",
+    )
+    assert (
+        await client.get("/api/v1/me", headers=_headers("scoped-rop-key"))
+    ).status_code == 200
+
+    resp = await client.post(
+        f"/api/v1/users/{row.id}/revoke",
+        headers=static_head_auth,
+    )
+    assert resp.status_code == 200
+    assert (
+        await client.get("/api/v1/me", headers=_headers("scoped-rop-key"))
+    ).status_code == 401
+
+
+async def test_global_head_issue_keeps_no_dept_tie(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    static_head_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The global head's manager keys don't touch the managers table."""
+
+    async def _fake_bitrix(_uid: int) -> str:
+        return "Без Отдела"
+
+    monkeypatch.setattr(service, "_bitrix_user_name", _fake_bitrix)
+    resp = await client.post(
+        "/api/v1/users",
+        json={"bitrix_user_id": 841},
+        headers=static_head_auth,
+    )
+    assert resp.status_code == 201
+    mgr = await dbsession.scalar(
+        select(Manager).where(Manager.bitrix_user_id == 841),
+    )
+    assert mgr is None

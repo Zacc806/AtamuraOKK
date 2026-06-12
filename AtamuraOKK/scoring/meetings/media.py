@@ -56,3 +56,28 @@ def to_mono_wav(media_path: Path, dest: Path) -> Path:
         check=True,
     )
     return dest
+
+
+def to_mono_opus(media_path: Path, dest: Path) -> Path:
+    """Downmix to 16 kHz mono OGG/Opus (~14 MB/h — hours fit API upload caps)."""
+    subprocess.run(  # noqa: S603
+        [  # noqa: S607
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(media_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "32k",
+            str(dest),
+        ],
+        capture_output=True,
+        check=True,
+    )
+    return dest

@@ -41,15 +41,23 @@ trustworthy after the Bitrix data-cleanup gate (see sales-companion
        department id) — an **office РОП** scoped to that one department: only
        managers whose `managers` row maps to it (unknown/unenriched managers
        and unattributed meetings stay global-head-only), only their own
-       `/teams/{id}/summary`, and **no access management** (`/users` is `403`
-       for scoped heads). `department_id = NULL` keeps the head global.
+       `/teams/{id}/summary`, and access management limited to their own
+       department's **manager** keys. `department_id = NULL` keeps the head
+       global.
 
-   Missing/invalid/revoked key → `401`. Manager keys are issued and revoked by
-   the **global** head **from the cabinet** (`/users` endpoints below) or with
-   `python -m AtamuraOKK.companion_users create|list|revoke` (the raw key is
-   shown once at creation in both flows). Head keys — including
-   department-scoped office РОПs (`create --role head --department-id <bitrix
-   dept id>`) — are never issued via the API: only the static key or the CLI.
+   Missing/invalid/revoked key → `401`. Access management is head-tiered:
+   any head issues and revokes **manager** keys from the cabinet (`/users`
+   endpoints below; a scoped head only within their department — and issuing
+   one **ties the manager to that department**: the `managers` row is
+   get-or-created, pointed at the head's department and marked `enriched`,
+   so ingestion never re-derives it — the cabinet's word beats Bitrix's).
+   The **global** head additionally mints and revokes department-scoped head
+   keys (office РОПы) from the cabinet (`{role: "head", department_id, name?
+   | bitrix_user_id?}`). The CLI `python -m AtamuraOKK.companion_users
+   create|list|revoke` remains the fallback for everything and the only way
+   to create a *global* (dept-less) head row or reactivate a key; the raw key
+   is shown once at creation in every flow. The cabinet can never mint or
+   revoke a global head — the static key lives only in the environment.
 
 ## Identifiers
 
@@ -83,15 +91,15 @@ score; reminders/vendor/internal/wrong-number calls are excluded.
 | GET | `/api/v1/me` | who am I — role + linked manager profile + `department` scope (manager's own dept, or the dept a scoped head is limited to; null for the global head). The cabinet boots from this |
 | GET | `/api/v1/managers/{manager_id}/scorecard?period=YYYY-MM` | ОКК scorecard (`okk` + `zone_distribution` + `meetings` + null `money`) |
 | GET | `/api/v1/managers/{manager_id}/calls?since=&limit=` | Звонки feed — scored calls, newest first |
-| GET | `/api/v1/calls/{call_id}/feedback` | авто-разбор за 90 сек — summary/strengths/growth/criteria |
+| GET | `/api/v1/calls/{call_id}/feedback` | авто-разбор за 90 сек — summary/strengths/growth/criteria + `transcript` (speaker-labeled blocks: `agent`/`customer`, coalesced; falls back to one `unknown` block from `full_text`) |
 | GET | `/api/v1/managers/{manager_id}/meetings?since=&limit=` | Встречи feed — scored ОП meetings, newest first |
 | GET | `/api/v1/meetings/{meeting_id}/feedback` | авто-разбор for one meeting — score/tone/red flags/criteria |
 | GET | `/api/v1/managers/{manager_id}/feed?since=&limit=` | unified Звонки+Встречи feed — kind-tagged items, newest first |
 | GET | `/api/v1/rubrics` | active criteria set per `source` (`"tm"` calls / `"op"` meetings) |
 | GET | `/api/v1/teams/{department_id}/summary?period=YYYY-MM` | РОП-вид — per-manager roster + group rollup, calls **and** meetings (**head only**; a scoped head only their own department) |
-| GET | `/api/v1/users` | all cabinet users — access-management list (**global head only**) |
-| POST | `/api/v1/users` | issue a **manager** key (`{bitrix_user_id, name?}`); raw key returned once (**global head only**) |
-| POST | `/api/v1/users/{id}/revoke` | deactivate a manager's key; head rows are `403` (CLI-only) (**global head only**) |
+| GET | `/api/v1/users` | cabinet users — all for the global head; a scoped head sees only their own department's manager keys (**head only**) |
+| POST | `/api/v1/users` | issue a key; raw key returned once. Manager (`{bitrix_user_id, name?}`): any head — a scoped head's manager is tied to their department. Head (`{role: "head", department_id, name? \| bitrix_user_id?}`): **global head only** |
+| POST | `/api/v1/users/{id}/revoke` | deactivate a key. Global head: manager + scoped-head keys (dept-NULL head rows are `403`, env/CLI-only); scoped head: own department's manager keys only |
 
 `period` defaults to the current month in `report_timezone`; a malformed value
 returns `422`. Unknown manager/department/call returns `404`; a manager asking
@@ -140,9 +148,10 @@ If neither resolves (bad id, or the webhook lacks the `user` scope) the
 request is `422` with a hint to pass `name` explicitly.
 
 The `/users` endpoints are the one writable surface — they write only
-AtamuraOKK's own `companion_users` table (never the pipeline or Bitrix;
-name resolution only *reads* Bitrix) and can only mint/revoke `manager`
-keys, so a compromised cabinet session can never create another head.
+AtamuraOKK's own `companion_users` / `managers` / `departments` tables
+(never the pipeline state or Bitrix; name resolution only *reads* Bitrix).
+Minting a head requires a `department_id`, so a compromised cabinet session
+can never create another **global** head.
 Schemas live in `web/api/v1/schemas.py`; the live OpenAPI spec is at
 `/api/docs`.
 

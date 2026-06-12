@@ -15,7 +15,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repo root (…/AtamuraOKK), derived locally so this automation never imports the
 # call-scoring ``AtamuraOKK.settings`` module.
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class MeetingScoringConfig(BaseSettings):
@@ -85,7 +85,7 @@ class MeetingScoringConfig(BaseSettings):
     meetings_min_duration_sec: int = 60
     # Self-contained working dir: downloaded audio + the SQLite state live here
     # (no Postgres — keeps this automation parallel to the call pipeline).
-    meetings_work_dir: Path = _REPO_ROOT / ".meetings"
+    meetings_work_dir: Path = REPO_ROOT / ".meetings"
     # SQLite state file; relative paths resolve under ``meetings_work_dir``.
     meetings_db_path: str = "meetings.db"
     # CSV export of scored meetings (`report` command); relative → work dir.
@@ -108,12 +108,38 @@ class MeetingScoringConfig(BaseSettings):
     # Timezone for the scheduler (matches the ОП reporting tz).
     meetings_worker_timezone: str = "Asia/Qyzylorda"
 
-    # Transcription engine for meetings: "whisper" (local faster-whisper, no API
-    # quota — the default) or "openai" (gpt-4o-transcribe).
-    meetings_transcribe_engine: str = "whisper"
-    meetings_whisper_model: str = "large-v3"
-    meetings_whisper_device: str = "cpu"
-    meetings_whisper_compute_type: str = "int8"
+    # Transcription engine for meetings: "yandex" (SpeechKit v3 async — native
+    # ru + kk, the default) or "openai" (gpt-4o-transcribe).
+    meetings_transcribe_engine: str = "yandex"
+    # --- Yandex SpeechKit (meetings_transcribe_engine="yandex") ---
+    # Shared neutral infra with the call pipeline: same ``ATAMURAOKK_YANDEX_*``
+    # env vars and service-account authorized key, read here independently.
+    yandex_sa_key_file: str = ""
+    yandex_secret_key: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "ATAMURAOKK_YANDEX_SECRET_KEY",
+            "ATAMURAOKK_YANDEX_API_KEY",
+        ),
+    )
+    yandex_iam_endpoint: str = "https://iam.api.yandexcloud.kz/iam/v1/tokens"
+    yandex_stt_endpoint: str = "stt.api.cloud.yandex.net:443"
+    yandex_operation_endpoint: str = "operation.api.yandexcloud.kz:443"
+    yandex_stt_model: str = "general"
+    # Apply text normalization (numbers, punctuation, capitalization) to finals.
+    yandex_stt_normalize: bool = True
+    # Languages SpeechKit may recognize (WHITELIST). RU + KK covers the team.
+    yandex_stt_languages: tuple[str, ...] = ("ru-RU", "kk-KZ")
+    # Meetings run hours long, so polling gets its own (laxer) knobs instead of
+    # the call pipeline's tighter defaults (status checks are quota'd at 5/s).
+    meetings_stt_poll_interval: float = 5.0
+    meetings_stt_timeout: float = 3600.0
+    # How many recordings to transcribe concurrently. Yandex async STT is
+    # network-bound (upload + poll), so parallelism drains the backlog at no CPU
+    # cost; each in-flight operation polls every ``meetings_stt_poll_interval``
+    # seconds — keep concurrency/interval under the 5/s status-check quota
+    # (shared with the call pipeline's transcribe workers).
+    meetings_transcribe_concurrency: int = 8
     openai_api_key: str = Field(
         default="",
         validation_alias=AliasChoices(

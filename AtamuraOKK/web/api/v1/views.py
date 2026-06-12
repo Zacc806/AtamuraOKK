@@ -7,9 +7,11 @@ path params are **Bitrix** ids (see ``schemas``). The pipeline's internal row
 ids and status enum never appear in a response.
 
 Call-quality data is strictly read-only. The one writable surface is the
-head-only ``/users`` access management (issue/revoke **manager** keys) — it
-writes only AtamuraOKK's own ``companion_users`` table, never the pipeline
-or Bitrix (key issuance may *read* Bitrix to resolve the manager's name).
+head-tiered ``/users`` access management: a scoped head (office РОП) manages
+manager keys for their own department, the global head manages everything and
+additionally mints department-scoped head keys. It writes only AtamuraOKK's
+own ``companion_users``/``managers``/``departments`` tables, never the
+pipeline state or Bitrix (key issuance may *read* Bitrix to resolve a name).
 """
 
 from __future__ import annotations
@@ -23,10 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from AtamuraOKK.db.dependencies import get_db_session
 from AtamuraOKK.db.models.companion_user import CompanionUser
+from AtamuraOKK.db.models.department import Department
 from AtamuraOKK.db.models.enums import CompanionRole
+from AtamuraOKK.db.models.manager import Manager
 from AtamuraOKK.web.api.v1 import day, service
 from AtamuraOKK.web.api.v1.auth import (
     CompanionIdentity,
+    ensure_access_admin,
     ensure_can_view_manager,
     ensure_global_head,
     ensure_head,
@@ -288,12 +293,16 @@ async def manager_day(
         raise _bad_period(exc) from exc
 
 
-# --- Access management (global-head-only) -----------------------------------
-# The РОП logs in with the static head key (``companion_head_key``) and issues
-# personal keys for managers from the cabinet. Only MANAGER rows are managed
-# here; head keys (incl. department-scoped office РОПs) stay static/CLI-issued
-# so a compromised cabinet session can never mint another head. Scoped heads
-# don't manage access at all — keys are org-wide, issuance stays global.
+# --- Access management (head-tiered) -----------------------------------------
+# The global РОП (static ``companion_head_key`` or a dept-NULL head row)
+# manages everything: manager keys org-wide plus minting/revoking
+# department-scoped head keys (office РОПы). ``department_id`` is required to
+# mint a head, so a compromised cabinet session can never mint a *global*
+# head, and dept-NULL head rows can't be revoked from the cabinet either —
+# the global head stays env/CLI-managed. A scoped head manages only their own
+# department's MANAGER keys; issuing one ties the manager to that department
+# ("cabinet wins" over Bitrix attribution, see
+# ``service.assign_manager_department``).
 
 
 def _user_view(user: CompanionUser) -> CompanionUserView:
@@ -313,11 +322,28 @@ async def list_companion_users(
     identity: CompanionIdentity = Depends(get_companion_identity),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[CompanionUserView]:
-    """All cabinet users (доступы) — the head's access-management list."""
-    ensure_global_head(identity)
-    users = (
-        await session.scalars(select(CompanionUser).order_by(CompanionUser.id))
-    ).all()
+    """Cabinet users (доступы) the caller administers.
+
+    All rows for the global head; only the own department's manager keys
+    for a scoped head.
+    """
+    ensure_access_admin(identity)
+    query = select(CompanionUser).order_by(CompanionUser.id)
+    if not identity.is_global_head:
+        # Inner joins drop keyless rows and unenriched managers — unattributed
+        # keys stay global-head-only, mirroring ensure_can_view_manager.
+        query = (
+            query.join(
+                Manager,
+                Manager.bitrix_user_id == CompanionUser.bitrix_user_id,
+            )
+            .join(Department, Department.id == Manager.department_id)
+            .where(
+                CompanionUser.role == CompanionRole.MANAGER,
+                Department.bitrix_id == identity.department_id,
+            )
+        )
+    users = (await session.scalars(query)).all()
     return [_user_view(u) for u in users]
 
 
@@ -327,21 +353,24 @@ async def list_companion_users(
     status_code=status.HTTP_201_CREATED,
     tags=["companion"],
 )
-async def create_manager_key(
+async def create_companion_key(
     payload: CompanionUserCreate,
     identity: CompanionIdentity = Depends(get_companion_identity),
     session: AsyncSession = Depends(get_db_session),
 ) -> CompanionUserCreated:
-    """Issue a manager's personal key. The raw key is returned ONCE.
+    """Issue a personal key. The raw key is returned ONCE.
 
+    Any head issues manager keys (a scoped head's manager is tied to their
+    department); only the global head issues department-scoped head keys.
     ``name`` is optional — omitted, it is resolved from the Bitrix user id
     (OKK's ``managers`` table, else a live ``user.get``).
     """
-    ensure_global_head(identity)
-    name = payload.name or await service.resolve_manager_name(
-        session,
-        payload.bitrix_user_id,
-    )
+    ensure_access_admin(identity)
+    if payload.role == "head":
+        ensure_global_head(identity)
+    name = payload.name
+    if name is None and payload.bitrix_user_id is not None:
+        name = await service.resolve_manager_name(session, payload.bitrix_user_id)
     if name is None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -353,11 +382,25 @@ async def create_manager_key(
     key = secrets.token_urlsafe(24)
     user = CompanionUser(
         key_sha256=hash_key(key),
-        role=CompanionRole.MANAGER,
+        role=CompanionRole(payload.role),
         bitrix_user_id=payload.bitrix_user_id,
+        department_id=payload.department_id,
         name=name,
     )
     session.add(user)
+    if (
+        payload.role == "manager"
+        # Both non-None by construction: the payload validator requires a
+        # bitrix_user_id for managers, a non-global head always carries a dept.
+        and payload.bitrix_user_id is not None
+        and identity.department_id is not None
+    ):
+        await service.assign_manager_department(
+            session,
+            payload.bitrix_user_id,
+            identity.department_id,
+            name,
+        )
     await session.flush()
     await session.refresh(user)
     return CompanionUserCreated(user=_user_view(user), key=key)
@@ -373,16 +416,40 @@ async def revoke_companion_user(
     identity: CompanionIdentity = Depends(get_companion_identity),
     session: AsyncSession = Depends(get_db_session),
 ) -> CompanionUserView:
-    """Deactivate a manager's key (reactivation/head rows stay CLI-only)."""
-    ensure_global_head(identity)
+    """Deactivate a key (reactivation stays CLI-only).
+
+    The global head revokes manager keys and scoped-head keys; a scoped head
+    only their own department's manager keys. Dept-NULL head rows (a global
+    head) are never revocable from the cabinet.
+    """
+    ensure_access_admin(identity)
     user = await session.get(CompanionUser, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="Companion user not found.")
-    if CompanionRole(user.role) is not CompanionRole.MANAGER:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Head keys are managed via the CLI, not the cabinet.",
+    if identity.is_global_head:
+        if CompanionRole(user.role) is CompanionRole.HEAD and (
+            user.department_id is None
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Global head keys are managed via env/CLI, not the cabinet.",
+            )
+    else:
+        dept = await service.get_manager_department_bitrix_id(
+            session,
+            user.bitrix_user_id,
         )
+        if (
+            CompanionRole(user.role) is not CompanionRole.MANAGER
+            or dept != identity.department_id
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "A department head can only revoke their own "
+                    "department's manager keys."
+                ),
+            )
     user.active = False
     await session.flush()
     return _user_view(user)

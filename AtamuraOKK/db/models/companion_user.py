@@ -15,8 +15,9 @@ class CompanionUser(Base):
     """Cabinet login: a personal access key bound to a role.
 
     The key itself is never stored — only its SHA-256 hex (``key_sha256``);
-    the CLI (``python -m AtamuraOKK.companion_users``) prints the raw key once
-    at creation. ``bitrix_user_id`` links a MANAGER to their `managers` row and
+    the issuer (the CLI ``python -m AtamuraOKK.companion_users`` or the
+    cabinet's ``POST /api/v1/users``) sees the raw key exactly once at
+    creation. ``bitrix_user_id`` links a MANAGER to their `managers` row and
     is what the API scopes their data to; HEAD users may leave it NULL.
     ``department_id`` (a **Bitrix** department id) scopes a HEAD to one
     department — an office РОП; NULL keeps the head global.

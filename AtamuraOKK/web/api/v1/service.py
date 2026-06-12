@@ -2,7 +2,9 @@
 
 Everything is sourced from the ``call_scores_latest`` / ``call_criteria_latest``
 views (the read contract) plus the ``managers`` / ``departments`` tables for
-identity. Nothing here writes, and nothing exposes the internal status enum.
+identity. Nothing exposes the internal status enum. The single write path is
+``assign_manager_department`` (key issuance by a scoped head ties the manager
+to the head's department); everything else is read-only.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ from AtamuraOKK.web.api.v1.schemas import (
     RubricView,
     TeamGroupStats,
     TeamSummary,
+    TranscriptBlock,
 )
 
 _ZONES = ("strong", "normal", "borderline", "risk")
@@ -57,6 +60,39 @@ def _flags(value: Any) -> list[str]:
 def _is_qual(row: Any) -> bool:
     """A row counts toward the score unless explicitly flagged non-qualification."""
     return getattr(row, "is_qualification_call", None) is not False
+
+
+def _transcript_blocks(
+    segments: Any,
+    full_text: str | None,
+) -> list[TranscriptBlock]:
+    """Speaker-labeled blocks from a transcript row.
+
+    Segments arrive channel-grouped (all agent, then all customer), so
+    consecutive same-speaker segments coalesce into one block. Falls back to
+    ``full_text`` as a single block when segments are absent.
+    """
+    if isinstance(segments, str):
+        try:
+            segments = json.loads(segments)
+        except json.JSONDecodeError:
+            segments = None
+    blocks: list[TranscriptBlock] = []
+    if isinstance(segments, list):
+        for seg in segments:
+            if not isinstance(seg, dict):
+                continue
+            seg_text = str(seg.get("text") or "").strip()
+            if not seg_text:
+                continue
+            speaker = str(seg.get("speaker") or "unknown")
+            if blocks and blocks[-1].speaker == speaker:
+                blocks[-1].text += " " + seg_text
+            else:
+                blocks.append(TranscriptBlock(speaker=speaker, text=seg_text))
+    if not blocks and full_text and full_text.strip():
+        blocks.append(TranscriptBlock(speaker="unknown", text=full_text.strip()))
+    return blocks
 
 
 def _okk_from_rows(rows: Sequence[Any]) -> tuple[OkkScore, dict[str, int], int]:
@@ -197,6 +233,66 @@ async def resolve_manager_name(
     return await _bitrix_user_name(bitrix_user_id)
 
 
+async def get_manager_department_bitrix_id(
+    session: AsyncSession,
+    bitrix_user_id: int | None,
+) -> int | None:
+    """The Bitrix department id a manager belongs to, or None if unknown."""
+    if bitrix_user_id is None:
+        return None
+    return await session.scalar(
+        select(Department.bitrix_id)
+        .join(Manager, Manager.department_id == Department.id)
+        .where(Manager.bitrix_user_id == bitrix_user_id),
+    )
+
+
+async def _ensure_department_by_bitrix_id(
+    session: AsyncSession,
+    bitrix_dept_id: int,
+) -> int:
+    """Local id of a department, get-or-create by Bitrix id (placeholder name)."""
+    department = await session.scalar(
+        select(Department).where(Department.bitrix_id == bitrix_dept_id),
+    )
+    if department is None:
+        department = Department(
+            bitrix_id=bitrix_dept_id,
+            name=f"Department {bitrix_dept_id}",
+        )
+        session.add(department)
+        await session.flush()
+    return department.id
+
+
+async def assign_manager_department(
+    session: AsyncSession,
+    bitrix_user_id: int,
+    department_bitrix_id: int,
+    display_name: str | None,
+) -> None:
+    """Tie a manager to a department — the cabinet's word over Bitrix's.
+
+    Used when a scoped head issues a manager key: get-or-creates the
+    ``managers`` row, points it at the head's department (overriding a
+    Bitrix-derived one) and marks it ``enriched`` so ingestion never
+    re-derives the department — which also freezes its email/active backfill
+    (accepted: the head's assignment is authoritative).
+    """
+    manager = await session.scalar(
+        select(Manager).where(Manager.bitrix_user_id == bitrix_user_id),
+    )
+    if manager is None:
+        manager = Manager(bitrix_user_id=bitrix_user_id, name=display_name)
+        session.add(manager)
+    manager.department_id = await _ensure_department_by_bitrix_id(
+        session,
+        department_bitrix_id,
+    )
+    manager.enriched = True
+    await session.flush()
+
+
 async def get_scorecard(
     session: AsyncSession,
     bitrix_user_id: int,
@@ -304,6 +400,18 @@ async def get_call_feedback(
         )
     ).all()
 
+    transcript_row = (
+        await session.execute(
+            text("SELECT segments, full_text FROM transcripts WHERE call_id = :cid"),
+            {"cid": call_id},
+        )
+    ).first()
+    transcript = (
+        _transcript_blocks(transcript_row.segments, transcript_row.full_text)
+        if transcript_row is not None
+        else []
+    )
+
     percent = float(row.percent) if row.percent is not None else None
     return CallFeedback(
         call_id=row.call_id,
@@ -346,6 +454,7 @@ async def get_call_feedback(
             )
             for cr in crit_rows
         ],
+        transcript=transcript,
     )
 
 

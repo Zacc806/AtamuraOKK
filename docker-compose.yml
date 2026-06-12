@@ -157,7 +157,7 @@ services:
       minio:
         condition: service_healthy
 
-  # ОП meeting pipeline (scoring/meetings/): Disk ingest → whisper transcribe →
+  # ОП meeting pipeline (scoring/meetings/): Disk ingest → Yandex STT transcribe →
   # LLM score in its own SQLite state, then push scored meetings into Postgres
   # (the `meetings` table) for the companion API. Runs on the main stack so the
   # push stage can reach AtamuraOKK-db; needs no MinIO/Redis. Supersedes the
@@ -187,7 +187,6 @@ services:
         condition: service_completed_successfully
     volumes:
       - meetings-state:/data/meetings
-      - whisper-cache:/root/.cache/huggingface
 
   # BI dashboard over Postgres (per-manager / per-department QA scorecards).
   metabase:
@@ -239,13 +238,10 @@ volumes:
     name: AtamuraOKK-db-data
   AtamuraOKK-minio-data:
     name: AtamuraOKK-minio-data
-  # Meeting pipeline state (SQLite + downloaded audio) + the whisper model
-  # cache. Names match deploy/docker-compose.meetings.yml so switching deploy
-  # modes keeps the state.
+  # Meeting pipeline state (SQLite + downloaded audio). Name matches
+  # deploy/docker-compose.meetings.yml so switching deploy modes keeps the state.
   meetings-state:
     name: meetings-state
-  whisper-cache:
-    name: whisper-cache
 
 networks:
   # Shared bridge both this stack and sales-companion join — the "marriage".

@@ -13,8 +13,9 @@ app and holds those, not AtamuraOKK's internal row ids.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ManagerRef(BaseModel):
@@ -70,15 +71,50 @@ class CompanionUserView(BaseModel):
 
 
 class CompanionUserCreate(BaseModel):
-    """Request to issue a manager key (the role is always ``manager``)."""
+    """Request to issue a cabinet key.
 
-    bitrix_user_id: int = Field(description="Bitrix user id the key is scoped to")
+    ``role=manager`` (the default) needs ``bitrix_user_id``; ``role=head``
+    needs ``department_id`` (an office РОП is always department-scoped — the
+    cabinet can never mint a global head) plus a ``name`` or a
+    ``bitrix_user_id`` to resolve one from.
+    """
+
+    role: Literal["manager", "head"] = "manager"
+    bitrix_user_id: int | None = Field(
+        default=None,
+        description="Bitrix user id the key is scoped to (required for manager)",
+    )
+    department_id: int | None = Field(
+        default=None,
+        description="Bitrix department id a head key is scoped to (head only)",
+    )
     name: str | None = Field(
         default=None,
         min_length=1,
         max_length=255,
         description="Display name; omit to pull it from Bitrix by the user id",
     )
+
+    @model_validator(mode="after")
+    def _role_shape(self) -> CompanionUserCreate:
+        if self.role == "manager":
+            if self.bitrix_user_id is None:
+                msg = "bitrix_user_id is required for role 'manager'"
+                raise ValueError(msg)
+            if self.department_id is not None:
+                msg = (
+                    "department_id only applies to role 'head' — a manager's "
+                    "department comes from the issuing head's scope"
+                )
+                raise ValueError(msg)
+        else:
+            if self.department_id is None:
+                msg = "department_id is required for role 'head' (an office РОП)"
+                raise ValueError(msg)
+            if self.name is None and self.bitrix_user_id is None:
+                msg = "role 'head' needs a name or a bitrix_user_id to resolve one"
+                raise ValueError(msg)
+        return self
 
 
 class CompanionUserCreated(BaseModel):
@@ -193,6 +229,13 @@ class CriterionFeedback(BaseModel):
     recommendation: str | None
 
 
+class TranscriptBlock(BaseModel):
+    """One speaker-labeled block of the call transcript."""
+
+    speaker: str
+    text: str
+
+
 class CallFeedback(BaseModel):
     """Full авто-разбор за 90 сек for a single call."""
 
@@ -216,6 +259,7 @@ class CallFeedback(BaseModel):
     call_type: str | None
     is_qualification_call: bool
     criteria: list[CriterionFeedback] = Field(default_factory=list)
+    transcript: list[TranscriptBlock] = Field(default_factory=list)
 
 
 class MeetingFeedItem(BaseModel):

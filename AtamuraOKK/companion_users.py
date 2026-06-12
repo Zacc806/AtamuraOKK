@@ -12,6 +12,11 @@ department id) to scope them to one department — an office РОП who sees onl
 their own roster/rollup. ``--name`` is optional when a Bitrix user id is
 given: the display name is pulled from Bitrix (OKK's ``managers`` table, else
 a live read-only ``user.get``).
+
+The cabinet (``/api/v1/users``) covers day-to-day issuance — heads mint
+manager keys, the global head also mints department-scoped head keys. This
+CLI remains the fallback and the only way to create a *global* (dept-less)
+head row or reactivate a revoked key.
 """
 
 from __future__ import annotations

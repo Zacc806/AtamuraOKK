@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -169,6 +170,44 @@ async def test_transcribe_marks_transcribed(tmp_path: Path, monkeypatch: Any) ->
     assert row["status"] == MeetingStatus.TRANSCRIBED.value
     assert "привет" in row["transcript"]
     assert row["language"] == "ru"
+    store.close()
+
+
+class _OverlapTranscriber:
+    """Tracks in-flight overlap to prove the batch fans out concurrently."""
+
+    def __init__(self) -> None:
+        self.active = 0
+        self.max_active = 0
+
+    async def transcribe(self, wav_path: Path) -> TranscriptText:
+        """Yield long enough for other rows to enter, recording the overlap."""
+        self.active += 1
+        self.max_active = max(self.max_active, self.active)
+        await asyncio.sleep(0.02)
+        self.active -= 1
+        return TranscriptText(text="текст", language="auto")
+
+
+async def test_transcribe_runs_concurrently(tmp_path: Path, monkeypatch: Any) -> None:
+    """A batch transcribes in parallel, bounded by the concurrency knob."""
+    monkeypatch.setattr(transcribe, "to_mono_wav", lambda src, dest: src)
+    store = MeetingStore(tmp_path / "m.db")
+    for i in range(1, 6):
+        audio = tmp_path / f"{i}.ogg"
+        audio.write_bytes(b"x")
+        store.upsert_new(_file(i))
+        store.mark_downloaded(i, str(audio), 120)
+    transcriber = _OverlapTranscriber()
+
+    stats = await transcribe.transcribe_pending(
+        store=store,
+        transcriber=transcriber,
+        concurrency=3,
+    )
+
+    assert stats.transcribed == 5
+    assert 1 < transcriber.max_active <= 3
     store.close()
 
 

@@ -14,8 +14,9 @@
    additionally carry a ``department_id`` (Bitrix department id) — an office
    РОП scoped to that one department's managers and team rollup; the static key
    stays the global head. Manager keys are issued by a head from the cabinet
-   (``POST /users``) or with ``python -m AtamuraOKK.companion_users``; head
-   keys (incl. department-scoped ones) are CLI-only.
+   (``POST /users``) or with ``python -m AtamuraOKK.companion_users``;
+   department-scoped head keys are minted by the *global* head (cabinet or
+   CLI) — the global head itself stays env/CLI-only.
 """
 
 from __future__ import annotations
@@ -192,6 +193,19 @@ def ensure_head(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="A department head can only view their own department.",
+        )
+
+
+def ensure_access_admin(identity: CompanionIdentity) -> None:
+    """403 unless a head (any scope) — the entry gate to ``/users``.
+
+    What a scoped head may touch inside is checked per-row by the endpoints;
+    minting head keys stays behind ``ensure_global_head``.
+    """
+    if identity.role is not CompanionRole.HEAD:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only a head of sales can manage cabinet access.",
         )
 
 

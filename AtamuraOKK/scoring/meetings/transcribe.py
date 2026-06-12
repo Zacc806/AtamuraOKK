@@ -1,24 +1,26 @@
 """Transcribe downloaded meeting recordings — self-contained STT.
 
 DOWNLOADED → TRANSCRIBED. Meetings are mono, so there is no agent/customer
-channel to split (the LLM scorer infers roles); we downmix to 16 kHz WAV and run
-a single transcription. Engine is pluggable (local faster-whisper by default, or
-OpenAI gpt-4o-transcribe) and never touches the call pipeline's transcription.
+channel to split (the LLM scorer infers roles); we downmix to a 16 kHz mono file
+and run a single transcription. Engine is pluggable (Yandex SpeechKit v3 async
+by default, or OpenAI gpt-4o-transcribe) and never touches the call pipeline's
+transcription.
 """
 
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 from loguru import logger
 
 from AtamuraOKK.scoring.meetings.config import config
-from AtamuraOKK.scoring.meetings.media import to_mono_wav
+from AtamuraOKK.scoring.meetings.media import to_mono_opus, to_mono_wav
 from AtamuraOKK.scoring.meetings.store import MeetingStatus, MeetingStore
 
 
@@ -32,53 +34,11 @@ class TranscriptText:
 
 @runtime_checkable
 class MeetingTranscriber(Protocol):
-    """Turns a 16 kHz mono WAV into text + detected language."""
+    """Turns a prepared 16 kHz mono recording into text + detected language."""
 
     async def transcribe(self, wav_path: Path) -> TranscriptText:
-        """Transcribe one prepared WAV file."""
+        """Transcribe one prepared audio file."""
         ...
-
-
-class WhisperTranscriber:
-    """Local faster-whisper transcriber (multilingual: ru + kk, no API quota)."""
-
-    def __init__(
-        self,
-        model: str | None = None,
-        *,
-        device: str | None = None,
-        compute_type: str | None = None,
-    ) -> None:
-        self._model_name = model or config.meetings_whisper_model
-        self._device = device or config.meetings_whisper_device
-        self._compute_type = compute_type or config.meetings_whisper_compute_type
-        self._model: Any = None
-
-    def load(self) -> None:
-        """Load the model once (blocking); safe to call repeatedly."""
-        if self._model is not None:
-            return
-        from faster_whisper import WhisperModel  # noqa: PLC0415
-
-        self._model = WhisperModel(
-            self._model_name,
-            device=self._device,
-            compute_type=self._compute_type,
-        )
-
-    def _transcribe_sync(self, wav_path: Path) -> TranscriptText:
-        self.load()
-        assert self._model is not None  # noqa: S101 (loaded above)
-        segments, info = self._model.transcribe(str(wav_path), vad_filter=True)
-        # One segment (≈ utterance) per line — chunking and the duplicate-line
-        # cleanup both split on newlines, so a space-joined transcript would be
-        # one giant "line" that can only be truncated, never chunked.
-        text = "\n".join(s for s in (seg.text.strip() for seg in segments) if s)
-        return TranscriptText(text=text, language=str(info.language or "auto"))
-
-    async def transcribe(self, wav_path: Path) -> TranscriptText:
-        """Transcribe off the event loop (CTranslate2 is blocking)."""
-        return await asyncio.to_thread(self._transcribe_sync, wav_path)
 
 
 class OpenAITranscriber:
@@ -106,18 +66,27 @@ def build_transcriber() -> MeetingTranscriber:
     engine = config.meetings_transcribe_engine.lower()
     if engine == "openai":
         return OpenAITranscriber()
-    return WhisperTranscriber()
+    if engine == "yandex":
+        # Imported here, not at module top: yandex.py imports TranscriptText
+        # back from this module.
+        from AtamuraOKK.scoring.meetings.yandex import (  # noqa: PLC0415
+            YandexTranscriber,
+        )
+
+        return YandexTranscriber()
+    raise ValueError(f"unknown meetings_transcribe_engine: {engine!r}")
 
 
-def _prepare_audio(audio_path: Path, workdir: Path) -> Path:
-    """Downmix to a mono WAV when ffmpeg is present; else use the original.
+def _prepare_audio(audio_path: Path, workdir: Path, *, suffix: str = ".wav") -> Path:
+    """Downmix to a 16 kHz mono file when ffmpeg is present; else the original.
 
-    faster-whisper decodes any container itself (PyAV), so the ffmpeg downmix is
-    an optimization (smaller input, helps the OpenAI 25 MB cap) — not a hard
-    requirement. If the ffmpeg binary is missing we transcribe the source as-is.
+    ``suffix`` comes from the engine (``.ogg`` → Opus for Yandex's 60 MB inline
+    cap, ``.wav`` otherwise). Without ffmpeg we hand over the source as-is — the
+    engine then rejects containers it can't take, failing just that recording.
     """
+    convert = to_mono_opus if suffix == ".ogg" else to_mono_wav
     try:
-        return to_mono_wav(audio_path, workdir / "mono.wav")
+        return convert(audio_path, workdir / f"mono{suffix}")
     except (OSError, subprocess.SubprocessError) as exc:
         logger.warning("ffmpeg unavailable ({e}); transcribing original audio", e=exc)
         return audio_path
@@ -137,45 +106,59 @@ async def transcribe_pending(
     limit: int | None = None,
     store: MeetingStore | None = None,
     transcriber: MeetingTranscriber | None = None,
+    concurrency: int | None = None,
 ) -> TranscribeStats:
-    """Transcribe DOWNLOADED recordings into TRANSCRIBED."""
+    """Transcribe DOWNLOADED recordings into TRANSCRIBED, ``concurrency`` at a time.
+
+    The STT engines are network-bound, so the batch fans out under a semaphore
+    (``meetings_transcribe_concurrency`` by default). SQLite writes stay on the
+    event loop — serialized, no cross-thread access to the store.
+    """
     stats = TranscribeStats()
     limit = limit if limit is not None else config.meetings_batch_limit
+    concurrency = concurrency or config.meetings_transcribe_concurrency
     own_store = store is None
     store = store or MeetingStore()
     transcriber = transcriber or build_transcriber()
+    suffix = getattr(transcriber, "audio_suffix", ".wav")
+    semaphore = asyncio.Semaphore(max(1, concurrency))
 
-    load = getattr(transcriber, "load", None)
-    if callable(load):
-        await asyncio.to_thread(load)
-
-    try:
-        rows = store.claim(MeetingStatus.DOWNLOADED, limit)
-        logger.info("Transcribing {n} meeting recordings", n=len(rows))
-        for row in rows:
-            stats.attempted += 1
-            file_id = int(row["file_id"])
-            audio_path = row["audio_path"]
-            try:
+    async def _one(row: sqlite3.Row) -> None:
+        stats.attempted += 1
+        file_id = int(row["file_id"])
+        audio_path = row["audio_path"]
+        try:
+            async with semaphore:
                 if not audio_path or not Path(audio_path).exists():
                     raise FileNotFoundError(f"audio missing: {audio_path}")
                 with tempfile.TemporaryDirectory() as tmp:
-                    src = _prepare_audio(Path(audio_path), Path(tmp))
+                    src = await asyncio.to_thread(
+                        _prepare_audio, Path(audio_path), Path(tmp), suffix=suffix
+                    )
                     result = await transcriber.transcribe(src)
-                if not result.text.strip():
-                    raise ValueError("empty transcript")
-                store.mark_transcribed(file_id, result.text, result.language)
-                stats.transcribed += 1
-            except Exception as exc:
-                dead = store.bump_attempt(
-                    file_id,
-                    f"transcribe: {exc}",
-                    max_attempts=config.meetings_max_attempts,
-                )
-                stats.failed += int(dead)
-                logger.warning(
-                    "Meeting transcription failed for {id}: {e}", id=file_id, e=exc
-                )
+            if not result.text.strip():
+                raise ValueError("empty transcript")
+            store.mark_transcribed(file_id, result.text, result.language)
+            stats.transcribed += 1
+        except Exception as exc:
+            dead = store.bump_attempt(
+                file_id,
+                f"transcribe: {exc}",
+                max_attempts=config.meetings_max_attempts,
+            )
+            stats.failed += int(dead)
+            logger.warning(
+                "Meeting transcription failed for {id}: {e}", id=file_id, e=exc
+            )
+
+    try:
+        rows = store.claim(MeetingStatus.DOWNLOADED, limit)
+        logger.info(
+            "Transcribing {n} meeting recordings ({c} concurrent)",
+            n=len(rows),
+            c=concurrency,
+        )
+        await asyncio.gather(*(_one(row) for row in rows))
     finally:
         if own_store:
             store.close()
