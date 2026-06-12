@@ -29,18 +29,29 @@ class ManagerRef(BaseModel):
     department_name: str | None = None
 
 
+class DepartmentRef(BaseModel):
+    """Identity of a department, keyed by Bitrix department id."""
+
+    bitrix_id: int
+    name: str | None = None
+
+
 class MeView(BaseModel):
     """Who the cabinet session belongs to — drives the role-aware UI.
 
     ``role`` is ``manager`` (own data only) or ``head`` (head of sales, sees
     every manager). ``manager`` is the linked profile when the user maps to a
     ``managers`` row (always for managers, optional for the head).
+    ``department`` is the session's department scope: the manager's own
+    department, or the department a scoped head (office РОП) is limited to;
+    ``None`` for the global head.
     """
 
     role: str
     bitrix_user_id: int | None
     name: str | None = None
     manager: ManagerRef | None = None
+    department: DepartmentRef | None = None
 
 
 class CompanionUserView(BaseModel):
@@ -49,6 +60,10 @@ class CompanionUserView(BaseModel):
     id: int
     role: str
     bitrix_user_id: int | None
+    department_id: int | None = Field(
+        default=None,
+        description="Bitrix department id a head key is scoped to",
+    )
     name: str | None
     active: bool
     created_at: datetime | None = None
@@ -91,16 +106,17 @@ class OkkScore(BaseModel):
 
 
 class MoneyAxis(BaseModel):
-    """The conversion/Положение 'money' axis — not wired in Phase 1.
+    """The conversion/Положение 'money' axis.
 
-    Shape is published now so the companion can code against it; every value is
-    null until the Bitrix deal/lead ingestion lands (and is trustworthy only
-    after the Bitrix data-cleanup gate). ``status`` says why.
+    Live on the /day view: meetings come from Zvandau stage history attributed
+    via the «Сотрудник ТМ» field, leads from period deal creation (see
+    docs/companion-day.md). Scorecard still returns the empty default.
+    ``crm_discipline_pct`` stays null — no trustworthy source yet.
     """
 
     status: str = Field(
         default="not_available",
-        description="not_available until the deal/conversion ingestion ships",
+        description="'live' when the period has leads or meetings",
     )
     conversion_pct: float | None = None
     plan_pct: float | None = None
@@ -300,13 +316,6 @@ class TeamGroupStats(BaseModel):
     okk: OkkScore
     zone_distribution: dict[str, int]
     meetings: MeetingsScore = Field(default_factory=MeetingsScore)
-
-
-class DepartmentRef(BaseModel):
-    """Identity of a department, keyed by Bitrix department id."""
-
-    bitrix_id: int
-    name: str | None = None
 
 
 class TeamSummary(BaseModel):

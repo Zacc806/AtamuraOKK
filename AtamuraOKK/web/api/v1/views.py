@@ -28,6 +28,7 @@ from AtamuraOKK.web.api.v1 import day, service
 from AtamuraOKK.web.api.v1.auth import (
     CompanionIdentity,
     ensure_can_view_manager,
+    ensure_global_head,
     ensure_head,
     get_companion_identity,
     hash_key,
@@ -41,6 +42,7 @@ from AtamuraOKK.web.api.v1.schemas import (
     CompanionUserCreated,
     CompanionUserView,
     DayView,
+    DepartmentRef,
     FeedItem,
     ManagerScorecard,
     MeetingFeedback,
@@ -64,11 +66,21 @@ async def me(
         if identity.bitrix_user_id is not None
         else None
     )
+    if identity.department_id is not None:
+        department = await service.get_department_ref(session, identity.department_id)
+    elif manager and manager.department_id is not None:
+        department = DepartmentRef(
+            bitrix_id=manager.department_id,
+            name=manager.department_name,
+        )
+    else:
+        department = None
     return MeView(
         role=identity.role.value,
         bitrix_user_id=identity.bitrix_user_id,
         name=identity.name or (manager.name if manager else None),
         manager=manager,
+        department=department,
     )
 
 
@@ -94,7 +106,7 @@ async def manager_scorecard(
     session: AsyncSession = Depends(get_db_session),
 ) -> ManagerScorecard:
     """ОКК scorecard for a manager (Bitrix user id) in a period."""
-    ensure_can_view_manager(identity, manager_id)
+    await ensure_can_view_manager(session, identity, manager_id)
     try:
         card = await service.get_scorecard(session, manager_id, period)
     except PeriodError as exc:
@@ -120,7 +132,7 @@ async def manager_calls(
     session: AsyncSession = Depends(get_db_session),
 ) -> list[CallFeedItem]:
     """A manager's scored-call feed (Звонки), newest first."""
-    ensure_can_view_manager(identity, manager_id)
+    await ensure_can_view_manager(session, identity, manager_id)
     return await service.get_calls_feed(session, manager_id, since, limit)
 
 
@@ -144,7 +156,7 @@ async def manager_meetings(
     Meetings are attributed to whoever uploaded the recording to the Disk
     folder, so ``manager_id`` is that uploader's Bitrix user id.
     """
-    ensure_can_view_manager(identity, manager_id)
+    await ensure_can_view_manager(session, identity, manager_id)
     return await service.get_meetings_feed(session, manager_id, since, limit)
 
 
@@ -168,7 +180,7 @@ async def manager_feed(
     A department's scored items are whatever it produces — ТМ calls or ОП
     meetings — so the cabinet reads one feed and renders by ``kind``.
     """
-    ensure_can_view_manager(identity, manager_id)
+    await ensure_can_view_manager(session, identity, manager_id)
     return await service.get_unified_feed(session, manager_id, since, limit)
 
 
@@ -199,7 +211,8 @@ async def meeting_feedback(
     feedback = await service.get_meeting_feedback(session, meeting_id)
     if feedback is None:
         raise HTTPException(status_code=404, detail="Meeting not found.")
-    ensure_can_view_manager(
+    await ensure_can_view_manager(
+        session,
         identity,
         feedback.manager.bitrix_user_id if feedback.manager else None,
     )
@@ -220,7 +233,7 @@ async def call_feedback(
     feedback = await service.get_call_feedback(session, call_id)
     if feedback is None:
         raise HTTPException(status_code=404, detail="Call not scored.")
-    ensure_can_view_manager(identity, feedback.manager.bitrix_user_id)
+    await ensure_can_view_manager(session, identity, feedback.manager.bitrix_user_id)
     return feedback
 
 
@@ -238,8 +251,8 @@ async def team_summary(
     identity: CompanionIdentity = Depends(get_companion_identity),
     session: AsyncSession = Depends(get_db_session),
 ) -> TeamSummary:
-    """РОП-вид: per-manager roster + group rollup. Head of sales only."""
-    ensure_head(identity)
+    """РОП-вид: roster + rollup. Global head, or the department's own РОП."""
+    ensure_head(identity, department_id)
     try:
         summary = await service.get_team_summary(session, department_id, period)
     except PeriodError as exc:
@@ -268,18 +281,19 @@ async def manager_day(
     Reads straight through to the Bitrix TM funnel (cat-0 deals owned by this
     manager). ``data_ready=False`` when there's no live pipeline yet.
     """
-    ensure_can_view_manager(identity, manager_id)
+    await ensure_can_view_manager(session, identity, manager_id)
     try:
         return await day.get_day(session, manager_id, period)
     except PeriodError as exc:
         raise _bad_period(exc) from exc
 
 
-# --- Access management (head-only) -----------------------------------------
+# --- Access management (global-head-only) -----------------------------------
 # The РОП logs in with the static head key (``companion_head_key``) and issues
 # personal keys for managers from the cabinet. Only MANAGER rows are managed
-# here; head keys stay static/CLI-issued so a compromised cabinet session can
-# never mint another head.
+# here; head keys (incl. department-scoped office РОПs) stay static/CLI-issued
+# so a compromised cabinet session can never mint another head. Scoped heads
+# don't manage access at all — keys are org-wide, issuance stays global.
 
 
 def _user_view(user: CompanionUser) -> CompanionUserView:
@@ -287,6 +301,7 @@ def _user_view(user: CompanionUser) -> CompanionUserView:
         id=user.id,
         role=CompanionRole(user.role).value,
         bitrix_user_id=user.bitrix_user_id,
+        department_id=user.department_id,
         name=user.name,
         active=user.active,
         created_at=user.created_at,
@@ -299,7 +314,7 @@ async def list_companion_users(
     session: AsyncSession = Depends(get_db_session),
 ) -> list[CompanionUserView]:
     """All cabinet users (доступы) — the head's access-management list."""
-    ensure_head(identity)
+    ensure_global_head(identity)
     users = (
         await session.scalars(select(CompanionUser).order_by(CompanionUser.id))
     ).all()
@@ -322,7 +337,7 @@ async def create_manager_key(
     ``name`` is optional — omitted, it is resolved from the Bitrix user id
     (OKK's ``managers`` table, else a live ``user.get``).
     """
-    ensure_head(identity)
+    ensure_global_head(identity)
     name = payload.name or await service.resolve_manager_name(
         session,
         payload.bitrix_user_id,
@@ -359,7 +374,7 @@ async def revoke_companion_user(
     session: AsyncSession = Depends(get_db_session),
 ) -> CompanionUserView:
     """Deactivate a manager's key (reactivation/head rows stay CLI-only)."""
-    ensure_head(identity)
+    ensure_global_head(identity)
     user = await session.get(CompanionUser, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="Companion user not found.")

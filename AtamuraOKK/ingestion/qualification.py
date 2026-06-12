@@ -3,15 +3,19 @@
 The operator's rule: a client is *qualified* once a manager moves their card into
 the Kanban column **Лид квалифицирован**. That column is a **deal stage** (present
 in more than one pipeline), and calls link to **contacts** — so we resolve
-Contact → deals → deal stage history and check whether any deal **ever entered**
-a qualified stage (faithful to "the card was placed there", and correctly
-excludes deals dropped to Отказ before qualifying).
+Contact → deals → deal stage history. The scope rule needs not just *whether* a
+deal entered a qualified stage but **when** (the earliest entry's CREATED_TIME):
+calls before that moment are the sales conversation, calls after it are
+logistics. Stage history correctly excludes deals dropped to Отказ before
+qualifying.
 
 Swappable via the :class:`QualificationChecker` protocol.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 from loguru import logger
@@ -23,16 +27,32 @@ from AtamuraOKK.settings import settings
 _DEAL_ENTITY_TYPE_ID = 2
 
 
+@dataclass(frozen=True)
+class Qualification:
+    """Whether (and when) a client entered the qualified column.
+
+    ``qualified`` is True/False/None (unknown — e.g. a phone-only client that
+    cannot be resolved to deals). ``at`` is the earliest qualified-stage entry;
+    None whenever ``qualified`` is not True.
+    """
+
+    qualified: bool | None
+    at: datetime | None = None
+
+
+UNKNOWN_QUALIFICATION = Qualification(qualified=None)
+
+
 @runtime_checkable
 class QualificationChecker(Protocol):
-    """Decides whether each client key is qualified."""
+    """Decides whether/when each client key qualified."""
 
     async def qualified(
         self,
         client_keys: set[str],
         bx: BitrixClient,
-    ) -> dict[str, bool | None]:
-        """Map each client key to True/False/None (unknown)."""
+    ) -> dict[str, Qualification]:
+        """Map each client key to its :class:`Qualification`."""
         ...
 
 
@@ -43,9 +63,9 @@ class NullQualificationChecker:
         self,
         client_keys: set[str],
         bx: BitrixClient,
-    ) -> dict[str, bool | None]:
-        """Return None (unknown) for every client."""
-        return dict.fromkeys(client_keys, None)
+    ) -> dict[str, Qualification]:
+        """Return unknown for every client."""
+        return dict.fromkeys(client_keys, UNKNOWN_QUALIFICATION)
 
 
 async def discover_qualified_stage_ids(bx: BitrixClient) -> set[str]:
@@ -68,7 +88,11 @@ async def discover_qualified_stage_ids(bx: BitrixClient) -> set[str]:
 
 
 class ContactDealStageQualificationChecker:
-    """Qualified iff a client's deal ever entered the qualified stage."""
+    """Qualified iff a client's deal ever entered the qualified stage.
+
+    Resolves the *earliest* entry time so the scope rule can split a client's
+    calls into before/after qualification.
+    """
 
     def __init__(self, qualified_stage_ids: set[str] | None = None) -> None:
         self._stage_ids = qualified_stage_ids
@@ -87,21 +111,21 @@ class ContactDealStageQualificationChecker:
         self,
         client_keys: set[str],
         bx: BitrixClient,
-    ) -> dict[str, bool | None]:
-        """Resolve each client to qualified/not/unknown via deal stage history."""
+    ) -> dict[str, Qualification]:
+        """Resolve each client to qualified/not/unknown (+ moment) via stage history."""
         stage_ids = await self._ensure_stage_ids(bx)
         if not stage_ids:
             logger.warning("No qualified stages found; qualification is unknown.")
-            return dict.fromkeys(client_keys, None)
+            return dict.fromkeys(client_keys, UNKNOWN_QUALIFICATION)
 
-        result: dict[str, bool | None] = {}
+        result: dict[str, Qualification] = {}
         for key in client_keys:
             entity_type, _, entity_id = key.partition(":")
             try:
                 result[key] = await self._check(entity_type, entity_id, stage_ids, bx)
             except BitrixError as exc:
                 logger.warning("Qualification failed for {k}: {e}", k=key, e=exc)
-                result[key] = None
+                result[key] = UNKNOWN_QUALIFICATION
         return result
 
     async def _check(
@@ -110,7 +134,7 @@ class ContactDealStageQualificationChecker:
         entity_id: str,
         stage_ids: set[str],
         bx: BitrixClient,
-    ) -> bool | None:
+    ) -> Qualification:
         if entity_type == "CONTACT":
             deal_ids = await self._deal_ids(bx, {"CONTACT_ID": entity_id})
         elif entity_type == "COMPANY":
@@ -118,10 +142,12 @@ class ContactDealStageQualificationChecker:
         elif entity_type == "DEAL":
             deal_ids = [entity_id]
         else:
-            return None  # LEAD / PHONE-only: not resolvable to deal stages
+            # LEAD / PHONE-only: not resolvable to deal stages.
+            return UNKNOWN_QUALIFICATION
         if not deal_ids:
-            return False
-        return await self._any_deal_qualified(bx, deal_ids, stage_ids)
+            return Qualification(qualified=False)
+        at = await self._earliest_qualified_at(bx, deal_ids, stage_ids)
+        return Qualification(qualified=at is not None, at=at)
 
     async def _deal_ids(
         self,
@@ -138,30 +164,48 @@ class ContactDealStageQualificationChecker:
             )
         ]
 
-    async def _any_deal_qualified(
+    async def _earliest_qualified_at(
         self,
         bx: BitrixClient,
         deal_ids: list[str],
         stage_ids: set[str],
-    ) -> bool:
-        """True if any deal has a stage-history entry in a qualified stage.
+    ) -> datetime | None:
+        """Earliest qualified-stage entry across the deals, or None if never.
 
-        Uses the envelope ``total`` rather than the first page of ``items`` so a
-        qualifying entry on page 2+ (many deals / stage transitions) isn't missed.
+        Pages through *every* history page (a qualifying entry on page 2+ —
+        many deals / stage transitions — must not be missed, and the earliest
+        one can sit anywhere). The filter restricts rows to the qualified
+        stages, so per-client volume is tiny.
         """
-        env = await bx.call_raw(
-            "crm.stagehistory.list",
-            {
-                "entityTypeId": _DEAL_ENTITY_TYPE_ID,
-                "filter": {"OWNER_ID": deal_ids, "STAGE_ID": sorted(stage_ids)},
-                "select": ["STAGE_ID"],
-            },
-        )
-        if env.get("total") is not None:
-            return int(env["total"]) > 0
-        result = env.get("result")
-        items = result.get("items", []) if isinstance(result, dict) else (result or [])
-        return len(items) > 0
+        earliest: datetime | None = None
+        cursor: int | None = 0
+        while cursor is not None:
+            env = await bx.call_raw(
+                "crm.stagehistory.list",
+                {
+                    "entityTypeId": _DEAL_ENTITY_TYPE_ID,
+                    "filter": {"OWNER_ID": deal_ids, "STAGE_ID": sorted(stage_ids)},
+                    "select": ["STAGE_ID", "CREATED_TIME"],
+                    "start": cursor,
+                },
+            )
+            result = env.get("result")
+            items = (
+                result.get("items", []) if isinstance(result, dict) else (result or [])
+            )
+            for item in items:
+                raw = item.get("CREATED_TIME")
+                if not raw:
+                    continue
+                try:
+                    at = datetime.fromisoformat(str(raw))
+                except ValueError:
+                    continue
+                if earliest is None or at < earliest:
+                    earliest = at
+            nxt = env.get("next")
+            cursor = int(nxt) if nxt is not None else None
+        return earliest
 
 
 def default_checker() -> QualificationChecker:

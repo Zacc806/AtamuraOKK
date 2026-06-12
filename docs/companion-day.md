@@ -57,21 +57,31 @@ computed over the manager's **whole** open pipeline (up to `companion_day_max_sc
 not just the shown action slice (`companion_day_max_actions`), so the headline
 numbers are accurate even when the action list is capped.
 
-### Trust boundary (the data-cleanup gate, confirmed empirically)
+### Meeting attribution (solved 2026-06-12 — was misdiagnosed as a data gate)
 
-The action list + stats are **live and populated** for the scored managers (e.g.
-68838: 25 callbacks, 50 no-answer, 13 booked, 33 qualified — all real open deals).
-But the **money/conversion axis is still gated**: as of 2026-06-09, per-TM
-`meetings` (`C24:WON`) = 0 for every manager probed (e.g. 523 leads, 0 WON in May),
-because meeting deals appear to get reassigned to the sales closer on handoff and
-so don't attribute back to the TM via `ASSIGNED_BY_ID`. Conversion therefore reads
-0% — the "конверсия недостоверна" artifact the handoff names. A **data** gate, not
-a code one; the money rail lights up with no code change once it clears.
+A snapshot query (cat 24 + `STAGE_ID=C24:WON` + `ASSIGNED_BY_ID=TM`) **always
+counts 0 by design**: the moment a visit becomes a fact, the deal is moved to
+cat 2 «Отдел продаж» and reassigned to the sales closer, so it never *rests* at
+the meeting stage. This read 0 meetings / 0% conversion for everyone and was
+initially misread as the Bitrix data-cleanup gate ("конверсия недостоверна").
 
-`DayView.data_ready` is False only when a manager has no open pipeline at all; the
-companion then shows an honest "данные готовятся" state instead of zeros. When
-there IS an open pipeline but meetings=0, the money rail shows the real lead/
-conversion numbers plus a note that meeting attribution awaits the cleanup gate.
+The portal in fact preserves both halves read-only:
+
+- the conducted-meeting **fact** survives as a `crm.stagehistory.list` transition
+  event (entityTypeId 2, `CATEGORY_ID=24`, `STAGE_ID=C24:WON`, `CREATED_TIME`);
+- the **TM** survives on the deal in the «Сотрудник ТМ» employee field
+  (`companion_tm_employee_field`, default `UF_CRM_1751599893`), which stays put
+  after the reassignment — verified 100% filled on June 2026's 152 WON deals.
+
+`_meetings_by_tm()` joins the two (distinct deals per TM, one shared pull per
+period cached for `companion_day_cache_ttl_seconds`), and `_money()` reads its
+manager's count from that map. Caveat: the field id dates it to ~July 2025, so
+earlier months cannot be attributed this way — irrelevant for live bonus periods.
+
+`DayView.data_ready` is False only when a manager has no open pipeline at all;
+the companion then shows an honest "данные готовятся" state instead of zeros.
+With this join in place, meetings=0 simply means no conducted visits in the
+period.
 
 ## Filter gotcha
 

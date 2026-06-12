@@ -842,6 +842,190 @@ async def test_head_sees_any_manager(
     assert resp.status_code == 200
 
 
+# --- department-scoped head (office РОП) -------------------------------------
+
+_DEPT_HEAD_KEY = "dept-head-personal-key"
+
+
+@pytest.fixture
+async def op_department(dbsession: AsyncSession) -> Department:
+    """An ОП office department (Bitrix id 91) the scoped head is tied to."""
+    dept = Department(bitrix_id=91, name="ОП Алматы-1")
+    dbsession.add(dept)
+    await dbsession.flush()
+    return dept
+
+
+@pytest.fixture
+async def dept_head_auth(
+    dbsession: AsyncSession,
+    op_department: Department,
+    _token: None,
+) -> dict[str, str]:
+    """Headers for an office РОП scoped to Bitrix department 91."""
+    user = CompanionUser(
+        key_sha256=hash_key(_DEPT_HEAD_KEY),
+        role=CompanionRole.HEAD,
+        department_id=op_department.bitrix_id,
+        name="РОП Алматы-1",
+    )
+    dbsession.add(user)
+    await dbsession.flush()
+    return _headers(_DEPT_HEAD_KEY)
+
+
+async def test_me_returns_department_scope(
+    client: AsyncClient,
+    dept_head_auth: dict[str, str],
+    head_auth: dict[str, str],
+) -> None:
+    """/me carries the head's department scope; the global head has none."""
+    me = (await client.get("/api/v1/me", headers=dept_head_auth)).json()
+    assert me["role"] == "head"
+    assert me["department"] == {"bitrix_id": 91, "name": "ОП Алматы-1"}
+
+    me = (await client.get("/api/v1/me", headers=head_auth)).json()
+    assert me["role"] == "head"
+    assert me["department"] is None
+
+
+async def test_me_manager_department_from_profile(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    op_department: Department,
+    _token: None,
+) -> None:
+    """A manager's /me department mirrors their managers-row department."""
+    await _seed_manager(dbsession, bitrix_user_id=801, department=op_department)
+    await _seed_companion_user(
+        dbsession,
+        key="op-manager-key",
+        role=CompanionRole.MANAGER,
+        bitrix_user_id=801,
+    )
+    me = (await client.get("/api/v1/me", headers=_headers("op-manager-key"))).json()
+    assert me["department"] == {"bitrix_id": 91, "name": "ОП Алматы-1"}
+
+
+async def test_dept_head_sees_only_own_department_managers(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    op_department: Department,
+    dept_head_auth: dict[str, str],
+) -> None:
+    """An office РОП reads their managers; other/unenriched managers are 403."""
+    own = await _seed_manager(dbsession, bitrix_user_id=802, department=op_department)
+    other_dept = Department(bitrix_id=92, name="ОП Астана")
+    dbsession.add(other_dept)
+    await dbsession.flush()
+    foreign = await _seed_manager(dbsession, bitrix_user_id=803, department=other_dept)
+    orphan = await _seed_manager(dbsession, bitrix_user_id=804)
+
+    for path in (
+        f"/api/v1/managers/{own.bitrix_user_id}/scorecard?period={_PERIOD}",
+        f"/api/v1/managers/{own.bitrix_user_id}/meetings",
+        f"/api/v1/managers/{own.bitrix_user_id}/feed",
+    ):
+        resp = await client.get(path, headers=dept_head_auth)
+        assert resp.status_code == 200, path
+
+    for uid in (foreign.bitrix_user_id, orphan.bitrix_user_id):
+        for path in (
+            f"/api/v1/managers/{uid}/scorecard",
+            f"/api/v1/managers/{uid}/calls",
+            f"/api/v1/managers/{uid}/meetings",
+        ):
+            resp = await client.get(path, headers=dept_head_auth)
+            assert resp.status_code == 403, path
+
+
+async def test_dept_head_meeting_feedback_scoped(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    op_department: Department,
+    dept_head_auth: dict[str, str],
+) -> None:
+    """Per-meeting разбор: own department 200; foreign and orphan 403."""
+    own_mgr = await _seed_manager(
+        dbsession,
+        bitrix_user_id=805,
+        department=op_department,
+    )
+    own = await _seed_meeting(
+        dbsession,
+        bitrix_file_id=9501,
+        uploaded_by=805,
+        manager=own_mgr,
+    )
+    foreign = await _seed_meeting(dbsession, bitrix_file_id=9502, uploaded_by=703)
+    orphan = await _seed_meeting(dbsession, bitrix_file_id=9503, uploaded_by=None)
+
+    resp = await client.get(
+        f"/api/v1/meetings/{own.id}/feedback",
+        headers=dept_head_auth,
+    )
+    assert resp.status_code == 200
+
+    for meeting in (foreign, orphan):
+        resp = await client.get(
+            f"/api/v1/meetings/{meeting.id}/feedback",
+            headers=dept_head_auth,
+        )
+        assert resp.status_code == 403
+
+
+async def test_dept_head_team_summary_scoped(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    dept_head_auth: dict[str, str],
+) -> None:
+    """The office РОП gets their own rollup; another department's is 403."""
+    other_dept = Department(bitrix_id=93, name="ОП Шымкент")
+    dbsession.add(other_dept)
+    await dbsession.flush()
+
+    own = await client.get("/api/v1/teams/91/summary", headers=dept_head_auth)
+    assert own.status_code == 200
+    assert own.json()["department"]["bitrix_id"] == 91
+
+    foreign = await client.get("/api/v1/teams/93/summary", headers=dept_head_auth)
+    assert foreign.status_code == 403
+
+
+async def test_dept_head_cannot_manage_access(
+    client: AsyncClient,
+    dept_head_auth: dict[str, str],
+) -> None:
+    """Key issuance stays with the global head — scoped heads get 403."""
+    assert (
+        await client.get("/api/v1/users", headers=dept_head_auth)
+    ).status_code == 403
+    assert (
+        await client.post(
+            "/api/v1/users",
+            json={"bitrix_user_id": 9, "name": "x"},
+            headers=dept_head_auth,
+        )
+    ).status_code == 403
+    assert (
+        await client.post("/api/v1/users/1/revoke", headers=dept_head_auth)
+    ).status_code == 403
+
+
+async def test_global_head_unaffected_by_scoping(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    op_department: Department,
+    head_auth: dict[str, str],
+) -> None:
+    """The global head still reads any department's data."""
+    await _seed_manager(dbsession, bitrix_user_id=806, department=op_department)
+    resp = await client.get("/api/v1/managers/806/scorecard", headers=head_auth)
+    assert resp.status_code == 200
+    resp = await client.get("/api/v1/teams/91/summary", headers=head_auth)
+    assert resp.status_code == 200
+
+
 # --- static РОП key + cabinet access management ------------------------------
 
 _STATIC_HEAD_KEY = "static-rop-code"

@@ -165,6 +165,8 @@ line-length = 88
 # Companion API DTOs/docs carry Russian business terms (ОКК, Звонки, авто-разбор).
 "AtamuraOKK/web/api/v1/*" = ["RUF001", "RUF002", "RUF003"]
 "tests/test_companion_api.py" = ["RUF001", "RUF002", "RUF003", "S105"]
+# White-box tests of the /day money helpers (_money, _meetings_by_tm).
+"tests/test_companion_day.py" = ["SLF001"]
 # Ops scripts print to the operator's console by design.
 "metabase/*" = ["T201"]
 

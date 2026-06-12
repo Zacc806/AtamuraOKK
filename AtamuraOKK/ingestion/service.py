@@ -1,9 +1,12 @@
 """Incremental Bitrix -> Postgres ingestion (Phase 1).
 
 Pulls answered, recorded calls since the stored cursor; upserts them idempotently
-on ``bitrix_call_id``; attributes each to a Manager; marks the *first call per
-client*; checks qualification; and flags which calls are ``analyzable`` (first
-call AND qualified). Downloading audio is a separate stage (``download.py``).
+on ``bitrix_call_id``; attributes each to a Manager; resolves each client's
+qualification moment; and flags which calls are ``analyzable``: **every call of
+usable length until the client enters «Лид квалифицирован»** (calls after that
+moment are visit logistics, not sales conversations). Unknown qualification
+(phone-only clients) counts as not-yet-qualified, i.e. in scope. Downloading
+audio is a separate stage (``download.py``).
 """
 
 from __future__ import annotations
@@ -24,7 +27,12 @@ from AtamuraOKK.db.models.ingest_state import IngestState
 from AtamuraOKK.db.session import session_scope
 from AtamuraOKK.ingestion.managers import ensure_managers
 from AtamuraOKK.ingestion.mapping import parse_started_at, to_call_fields
-from AtamuraOKK.ingestion.qualification import QualificationChecker, default_checker
+from AtamuraOKK.ingestion.qualification import (
+    UNKNOWN_QUALIFICATION,
+    Qualification,
+    QualificationChecker,
+    default_checker,
+)
 from AtamuraOKK.settings import settings
 
 CURSOR_KEY = "calls"
@@ -158,25 +166,36 @@ async def _recompute_scope(
         ).all()
         if not calls:
             continue
-        qualified = quals.get(key)
+        qual = quals.get(key) or UNKNOWN_QUALIFICATION
         for idx, call in enumerate(calls):
-            call.is_first_call = idx == 0
-            call.client_qualified = qualified
-            _apply_scope(call, qualified, stats)
+            call.is_first_call = idx == 0  # kept as a data point; no longer gates
+            call.client_qualified = qual.qualified
+            call.client_qualified_at = qual.at
+            _apply_scope(call, qual, stats)
+
+
+# Skip reasons written by the pre-2026-06-12 rule (first call AND qualified).
+# The until-qualified rule was applied **forward-only** (operator decision):
+# these verdicts are frozen — never recomputed, never promoted.
+_LEGACY_SKIP_REASONS = ("not_first_call", "not_qualified", "qualification_unknown")
 
 
 def _apply_scope(
     call: Call,
-    qualified: bool | None,
+    qual: Qualification,
     stats: IngestStats,
 ) -> None:
     """Set ``analyzable``/``status``/``skip_reason`` for one call.
 
-    Only first calls are candidates; qualification gates them when required.
-    Never demotes a call that already moved past NEW.
+    The rule: every call of usable length is analyzable **until the client
+    qualifies** (``started_at`` past the qualification moment -> skipped).
+    Never qualified / unknown -> in scope. Never demotes a call that already
+    moved past NEW, and never reopens a legacy-rule verdict (forward-only).
     """
     if call.status not in (CallStatus.NEW, CallStatus.SKIPPED):
         return  # already in flight / done; leave it
+    if call.status is CallStatus.SKIPPED and call.skip_reason in _LEGACY_SKIP_REASONS:
+        return  # frozen by the old rule
 
     reason: str | None = None
     # Duration gate first: a sub-threshold call is never a scorable conversation,
@@ -184,10 +203,13 @@ def _apply_scope(
     # Defense in depth behind the ingestion-scan filter (_is_answered_recorded).
     if call.duration_sec < settings.ingest_min_duration_sec:
         reason = "too_short"
-    elif not call.is_first_call:
-        reason = "not_first_call"
-    elif settings.ingest_require_qualified and qualified is not True:
-        reason = "not_qualified" if qualified is False else "qualification_unknown"
+    elif (
+        settings.ingest_until_qualified
+        and qual.at is not None
+        and call.started_at is not None
+        and call.started_at > qual.at
+    ):
+        reason = "after_qualification"
 
     if reason:
         call.analyzable = False
@@ -264,8 +286,11 @@ async def run_ingestion(
     return stats
 
 
-# Skip reasons that a later qualification refresh can still flip to analyzable.
-_REQUALIFIABLE = ("not_qualified", "qualification_unknown")
+# Window for the late-qualification re-check. A client qualifying later than
+# this after a still-unprocessed call is vanishingly rare, and the only cost of
+# missing one is scoring a post-qualification call (never losing one). The
+# window also keeps old stuck NEW rows from hammering Bitrix every pass.
+_REQUALIFY_WINDOW_DAYS = 7
 
 
 async def refresh_qualification(
@@ -273,22 +298,28 @@ async def refresh_qualification(
     limit: int = 1000,
     checker: QualificationChecker | None = None,
 ) -> IngestStats:
-    """Re-check first calls whose client wasn't qualified yet, and promote them.
+    """Late-qualification sync: skip post-qualification calls before they score.
 
-    Clients qualify *after* their first call (as the manager works the deal), so
-    this runs periodically to move newly-qualified first calls SKIPPED -> NEW.
+    Under the until-qualified rule nothing waits on qualification (a
+    not-yet-qualified client's calls are analyzable immediately). What can
+    change later is the qualification *moment* arriving after a call was
+    ingested: this pass re-checks clients of recent unclaimed NEW calls with no
+    known qualification yet, stamping ``client_qualified_at`` and skipping any
+    call that turns out to start after it.
     """
     checker = checker or default_checker()
     stats = IngestStats()
 
     async with session_scope() as session, BitrixClient() as bx:
+        horizon = datetime.now(tz=UTC) - timedelta(days=_REQUALIFY_WINDOW_DAYS)
         calls = (
             await session.scalars(
                 select(Call)
                 .where(
-                    Call.is_first_call.is_(True),
-                    Call.status == CallStatus.SKIPPED,
-                    Call.skip_reason.in_(_REQUALIFIABLE),
+                    Call.status == CallStatus.NEW,
+                    Call.claimed_at.is_(None),
+                    Call.client_qualified_at.is_(None),
+                    Call.started_at >= horizon,
                 )
                 .limit(limit),
             )
@@ -298,14 +329,16 @@ async def refresh_qualification(
         for call in calls:
             if not call.client_key:
                 continue
-            qualified = quals.get(call.client_key)
-            call.client_qualified = qualified
-            _apply_scope(call, qualified, stats)
+            qual = quals.get(call.client_key) or UNKNOWN_QUALIFICATION
+            call.client_qualified = qual.qualified
+            call.client_qualified_at = qual.at
+            _apply_scope(call, qual, stats)
 
     logger.info(
-        "Requalification done: checked={c} promoted={a} still_skipped={k}",
+        "Requalification done: checked={c} kept={a} skipped={k} {r}",
         c=len(calls),
         a=stats.analyzable,
         k=stats.skipped,
+        r=stats.skip_reasons,
     )
     return stats

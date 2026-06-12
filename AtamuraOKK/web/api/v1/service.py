@@ -147,6 +147,20 @@ async def get_manager_ref(
     )
 
 
+async def get_department_ref(
+    session: AsyncSession,
+    department_bitrix_id: int,
+) -> DepartmentRef:
+    """A DepartmentRef for a Bitrix department id (name=None if not synced yet)."""
+    department = await session.scalar(
+        select(Department).where(Department.bitrix_id == department_bitrix_id),
+    )
+    return DepartmentRef(
+        bitrix_id=department_bitrix_id,
+        name=department.name if department else None,
+    )
+
+
 async def _bitrix_user_name(bitrix_user_id: int) -> str | None:
     """Live read-only ``user.get`` for a manager the pipeline hasn't seen yet.
 

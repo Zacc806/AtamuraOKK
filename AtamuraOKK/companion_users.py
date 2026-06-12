@@ -7,9 +7,11 @@ Commands:
 
 A ``manager`` user must be linked to a Bitrix user id — that link is what the
 read API scopes their data to. A ``head`` (руководитель отдела продаж) sees
-every manager and may omit the link. ``--name`` is optional when a Bitrix user
-id is given: the display name is pulled from Bitrix (OKK's ``managers`` table,
-else a live read-only ``user.get``).
+every manager and may omit the link; give a head ``--department-id`` (Bitrix
+department id) to scope them to one department — an office РОП who sees only
+their own roster/rollup. ``--name`` is optional when a Bitrix user id is
+given: the display name is pulled from Bitrix (OKK's ``managers`` table, else
+a live read-only ``user.get``).
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ async def _create(
     role: CompanionRole,
     bitrix_user_id: int | None,
     name: str | None,
+    department_id: int | None,
 ) -> None:
     key = secrets.token_urlsafe(24)
     async with session_scope() as session:
@@ -49,9 +52,13 @@ async def _create(
                 role=role,
                 bitrix_user_id=bitrix_user_id,
                 name=name,
+                department_id=department_id,
             ),
         )
-    print(f"Created {role.value} '{name}' (bitrix_user_id={bitrix_user_id})")  # noqa: T201
+    scope = f", department_id={department_id}" if department_id is not None else ""
+    print(  # noqa: T201
+        f"Created {role.value} '{name}' (bitrix_user_id={bitrix_user_id}{scope})",
+    )
     print(f"Personal access key (shown once, store it now): {key}")  # noqa: T201
 
 
@@ -65,9 +72,10 @@ async def _list() -> None:
         return
     for u in users:
         state = "active" if u.active else "REVOKED"
+        dept = f" dept={u.department_id}" if u.department_id is not None else ""
         print(  # noqa: T201
             f"#{u.id:<4} {u.role:<8} {state:<8} "
-            f"bitrix_user_id={u.bitrix_user_id!s:<8} {u.name or ''}",
+            f"bitrix_user_id={u.bitrix_user_id!s:<8} {u.name or ''}{dept}",
         )
 
 
@@ -87,10 +95,13 @@ def _cmd_create(args: argparse.Namespace) -> None:
     if role is CompanionRole.MANAGER and args.bitrix_user_id is None:
         msg = "--bitrix-user-id is required for role 'manager'"
         raise SystemExit(msg)
+    if role is not CompanionRole.HEAD and args.department_id is not None:
+        msg = "--department-id only applies to role 'head' (an office РОП)"
+        raise SystemExit(msg)
     if args.name is None and args.bitrix_user_id is None:
         msg = "--name is required when no --bitrix-user-id is given"
         raise SystemExit(msg)
-    asyncio.run(_create(role, args.bitrix_user_id, args.name))
+    asyncio.run(_create(role, args.bitrix_user_id, args.name, args.department_id))
 
 
 def _cmd_list(_: argparse.Namespace) -> None:
@@ -125,6 +136,15 @@ def main() -> None:
         type=int,
         default=None,
         help="Bitrix user id (required for managers; scopes their data)",
+    )
+    create.add_argument(
+        "--department-id",
+        type=int,
+        default=None,
+        help=(
+            "Bitrix department id — scopes a 'head' to one department "
+            "(office РОП); omit for the global head"
+        ),
     )
     create.set_defaults(func=_cmd_create)
 

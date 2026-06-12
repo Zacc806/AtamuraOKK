@@ -1,38 +1,42 @@
 # Phase 1 — Ingestion
 
 Pulls calls from Bitrix into Postgres + object storage, scoped to the calls we
-actually analyze (**first call per client AND qualified** ≈ 200/day).
+actually analyze: **every answered, recorded call ≥90s until the client enters
+«Лид квалифицирован»** (≈110–120/day).
 
 ## Flow
 
 ```
 voximplant.statistic.get  (incremental, cursor = last CALL_START_DATE)
-  → keep answered + recorded calls          (CALL_FAILED_CODE=200, dur≥15s, has recording)
+  → keep answered + recorded calls          (CALL_FAILED_CODE=200, dur≥90s, has recording)
   → upsert Call (idempotent on bitrix_call_id)
   → attribute Manager (user.get; degrades without 'user' scope)
-  → mark first-call per client_key
-  → qualification check (CRM rule; pluggable)
-  → analyzable = first_call AND qualified    → status NEW   (else SKIPPED + reason)
-  → download analyzable recordings → MinIO   → status DOWNLOADED
+  → resolve qualification moment (earliest qualified-stage entry; pluggable)
+  → analyzable = started_at ≤ qualified_at (or never/unknown qualified)
+                                              → status NEW   (else SKIPPED + reason)
+  → download analyzable recordings → MinIO    → status DOWNLOADED
 ```
 
 A **client** is the CRM entity on the call (`CONTACT:123` / `LEAD:45`), falling
 back to the normalized phone (`PHONE:7…`). Every answered+recorded call is stored
-(slim) so first-call can be computed; only **analyzable** calls get audio
-downloaded/transcribed/scored, keeping volume at ~200/day.
+(slim); only **analyzable** calls get audio downloaded/transcribed/scored.
 
-### What "first call" means (confirmed)
-"First call" = the client's **first *analyzable* call** — earliest call that is
-answered (`CALL_FAILED_CODE=200`), ≥ `ingest_min_duration_sec` (15s), and has a
-recording. Missed / unanswered / declined attempts (codes 304/480/603/486/404 —
-no recording, ~0s) are filtered out *before* ranking, so the first real pickup is
-the first call, not the missed attempts. Short (<15s) or unrecorded pickups are
-likewise skipped (you can't score them), so a later substantive call may be the
-"first" one.
+### The scope rule (changed 2026-06-12, applied forward-only)
+A call is analyzable until its client qualifies: calls after the qualification
+moment (`client_qualified_at`, the earliest `crm.stagehistory.list` entry into a
+qualified stage) are visit logistics, not sales conversations — skipped as
+`after_qualification`. Clients who **never** qualify (or can't be resolved —
+phone-only) stay fully in scope: those failed conversations are exactly what QA
+needs to see. The previous rule (*first call per client AND qualified*) was
+retired **forward-only** by operator decision: rows it skipped
+(`not_first_call` / `not_qualified` / `qualification_unknown`) are frozen and
+never reopened (`_LEGACY_SKIP_REASONS` in `service.py`).
 
-> Note: first-call is computed from calls already in the DB, so it's exact going
-> forward from the cursor. For clients whose earlier history predates the initial
-> backfill window, a one-time deeper backfill would be needed for full accuracy.
+`is_first_call` is still computed and stored as a data point, but no longer
+gates scope. The periodic `refresh_qualification` pass inverted accordingly: it
+no longer promotes skipped calls — it re-checks recent unclaimed NEW calls so a
+late-arriving qualification skips their post-qualification calls before they
+are claimed and scored.
 
 ## Components
 - `AtamuraOKK/ingestion/service.py` — incremental pull, upsert, first-call,
@@ -75,18 +79,19 @@ A client is **qualified** when one of their deals has **ever entered** the Kanba
 column **"Лид квалифицирован"** (faithful to "the manager moved the card there").
 
 - Implemented in `ContactDealStageQualificationChecker`: Contact → `crm.deal.list`
-  → `crm.stagehistory.list`, qualified iff any deal has a history entry in a
-  qualified stage. This correctly **excludes** deals dropped to *Отказ/LOSE*
-  before ever qualifying (verified against live data).
+  → `crm.stagehistory.list`, returning the **earliest** qualified-stage entry
+  time (`Qualification.at`) — the scope boundary. Deals dropped to *Отказ/LOSE*
+  before ever qualifying correctly never produce a moment (verified live).
 - The qualified stage IDs are **auto-discovered by name** across all deal
   pipelines (currently `PREPARATION` and `C24:PREPAYMENT_INVOIC`); override with
   `qualified_deal_stage_ids` or change `qualified_stage_name`.
-- `ingest_require_qualified=True`, so `analyzable = is_first_call AND qualified`.
+- `ingest_until_qualified=True` gates the `after_qualification` skip; set False
+  to score everything regardless of qualification.
 
 ### Requalification over time
-Clients qualify *after* their first call, so `make ingest-requalify` (run as part
-of `ingest-run` / `ingest-schedule`) re-checks pending first-calls and promotes
-newly-qualified ones from `SKIPPED(not_qualified)` → `NEW`.
-
-Validated live: scanned 200 → 52 answered+recorded → **26 analyzable** (first +
-qualified), 23 not_qualified, 17 not_first_call.
+A client can qualify *after* some of their calls were already ingested as
+analyzable — that needs no action (those calls were before the moment). The
+periodic `make ingest-requalify` (run as part of `ingest-run` /
+`ingest-schedule`) handles the inverse race: it re-checks recent unclaimed NEW
+calls whose client has no known qualification yet, so a late-arriving
+qualification skips their post-qualification calls before they are scored.

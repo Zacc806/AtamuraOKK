@@ -147,10 +147,12 @@ class Settings(BaseSettings):
     ingest_success_code: str = "200"
     ingest_min_duration_sec: int = 90
 
-    # --- Analysis-scope filter (first call AND qualified) ---
-    # A call is analyzable only if its client is "qualified": a deal of theirs
-    # ever entered the Kanban column below (resolved via deal stage history).
-    ingest_require_qualified: bool = True
+    # --- Analysis-scope filter (every recorded call until qualification) ---
+    # A call is analyzable until its client "qualifies": the moment a deal of
+    # theirs enters the Kanban column below (earliest deal stage-history entry).
+    # Calls after that moment are visit logistics, not sales conversations ->
+    # skipped (after_qualification). Unknown qualification = in scope.
+    ingest_until_qualified: bool = True
     # The Kanban column / deal-stage name that marks qualification. Stage IDs are
     # auto-discovered from this name across all deal pipelines.
     qualified_stage_name: str = "Лид квалифицирован"
@@ -251,6 +253,11 @@ class Settings(BaseSettings):
     companion_tm_category_id: int = 24
     # The Zvandau stage STATUS_ID that marks a conducted meeting (conversion num.).
     companion_meeting_stage_id: str = "C24:WON"  # "Фактический визит (успешная сделка)"
+    # Deals never REST at the meeting stage: at the moment of the visit the deal
+    # is moved to cat 2 and reassigned to the sales closer, so a snapshot count is
+    # always 0. The conducted-meeting fact survives in crm.stagehistory.list and
+    # the TM survives in the "Сотрудник TM" employee field — this is that field.
+    companion_tm_employee_field: str = "UF_CRM_1751599893"
     # Monthly meeting plan target per manager (a Положение policy input, NOT in
     # Bitrix) — used for plan_pct and the ≥60% bonus gate. Honest config, not data.
     companion_plan_target_meetings: int = 45

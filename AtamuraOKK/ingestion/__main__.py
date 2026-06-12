@@ -20,7 +20,7 @@ from AtamuraOKK.ingestion.service import refresh_qualification, run_ingestion
 
 async def _full_pass(ingest_limit: int | None, download_limit: int) -> None:
     await run_ingestion(limit=ingest_limit)
-    await refresh_qualification()  # promote newly-qualified earlier first-calls
+    await refresh_qualification()  # late-qual sync: skip post-qual calls early
     await download_pending(limit=download_limit)
 
 

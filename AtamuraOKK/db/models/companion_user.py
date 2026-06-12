@@ -18,6 +18,8 @@ class CompanionUser(Base):
     the CLI (``python -m AtamuraOKK.companion_users``) prints the raw key once
     at creation. ``bitrix_user_id`` links a MANAGER to their `managers` row and
     is what the API scopes their data to; HEAD users may leave it NULL.
+    ``department_id`` (a **Bitrix** department id) scopes a HEAD to one
+    department — an office РОП; NULL keeps the head global.
     """
 
     __tablename__ = "companion_users"
@@ -34,6 +36,7 @@ class CompanionUser(Base):
         server_default=CompanionRole.MANAGER.value,
     )
     bitrix_user_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    department_id: Mapped[int | None] = mapped_column(BigInteger)
     name: Mapped[str | None] = mapped_column(String(length=255))
     active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(

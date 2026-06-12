@@ -1,7 +1,7 @@
 """Call model — one Bitrix telephony call.
 
-Every call is stored (slim metadata) so we can determine the *first call per
-client*. Only **analyzable** calls (first call AND client qualified) are
+Every call is stored (slim metadata). Only **analyzable** calls — every call of
+usable length until the client qualifies («Лид квалифицирован») — are
 downloaded, transcribed, and scored; the rest sit in ``SKIPPED`` with a reason.
 """
 
@@ -80,6 +80,11 @@ class Call(Base):
         server_default="false",
     )
     client_qualified: Mapped[bool | None] = mapped_column(Boolean)
+    # Earliest moment a deal of this client entered the qualified column — the
+    # scope boundary: calls after it are logistics, not sales conversations.
+    client_qualified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
     analyzable: Mapped[bool] = mapped_column(
         Boolean,
         default=False,

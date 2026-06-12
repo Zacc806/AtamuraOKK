@@ -6,10 +6,13 @@ real-time screen ("кому звонить сейчас", "встречи сег
 the TM's own deal pipeline, owned by them via ``ASSIGNED_BY_ID``. OKK still owns
 the Bitrix gateway, so the companion stays a thin consumer.
 
-Trust boundary (see docs/companion-day.md): per-TM meeting/conversion attribution
-depends on the Bitrix data-cleanup gate. When a manager has no live pipeline the
-view returns ``data_ready=False`` so the UI shows "данные готовятся", never fake
-numbers.
+Meeting attribution (see docs/companion-day.md): a deal never *rests* at the
+meeting stage — at the moment of the visit it is moved to cat 2 and reassigned
+to the sales closer, so a live stage+assignee filter always counts 0. The
+conducted-meeting fact survives in ``crm.stagehistory.list`` and the TM survives
+in the «Сотрудник ТМ» employee field; ``_meetings_by_tm`` joins the two. When a
+manager has no live pipeline the view returns ``data_ready=False`` so the UI
+shows "данные готовятся", never fake numbers.
 """
 
 from __future__ import annotations
@@ -152,37 +155,95 @@ async def _count(bx: BitrixClient, filter_: dict[str, Any]) -> int:
     return int(total) if total is not None else len(env.get("result") or [])
 
 
+# period "start/end" -> (monotonic expiry, {tm_user_id: conducted meetings}).
+# One stage-history pull serves every manager in the period (team views hit
+# this once per TTL, not once per manager).
+_meetings_cache: dict[str, tuple[float, dict[int, int]]] = {}
+
+
+async def _meetings_by_tm(
+    bx: BitrixClient,
+    start: datetime,
+    end: datetime,
+) -> dict[int, int]:
+    """Conducted meetings per TM for the period, via stage history.
+
+    Filtering live deals by meeting stage + ASSIGNED_BY_ID always yields 0 (the
+    deal is already in cat 2, owned by the closer, by the time the visit is a
+    fact). Instead: every ``C24:WON`` transition in the period from
+    ``crm.stagehistory.list``, attributed through the deal's «Сотрудник ТМ»
+    employee field, counting distinct deals.
+    """
+    s, e = start.date().isoformat(), end.date().isoformat()
+    cache_key = f"{s}/{e}"
+    hit = _meetings_cache.get(cache_key)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+
+    deal_ids: set[int] = set()
+    cursor: int | None = 0
+    while cursor is not None:
+        env = await bx.call_raw(
+            "crm.stagehistory.list",
+            {
+                "entityTypeId": 2,  # deals
+                "filter": {
+                    "CATEGORY_ID": settings.companion_tm_category_id,
+                    "STAGE_ID": settings.companion_meeting_stage_id,
+                    ">=CREATED_TIME": s,
+                    "<CREATED_TIME": e,
+                },
+                "select": ["OWNER_ID"],
+                "start": cursor,
+            },
+        )
+        result = env.get("result") or {}
+        items = result.get("items") if isinstance(result, dict) else result
+        deal_ids.update(int(it["OWNER_ID"]) for it in items or [])
+        nxt = env.get("next")
+        cursor = int(nxt) if nxt is not None else None
+
+    field = settings.companion_tm_employee_field
+    counts: dict[int, int] = {}
+    ids = sorted(deal_ids)
+    for i in range(0, len(ids), 50):
+        async for row in bx.list(
+            "crm.deal.list",
+            {"filter": {"ID": ids[i : i + 50]}, "select": ["ID", field]},
+        ):
+            tm = row.get(field)
+            if tm and str(tm) != "0":
+                counts[int(tm)] = counts.get(int(tm), 0) + 1
+
+    expiry = time.monotonic() + settings.companion_day_cache_ttl_seconds
+    _meetings_cache[cache_key] = (expiry, counts)
+    return counts
+
+
 async def _money(
     bx: BitrixClient,
     uid: int,
     start: datetime,
     end: datetime,
 ) -> MoneyAxis:
-    """Period money axis from real cat-0 counts (conversion = meetings ÷ leads).
+    """Period money axis from real Zvandau counts (conversion = meetings ÷ leads).
 
-    Meetings = deals that reached the "Фактический визит" stage in the period;
-    leads = deals created in the period. ``plan_pct`` uses the configured policy
-    target (not Bitrix). ``crm_discipline_pct`` stays null — not trustworthy yet.
+    Meetings = stage-history WON transitions attributed via «Сотрудник ТМ» (see
+    ``_meetings_by_tm``); leads = deals created in the period. ``plan_pct`` uses
+    the configured policy target (not Bitrix). ``crm_discipline_pct`` stays
+    null — not trustworthy yet.
     """
     cat = settings.companion_tm_category_id
     s, e = start.date().isoformat(), end.date().isoformat()
     base = {"CATEGORY_ID": cat, "ASSIGNED_BY_ID": uid}
-    meetings = await _count(
-        bx,
-        {
-            **base,
-            "STAGE_ID": settings.companion_meeting_stage_id,
-            ">=CLOSEDATE": s,
-            "<CLOSEDATE": e,
-        },
-    )
+    meetings = (await _meetings_by_tm(bx, start, end)).get(uid, 0)
     leads = await _count(bx, {**base, ">=DATE_CREATE": s, "<DATE_CREATE": e})
 
     conversion = round(meetings / leads * 100, 1) if leads else None
     target = settings.companion_plan_target_meetings
     plan = round(meetings / target * 100, 1) if target else None
     return MoneyAxis(
-        status="live" if leads else "not_available",
+        status="live" if leads or meetings else "not_available",
         conversion_pct=conversion,
         plan_pct=plan,
         crm_discipline_pct=None,

@@ -99,6 +99,9 @@ services:
     <<: *main_app
     restart: "no"
     command: alembic upgrade head
+    # The anchor publishes 8000 for the api; the migrator must not, or it
+    # collides with the running api on any non-first `up`.
+    ports: []
     depends_on:
       db:
         condition: service_healthy

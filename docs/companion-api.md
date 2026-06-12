@@ -37,12 +37,19 @@ trustworthy after the Bitrix data-cleanup gate (see sales-companion
        scorecard/calls/day and only their own calls' feedback; anything else is
        `403`. The team rollup is `403`.
      - `head` — руководитель отдела продаж: every manager + the team rollup.
+       A head row may additionally carry a **`department_id`** (Bitrix
+       department id) — an **office РОП** scoped to that one department: only
+       managers whose `managers` row maps to it (unknown/unenriched managers
+       and unattributed meetings stay global-head-only), only their own
+       `/teams/{id}/summary`, and **no access management** (`/users` is `403`
+       for scoped heads). `department_id = NULL` keeps the head global.
 
    Missing/invalid/revoked key → `401`. Manager keys are issued and revoked by
-   the head **from the cabinet** (`/users` endpoints below) or with
+   the **global** head **from the cabinet** (`/users` endpoints below) or with
    `python -m AtamuraOKK.companion_users create|list|revoke` (the raw key is
-   shown once at creation in both flows). Head keys are never issued via the
-   API — only the static key or the CLI.
+   shown once at creation in both flows). Head keys — including
+   department-scoped office РОПs (`create --role head --department-id <bitrix
+   dept id>`) — are never issued via the API: only the static key or the CLI.
 
 ## Identifiers
 
@@ -73,7 +80,7 @@ score; reminders/vendor/internal/wrong-number calls are excluded.
 
 | Method | Path | Returns |
 |---|---|---|
-| GET | `/api/v1/me` | who am I — role + linked manager profile (the cabinet boots from this) |
+| GET | `/api/v1/me` | who am I — role + linked manager profile + `department` scope (manager's own dept, or the dept a scoped head is limited to; null for the global head). The cabinet boots from this |
 | GET | `/api/v1/managers/{manager_id}/scorecard?period=YYYY-MM` | ОКК scorecard (`okk` + `zone_distribution` + `meetings` + null `money`) |
 | GET | `/api/v1/managers/{manager_id}/calls?since=&limit=` | Звонки feed — scored calls, newest first |
 | GET | `/api/v1/calls/{call_id}/feedback` | авто-разбор за 90 сек — summary/strengths/growth/criteria |
@@ -81,10 +88,10 @@ score; reminders/vendor/internal/wrong-number calls are excluded.
 | GET | `/api/v1/meetings/{meeting_id}/feedback` | авто-разбор for one meeting — score/tone/red flags/criteria |
 | GET | `/api/v1/managers/{manager_id}/feed?since=&limit=` | unified Звонки+Встречи feed — kind-tagged items, newest first |
 | GET | `/api/v1/rubrics` | active criteria set per `source` (`"tm"` calls / `"op"` meetings) |
-| GET | `/api/v1/teams/{department_id}/summary?period=YYYY-MM` | РОП-вид — per-manager roster + group rollup, calls **and** meetings (**head only**) |
-| GET | `/api/v1/users` | all cabinet users — access-management list (**head only**) |
-| POST | `/api/v1/users` | issue a **manager** key (`{bitrix_user_id, name?}`); raw key returned once (**head only**) |
-| POST | `/api/v1/users/{id}/revoke` | deactivate a manager's key; head rows are `403` (CLI-only) (**head only**) |
+| GET | `/api/v1/teams/{department_id}/summary?period=YYYY-MM` | РОП-вид — per-manager roster + group rollup, calls **and** meetings (**head only**; a scoped head only their own department) |
+| GET | `/api/v1/users` | all cabinet users — access-management list (**global head only**) |
+| POST | `/api/v1/users` | issue a **manager** key (`{bitrix_user_id, name?}`); raw key returned once (**global head only**) |
+| POST | `/api/v1/users/{id}/revoke` | deactivate a manager's key; head rows are `403` (CLI-only) (**global head only**) |
 
 `period` defaults to the current month in `report_timezone`; a malformed value
 returns `422`. Unknown manager/department/call returns `404`; a manager asking
