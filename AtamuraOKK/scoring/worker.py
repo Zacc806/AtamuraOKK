@@ -8,6 +8,7 @@ percent (over the 91 audio-derivable points) is the headline metric.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from loguru import logger
@@ -35,8 +36,18 @@ class ScoreStats:
     failed: int = 0
 
 
-def _assemble(result: CallScore, rubric: Rubric) -> dict[str, Any]:
-    """Apply rubric maxima + objection rule; build the persisted score payload."""
+def _assemble(
+    result: CallScore,
+    rubric: Rubric,
+    category: str | None = None,
+) -> dict[str, Any]:
+    """Apply rubric maxima + objection/category rules; build the score payload.
+
+    ``category`` is the client's lead category (A/B/C/X) — it re-weights the
+    meeting-closing criterion: A/None/X keep the full max, B uses a reduced max,
+    C drops it from numerator and denominator entirely (clients not expected to
+    agree to a meeting). See ``Rubric.max_for``.
+    """
     by_id = {c.id: c for c in result.criteria}
     per_criterion: list[dict[str, Any]] = []
     blocks: dict[str, dict[str, Any]] = {}
@@ -50,16 +61,22 @@ def _assemble(result: CallScore, rubric: Rubric) -> dict[str, Any]:
         # reflects only what the call actually exercised.
         if crit.block_id == "objections" and not result.objections_present:
             continue
+        # Per-category weight: a 0-weight category (C on the closing block) excludes
+        # the criterion entirely, exactly like the no-objections rule; B carries a
+        # reduced max. Checked before the missing-criterion guard so an excluded
+        # criterion the model legitimately omits doesn't fail the call.
+        eff_max = rubric.max_for(crit, category)
+        if eff_max is None:
+            continue
         cs = by_id.get(crit.id)
         if cs is None:
             # A criterion the model didn't return would be silently scored 0,
             # deflating the result; fail the call instead so it retries.
             missing.append(crit.id)
             continue
-        score = cs.score
-        score = max(0, min(int(score), crit.max))
+        score = max(0, min(int(cs.score), eff_max))
         total += score
-        max_points += crit.max
+        max_points += eff_max
         per_criterion.append(
             {
                 "id": crit.id,
@@ -67,7 +84,7 @@ def _assemble(result: CallScore, rubric: Rubric) -> dict[str, Any]:
                 "block_name": crit.block_name,
                 "text": crit.text,
                 "score": score,
-                "max": crit.max,
+                "max": eff_max,
                 "justification": cs.justification,
                 "evidence": cs.evidence,
                 "recommendation": cs.recommendation,
@@ -78,7 +95,7 @@ def _assemble(result: CallScore, rubric: Rubric) -> dict[str, Any]:
             {"name": crit.block_name, "score": 0, "max": 0},
         )
         b["score"] += score
-        b["max"] += crit.max
+        b["max"] += eff_max
 
     if missing:
         raise ValueError(f"scorer omitted criteria: {missing}")
@@ -95,6 +112,7 @@ def _assemble(result: CallScore, rubric: Rubric) -> dict[str, Any]:
         "is_qualification_call": result.is_qualification_call,
         "manager_identified": result.manager_identified,
         "objections_present": result.objections_present,
+        "client_category": category,
         "target_status": result.target_status,
         "strengths": result.strengths,
         "growth_zone": result.growth_zone,
@@ -110,7 +128,7 @@ async def _persist_score(
     model_label: str,
 ) -> None:
     """Assemble + upsert the Score row for a call. Caller sets status / commits."""
-    payload = _assemble(result, rubric)
+    payload = _assemble(result, rubric, call.client_category)
     values = {
         "call_id": call.id,
         "rubric_version": rubric.version,
@@ -152,6 +170,7 @@ async def _score_one(
         transcript=transcript.full_text,
         rubric=rubric,
         direction=str(call.direction),
+        client_category=call.client_category,
     )
     await _persist_score(session, call, result, rubric, scorer.model_label)
     call.status = CallStatus.SCORED
@@ -188,6 +207,7 @@ async def score_one(
             return call.status.value
         transcript_text = transcript.full_text
         direction = str(call.direction)
+        category = call.client_category
 
     result: CallScore | None = None
     error: str | None = None
@@ -196,6 +216,7 @@ async def score_one(
             transcript=transcript_text,
             rubric=rubric,
             direction=direction,
+            client_category=category,
         )
     except Exception as exc:  # record + move on
         error = f"scoring: {exc}"
@@ -225,13 +246,21 @@ async def score_one(
         return call.status.value
 
 
-async def score_pending(*, limit: int = 50) -> ScoreStats:
-    """Claim and score analyzable TRANSCRIBED calls against the active rubric."""
+async def score_pending(
+    *, limit: int = 50, since: datetime | None = None
+) -> ScoreStats:
+    """Claim and score analyzable TRANSCRIBED calls against the active rubric.
+
+    When ``since`` is given, only calls that started at or after it are claimed;
+    pass ``None`` to score the full backlog (the manual ``run --all`` path).
+    """
     stats = ScoreStats()
     rubric = load_rubric()
     scorer = get_scorer()
 
-    call_ids = await claim_ready(CallStatus.TRANSCRIBED, CallStatus.SCORING, limit)
+    call_ids = await claim_ready(
+        CallStatus.TRANSCRIBED, CallStatus.SCORING, limit, since=since
+    )
     for call_id in call_ids:
         status = await score_one(call_id, scorer=scorer, rubric=rubric)
         if status == "skipped":

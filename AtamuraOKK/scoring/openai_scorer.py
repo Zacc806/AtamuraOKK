@@ -55,10 +55,11 @@ class OpenAIScorer:
         transcript: str,
         rubric: Rubric,
         direction: str,
+        client_category: str | None = None,
     ) -> CallScore:
         """Return the structured QA assessment for one call."""
         client = self._get_client()
-        messages = build_messages(transcript, rubric, direction)
+        messages = build_messages(transcript, rubric, direction, client_category)
         completion = await client.beta.chat.completions.parse(
             model=self.model,
             messages=messages,  # type: ignore[arg-type]

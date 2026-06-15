@@ -68,6 +68,19 @@ those, not AtamuraOKK's internal row ids:
 - `department_id` → Bitrix department id (`departments.bitrix_id`)
 - `call_id` (feedback only) → AtamuraOKK internal call id (from the call feed)
 
+### CRM card deep links (`bitrix_url`)
+
+The call feed, call feedback, and the Мой день action items each carry a
+`bitrix_url` — a deep link to the entity's Bitrix24 CRM card, so the cabinet can
+jump straight from a scored call (or a "кому звонить" deal) into Bitrix. OKK is
+the single Bitrix gateway, so it builds the URL; the companion only renders it.
+It is **read-only navigation** (no Bitrix write), shaped as
+`{portal_origin}/crm/{lead|deal|contact|company}/details/{id}/`. The portal
+origin is derived from OKK's `BITRIX_WEBHOOK` (scheme+host); calls are linked via
+their `CRM_ENTITY_TYPE`/`CRM_ENTITY_ID`, Мой день actions via the deal id.
+`bitrix_url` is `null` when the webhook is unset or the call has no CRM entity —
+the cabinet then simply hides the link.
+
 ## ОКК 0–100 → 1–5
 
 The companion needs ОКК as a 1–5 bonus modifier; the pipeline stores a 0–100
@@ -90,13 +103,14 @@ score; reminders/vendor/internal/wrong-number calls are excluded.
 |---|---|---|
 | GET | `/api/v1/me` | who am I — role + linked manager profile + `department` scope (manager's own dept, or the dept a scoped head is limited to; null for the global head). The cabinet boots from this |
 | GET | `/api/v1/managers/{manager_id}/scorecard?period=YYYY-MM` | ОКК scorecard (`okk` + `zone_distribution` + `meetings` + null `money`) |
-| GET | `/api/v1/managers/{manager_id}/calls?since=&limit=` | Звонки feed — scored calls, newest first |
-| GET | `/api/v1/calls/{call_id}/feedback` | авто-разбор за 90 сек — summary/strengths/growth/criteria + `transcript` (speaker-labeled blocks: `agent`/`customer`, coalesced; falls back to one `unknown` block from `full_text`) |
+| GET | `/api/v1/managers/{manager_id}/calls?since=&limit=` | Звонки feed — scored calls, newest first; each carries `bitrix_url` (deep link to the call's CRM card, null when not derivable) |
+| GET | `/api/v1/calls/{call_id}/feedback` | авто-разбор за 90 сек — summary/strengths/growth/criteria + `bitrix_url` (CRM-card deep link) + `transcript` (speaker-labeled blocks: `agent`/`customer`, coalesced; falls back to one `unknown` block from `full_text`) |
 | GET | `/api/v1/managers/{manager_id}/meetings?since=&limit=` | Встречи feed — scored ОП meetings, newest first |
 | GET | `/api/v1/meetings/{meeting_id}/feedback` | авто-разбор for one meeting — score/tone/red flags/criteria |
 | GET | `/api/v1/managers/{manager_id}/feed?since=&limit=` | unified Звонки+Встречи feed — kind-tagged items, newest first |
 | GET | `/api/v1/rubrics` | active criteria set per `source` (`"tm"` calls / `"op"` meetings) |
 | GET | `/api/v1/teams/{department_id}/summary?period=YYYY-MM` | РОП-вид — per-manager roster + group rollup, calls **and** meetings (**head only**; a scoped head only their own department) |
+| GET | `/api/v1/departments` | departments (`{bitrix_id, name}`, name-sorted) for the office-РОП assignment dropdown; names lazily backfilled from Bitrix `department.get` (**global head only**) |
 | GET | `/api/v1/users` | cabinet users — all for the global head; a scoped head sees only their own department's manager keys (**head only**) |
 | POST | `/api/v1/users` | issue a key; raw key returned once. Manager (`{bitrix_user_id, name?}`): any head — a scoped head's manager is tied to their department. Head (`{role: "head", department_id, name? \| bitrix_user_id?}`): **global head only** |
 | POST | `/api/v1/users/{id}/revoke` | deactivate a key. Global head: manager + scoped-head keys (dept-NULL head rows are `403`, env/CLI-only); scoped head: own department's manager keys only |

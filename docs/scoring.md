@@ -68,9 +68,21 @@ recommendation** the reports need — all in Russian.
 ## Run
 ```bash
 make seed-rubric     # load both active rubrics into the DB (once / on change)
-make score           # score analyzable TRANSCRIBED calls
+make score           # score analyzable TRANSCRIBED calls (today only by default)
+uv run python -m AtamuraOKK.scoring run --all   # also score the older backlog
 ```
 Requires `ATAMURAOKK_OPENAI_API_KEY`.
+
+## Today-only auto-scoring
+`score_auto_today_only` (default **True**) restricts **automatic** scoring — the
+distributed dispatcher and the legacy worker — to calls whose `started_at` is on
+the current day (report timezone). Older `TRANSCRIBED` calls accumulate untouched
+and are scored only **on demand** via `python -m AtamuraOKK.scoring run --all`
+(`score_pending(since=None)` / `claim_ready(..., since=None)`). This caps the daily
+LLM spend to the day's fresh calls and stops a recovered backlog (e.g. after an
+Anthropic-credit outage requeues thousands of FAILED rows back to `TRANSCRIBED`)
+from auto-draining credits. Set `ATAMURAOKK_SCORE_AUTO_TODAY_ONLY=false` to
+auto-score the full backlog again.
 
 ## Validated live (13 Russian calls)
 Scores ranged **1–84%** with sound, well-calibrated judgments: a tile-factory

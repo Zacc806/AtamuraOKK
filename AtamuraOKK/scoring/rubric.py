@@ -73,6 +73,28 @@ class Rubric:
             block_id,
         )
 
+    def max_for(self, criterion: Criterion, category: str | None) -> int | None:
+        """Effective max for a criterion given the client's lead category.
+
+        A block may carry ``max_by_category`` (A/B/C/X -> points) so the
+        meeting-closing criterion can be down-weighted for clients not expected to
+        agree to a meeting. Returns the per-category max, ``None`` when that max is
+        0 (exclude the criterion entirely from numerator *and* denominator, like
+        the no-objections rule), or ``criterion.max`` when no override applies
+        (A / None / unmapped letter).
+        """
+        if category is None:
+            return criterion.max
+        block = next(
+            (b for b in self.raw["blocks"] if b["id"] == criterion.block_id),
+            None,
+        )
+        by_cat = (block or {}).get("max_by_category")
+        if not by_cat or category not in by_cat:
+            return criterion.max
+        eff = int(by_cat[category])
+        return None if eff <= 0 else eff
+
     def zone_for(self, percent: float) -> str:
         """Map a 0-100 percent to a manager zone."""
         if percent >= self.zones["strong"]:

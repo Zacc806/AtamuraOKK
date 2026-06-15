@@ -65,6 +65,10 @@ class Call(Base):
     # Normalized client key, e.g. "CONTACT:123" or "PHONE:+7..." — the unit the
     # first-call rule groups on.
     client_key: Mapped[str | None] = mapped_column(String(length=128), index=True)
+    # Manager-assigned lead category (A/B/C/X per the qualification регламент), or
+    # NULL when untagged/unresolvable. Tunes the meeting-closing criterion at
+    # scoring time: A/None/X full weight, B reduced, C excluded.
+    client_category: Mapped[str | None] = mapped_column(String(length=8))
 
     # --- Recording ---
     recording_url: Mapped[str | None] = mapped_column(Text)

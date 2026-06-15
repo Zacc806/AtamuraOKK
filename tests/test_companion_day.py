@@ -124,3 +124,18 @@ async def test_no_leads_no_meetings_is_not_available() -> None:
     assert money.meetings == 0
     assert money.conversion_pct is None
     assert money.gates == {"plan_ok": False}
+
+
+def test_build_actions_carries_bitrix_card_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each кому-звонить action deep-links to its deal's Bitrix CRM card."""
+    monkeypatch.setattr(
+        settings,
+        "bitrix_webhook",
+        "https://portal.bitrix24.kz/rest/1/tok/",
+    )
+    actions = day._build_actions([{"ID": "42", "STAGE_ID": "NEW"}], {})
+    assert len(actions) == 1
+    assert actions[0].deal_id == 42
+    assert actions[0].bitrix_url == "https://portal.bitrix24.kz/crm/deal/details/42/"

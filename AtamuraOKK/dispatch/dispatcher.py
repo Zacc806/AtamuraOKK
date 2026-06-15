@@ -17,7 +17,12 @@ from typing import Any
 
 from loguru import logger
 
-from AtamuraOKK.dispatch.claim import STAGES, claim_ready, reclaim_all_stale
+from AtamuraOKK.dispatch.claim import (
+    STAGES,
+    claim_ready,
+    reclaim_all_stale,
+    report_today_start,
+)
 from AtamuraOKK.dispatch.tasks import STAGE_TASKS, queue_for
 from AtamuraOKK.ingestion.service import refresh_qualification, run_ingestion
 from AtamuraOKK.ops.alert import get_alerter
@@ -39,11 +44,17 @@ async def dispatch_tick(ctx: dict[str, Any]) -> int:
 
     enqueued = 0
     for stage in STAGES:
+        since = (
+            report_today_start()
+            if stage.today_only and settings.score_auto_today_only
+            else None
+        )
         try:
             call_ids = await claim_ready(
                 stage.ready,
                 stage.in_flight,
                 settings.claim_batch_size,
+                since=since,
             )
         except Exception:
             logger.exception("dispatch: claim failed for {s}", s=stage.name)

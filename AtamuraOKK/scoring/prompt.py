@@ -66,28 +66,75 @@ def present_transcript(transcript: str) -> str:
     return transcript
 
 
+# Human label for the client's lead category in the prompt.
+_CATEGORY_NAME = {
+    "A": "A (горячий)",
+    "B": "B (тёплый)",
+    "C": "C (холодный)",
+    "X": "X (неуспешный разговор)",
+}
+
+# Per-category guidance for the meeting-closing criterion «Закрытие на КЭВ».
+# A / None / X keep the default (hard meeting push). Only B and C differ.
+_CATEGORY_NOTE = {
+    "B": (
+        "Клиент категории B (тёплый) по регламенту квалификации: немедленная встреча "
+        "НЕ ожидается — менеджер продолжает работать с лидом. По критерию «Закрытие на "
+        "КЭВ» засчитывай как успех договорённость о следующем контакте / фоллоу-апе "
+        "(например, через 1–2 недели), а не жёсткий дожим на встречу прямо сейчас. "
+        "Оценивай этот критерий по сокращённой шкале (см. max в чек-листе)."
+    ),
+    "C": (
+        "Клиент категории C (холодный) по регламенту квалификации: встреча запрещена и "
+        "в план не засчитывается. Критерий «Закрытие на КЭВ» НЕ оценивается и исключён "
+        "из чек-листа — не выставляй по нему балл и не включай его в массив criteria."
+    ),
+}
+
+
+def _checklist(rubric: Rubric, category: str | None) -> str:
+    """Render the checklist, using per-category maxima.
+
+    A criterion whose category-max is 0 (e.g. «Закрытие на КЭВ» for category C) is
+    omitted entirely — the model is told not to score it and ``_assemble`` excludes
+    it too. Reduced maxima (category B) are shown so the model scores on that scale.
+    """
+    lines: list[str] = []
+    current_block = ""
+    for c in rubric.scored_criteria:
+        eff_max = rubric.max_for(c, category)
+        if eff_max is None:
+            continue
+        if c.block_name != current_block:
+            current_block = c.block_name
+            lines.append(f"\n## {c.block_name}")
+        lines.append(f"{c.id}. (max {eff_max}) {c.text}")
+    return "\n".join(lines)
+
+
 def build_messages(
     transcript: str,
     rubric: Rubric,
     direction: str,
+    client_category: str | None = None,
 ) -> list[dict[str, str]]:
     """Return chat messages for the scorer."""
-    lines: list[str] = []
-    current_block = ""
-    for c in rubric.scored_criteria:
-        if c.block_name != current_block:
-            current_block = c.block_name
-            lines.append(f"\n## {c.block_name}")
-        lines.append(f"{c.id}. (max {c.max}) {c.text}")
-    checklist = "\n".join(lines)
+    checklist = _checklist(rubric, client_category)
 
     direction_ru = {
         "outbound": "исходящий (компания звонит клиенту)",
         "inbound": "входящий (звонят в компанию)",
     }.get(direction, "направление неизвестно")
 
+    cat_label = _CATEGORY_NAME.get(client_category or "", "не указана")
+    cat_lines = f"Категория клиента: {cat_label}.\n"
+    note = _CATEGORY_NOTE.get(client_category or "")
+    if note:
+        cat_lines += f"{note}\n"
+
     user = (
-        f"Направление звонка: {direction_ru}.\n\n"
+        f"Направление звонка: {direction_ru}.\n"
+        f"{cat_lines}\n"
         f"ЧЕК-ЛИСТ (оцени каждый критерий по его id, 0..max):\n{checklist}\n\n"
         f"ТРАНСКРИПТ ЗВОНКА:\n{present_transcript(transcript)}\n\n"
         "Верни строго по схеме: call_type, is_qualification_call, "

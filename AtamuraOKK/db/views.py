@@ -56,7 +56,11 @@ SELECT
     (l.criteria->>'training_recommendation')         AS training_recommendation,
     l.flags                                          AS red_flags,
     (l.criteria->>'call_type')                       AS call_type,
-    (l.criteria->>'is_qualification_call')::boolean  AS is_qualification_call
+    (l.criteria->>'is_qualification_call')::boolean  AS is_qualification_call,
+    c.client_category                                AS client_category,
+    (l.criteria->>'client_category')                 AS scored_category,
+    c.crm_entity_type                                AS crm_entity_type,
+    c.crm_entity_id                                  AS crm_entity_id
 FROM latest l
 JOIN calls c       ON c.id = l.call_id
 LEFT JOIN managers m    ON m.id = c.manager_id

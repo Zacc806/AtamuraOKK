@@ -135,6 +135,11 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_scoring_model: str = "claude-sonnet-4-6"
     anthropic_max_tokens: int = 8000
+    # When True (default), automatic scoring (dispatcher + legacy worker) only
+    # claims calls that started *today* in the report timezone. Older TRANSCRIBED
+    # calls accumulate and are scored on demand via `python -m AtamuraOKK.scoring
+    # run --all`. Set to False to auto-score the full backlog again.
+    score_auto_today_only: bool = True
 
     # --- Ingestion ---
     # How far back the very first ingestion run reaches when no cursor exists.
@@ -159,6 +164,17 @@ class Settings(BaseSettings):
     # Optional explicit override of the qualified deal STATUS_IDs (skips discovery),
     # e.g. ["PREPARATION", "C24:PREPAYMENT_INVOIC"].
     qualified_deal_stage_ids: list[str] = Field(default_factory=list)
+
+    # --- Client category (A/B/C/X lead-qualification регламент) ---
+    # Bitrix enumeration UF field on the *deal* «Квалификация клиента» holding
+    # the manager's A/B/C/X tag. A call's client is resolved to its deals (like
+    # qualification) and the tag is read off the most recent deal that carries one.
+    # Empty -> categorization disabled (every call full-weight = A). Discover the
+    # field id + enum ids via `python -m AtamuraOKK.ingestion discover-category`.
+    client_category_field: str = ""
+    # Maps the field's enumeration value-ID -> category letter, e.g.
+    # {"1006": "A", "1008": "B", "1010": "C", "1012": "X"}.
+    client_category_value_map: dict[str, str] = Field(default_factory=dict)
 
     # --- Ops / hardening ---
     # A FAILED call is retried up to this many attempts; beyond that it's
@@ -303,6 +319,21 @@ class Settings(BaseSettings):
     def bitrix_base(self) -> str:
         """Webhook base URL guaranteed to end with exactly one slash."""
         return self.bitrix_webhook.rstrip("/") + "/"
+
+    @property
+    def bitrix_portal_origin(self) -> str:
+        """Portal origin (scheme://host) derived from the webhook URL.
+
+        The webhook is ``https://<portal>.bitrix24.kz/rest/<user>/<token>/``;
+        its scheme+host is the base for human-facing CRM card links. Empty when
+        the webhook is unset/malformed, which callers treat as "no link".
+        """
+        if not self.bitrix_webhook:
+            return ""
+        url = URL(self.bitrix_webhook)
+        if not url.scheme or not url.host:
+            return ""
+        return f"{url.scheme}://{url.host}"
 
     model_config = SettingsConfigDict(
         env_file=".env",

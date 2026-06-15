@@ -34,6 +34,7 @@ class _FakeScorer:
         transcript: str,
         rubric: Rubric,
         direction: str,
+        client_category: str | None = None,
     ) -> CallScore:
         self.calls += 1
         award = self.calls == 1

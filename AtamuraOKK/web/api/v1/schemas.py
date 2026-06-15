@@ -213,6 +213,10 @@ class CallFeedItem(BaseModel):
     call_type: str | None
     is_qualification_call: bool
     summary: str
+    bitrix_url: str | None = Field(
+        default=None,
+        description="Deep link to the call's CRM card in Bitrix24, when known",
+    )
 
 
 class CriterionFeedback(BaseModel):
@@ -258,6 +262,10 @@ class CallFeedback(BaseModel):
     red_flags: list[str] = Field(default_factory=list)
     call_type: str | None
     is_qualification_call: bool
+    bitrix_url: str | None = Field(
+        default=None,
+        description="Deep link to the call's CRM card in Bitrix24, when known",
+    )
     criteria: list[CriterionFeedback] = Field(default_factory=list)
     transcript: list[TranscriptBlock] = Field(default_factory=list)
 
@@ -385,6 +393,10 @@ class DayActionItem(BaseModel):
     reason: str = Field(description="Plain-language next action from the deal stage")
     heat: str = Field(description="hot | warm | cool — visual urgency")
     last_activity_at: datetime | None = None
+    bitrix_url: str | None = Field(
+        default=None,
+        description="Deep link to the deal's CRM card in Bitrix24, when known",
+    )
 
 
 class DayStats(BaseModel):

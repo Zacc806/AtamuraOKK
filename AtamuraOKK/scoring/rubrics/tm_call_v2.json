@@ -46,6 +46,7 @@
     {
       "id": "closing",
       "name": "Закрытие на КЭВ",
+      "max_by_category": { "A": 37, "B": 18, "C": 0 },
       "criteria": [
         {
           "id": 4,

@@ -17,7 +17,7 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from AtamuraOKK.bitrix import BitrixClient, BitrixError
+from AtamuraOKK.bitrix import BitrixClient, BitrixError, crm_card_url
 from AtamuraOKK.db.models.department import Department
 from AtamuraOKK.db.models.manager import Manager
 from AtamuraOKK.db.models.meeting import Meeting
@@ -197,6 +197,66 @@ async def get_department_ref(
     )
 
 
+def _is_placeholder_name(department: Department) -> bool:
+    """True while a department row still carries its get-or-create stub name."""
+    return (
+        not department.name
+        or department.name == f"Department {department.bitrix_id}"
+    )
+
+
+async def _bitrix_department_names() -> dict[int, str]:
+    """Live read-only ``department.get`` → ``{bitrix_dept_id: name}``.
+
+    Degrades to an empty map on any Bitrix problem (missing ``department``
+    scope, webhook unset/unreachable) — callers keep the placeholder name.
+    """
+    names: dict[int, str] = {}
+    try:
+        async with BitrixClient() as bx:
+            async for row in bx.list("department.get"):
+                dept_id, name = row.get("ID"), row.get("NAME")
+                if dept_id is not None and name:
+                    names[int(dept_id)] = str(name)
+    except (BitrixError, ValueError):
+        return {}
+    return names
+
+
+async def list_departments(session: AsyncSession) -> list[DepartmentRef]:
+    """All known departments (Bitrix id + name) for the access-management UI.
+
+    Names in OKK's ``departments`` table are stubs until synced, so this lazily
+    backfills real Bitrix department names (``department.get``) once and
+    persists them, degrading to the stored stub when Bitrix is unreachable.
+    """
+    departments = list(
+        (
+            await session.scalars(
+                select(Department).where(Department.bitrix_id.is_not(None)),
+            )
+        ).all(),
+    )
+    placeholders: dict[int, Department] = {
+        bid: d
+        for d in departments
+        if (bid := d.bitrix_id) is not None and _is_placeholder_name(d)
+    }
+    if placeholders:
+        names = await _bitrix_department_names()
+        for bitrix_id, dept in placeholders.items():
+            real = names.get(bitrix_id)
+            if real:
+                dept.name = real
+        await session.flush()
+    departments.sort(key=lambda d: (d.name or "").casefold())
+    return [
+        DepartmentRef(bitrix_id=bid, name=d.name)
+        for d in departments
+        if (bid := d.bitrix_id) is not None
+    ]
+
+
 async def _bitrix_user_name(bitrix_user_id: int) -> str | None:
     """Live read-only ``user.get`` for a manager the pipeline hasn't seen yet.
 
@@ -345,7 +405,7 @@ async def get_calls_feed(
             text(
                 "SELECT call_id, bitrix_call_id, started_at, percent, zone, "
                 "target_status, sentiment_customer, red_flags, call_type, "
-                "is_qualification_call, summary "
+                "is_qualification_call, summary, crm_entity_type, crm_entity_id "
                 "FROM call_scores_latest "
                 "WHERE manager_bitrix_user_id = :uid "
                 "AND (CAST(:since AS timestamptz) IS NULL "
@@ -369,6 +429,7 @@ async def get_calls_feed(
             call_type=r.call_type,
             is_qualification_call=_is_qual(r),
             summary=r.summary or "",
+            bitrix_url=crm_card_url(r.crm_entity_type, r.crm_entity_id),
         )
         for r in rows
     ]
@@ -438,6 +499,7 @@ async def get_call_feedback(
         red_flags=_flags(row.red_flags),
         call_type=row.call_type,
         is_qualification_call=_is_qual(row),
+        bitrix_url=crm_card_url(row.crm_entity_type, row.crm_entity_id),
         criteria=[
             CriterionFeedback(
                 criterion_id=cr.criterion_id,

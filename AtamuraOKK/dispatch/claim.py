@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 from sqlalchemy import func, select, update
@@ -33,6 +34,18 @@ class Stage:
     ready: CallStatus  # rows in this status are ready to claim
     in_flight: CallStatus  # claimed rows are flipped to this status
     stale_seconds: int  # claims older than this are reverted (crash recovery)
+    today_only: bool = False  # auto-claim only calls started today (see settings)
+
+
+def report_today_start() -> datetime:
+    """Midnight today in the report timezone, as a tz-aware datetime.
+
+    The cutoff for "today's calls": automatic scoring claims only rows whose
+    ``started_at`` is at or after this instant; older calls wait for a manual run.
+    """
+    tz = ZoneInfo(settings.report_timezone)
+    now = datetime.now(tz)
+    return datetime(now.year, now.month, now.day, tzinfo=tz)
 
 
 def _stages() -> tuple[Stage, ...]:
@@ -55,6 +68,7 @@ def _stages() -> tuple[Stage, ...]:
             CallStatus.TRANSCRIBED,
             CallStatus.SCORING,
             settings.claim_stale_seconds_score,
+            today_only=True,
         ),
     )
 
@@ -62,15 +76,26 @@ def _stages() -> tuple[Stage, ...]:
 STAGES = _stages()
 
 
-async def claim_ready(src: CallStatus, dst: CallStatus, limit: int) -> list[int]:
+async def claim_ready(
+    src: CallStatus,
+    dst: CallStatus,
+    limit: int,
+    *,
+    since: datetime | None = None,
+) -> list[int]:
     """Atomically claim up to ``limit`` analyzable rows from ``src`` into ``dst``.
 
     Returns the ids of the rows this caller now owns. ``FOR UPDATE SKIP LOCKED``
-    guarantees concurrent callers receive disjoint sets.
+    guarantees concurrent callers receive disjoint sets. When ``since`` is given,
+    only rows whose ``started_at`` is at or after it are claimed (used to restrict
+    automatic scoring to today's calls).
     """
+    conditions = [Call.status == src, Call.analyzable.is_(True)]
+    if since is not None:
+        conditions.append(Call.started_at >= since)
     candidates = (
         select(Call.id)
-        .where(Call.status == src, Call.analyzable.is_(True))
+        .where(*conditions)
         .order_by(Call.started_at.asc())
         .limit(limit)
         .with_for_update(skip_locked=True)

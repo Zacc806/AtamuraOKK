@@ -25,6 +25,7 @@ from AtamuraOKK.db.models.call import Call
 from AtamuraOKK.db.models.enums import CallStatus
 from AtamuraOKK.db.models.ingest_state import IngestState
 from AtamuraOKK.db.session import session_scope
+from AtamuraOKK.ingestion.category import CategoryChecker, default_category_checker
 from AtamuraOKK.ingestion.managers import ensure_managers
 from AtamuraOKK.ingestion.mapping import parse_started_at, to_call_fields
 from AtamuraOKK.ingestion.qualification import (
@@ -150,11 +151,13 @@ async def _recompute_scope(
     session: AsyncSession,
     client_keys: set[str],
     checker: QualificationChecker,
+    category_checker: CategoryChecker,
     bx: BitrixClient,
     stats: IngestStats,
 ) -> None:
-    """Mark first-call + qualification + analyzable + status for affected clients."""
+    """Mark first-call + qualification + category + analyzable + status."""
     quals = await checker.qualified(client_keys, bx)
+    cats = await category_checker.categorize(client_keys, bx)
 
     for key in client_keys:
         calls = (
@@ -167,10 +170,12 @@ async def _recompute_scope(
         if not calls:
             continue
         qual = quals.get(key) or UNKNOWN_QUALIFICATION
+        category = cats.get(key)
         for idx, call in enumerate(calls):
             call.is_first_call = idx == 0  # kept as a data point; no longer gates
             call.client_qualified = qual.qualified
             call.client_qualified_at = qual.at
+            call.client_category = category
             _apply_scope(call, qual, stats)
 
 
@@ -228,9 +233,11 @@ async def run_ingestion(
     *,
     limit: int | None = None,
     checker: QualificationChecker | None = None,
+    category_checker: CategoryChecker | None = None,
 ) -> IngestStats:
     """Run one incremental ingestion pass; returns a summary."""
     checker = checker or default_checker()
+    category_checker = category_checker or default_category_checker()
     stats = IngestStats()
 
     async with session_scope() as session, BitrixClient() as bx:
@@ -268,7 +275,9 @@ async def run_ingestion(
 
         await session.flush()
         await _attribute_managers(session, user_ids, bx)
-        await _recompute_scope(session, client_keys, checker, bx, stats)
+        await _recompute_scope(
+            session, client_keys, checker, category_checker, bx, stats
+        )
 
         if max_started:
             cursor_value = max_started.isoformat()
@@ -297,6 +306,7 @@ async def refresh_qualification(
     *,
     limit: int = 1000,
     checker: QualificationChecker | None = None,
+    category_checker: CategoryChecker | None = None,
 ) -> IngestStats:
     """Late-qualification sync: skip post-qualification calls before they score.
 
@@ -308,6 +318,7 @@ async def refresh_qualification(
     call that turns out to start after it.
     """
     checker = checker or default_checker()
+    category_checker = category_checker or default_category_checker()
     stats = IngestStats()
 
     async with session_scope() as session, BitrixClient() as bx:
@@ -326,12 +337,14 @@ async def refresh_qualification(
         ).all()
         client_keys = {c.client_key for c in calls if c.client_key}
         quals = await checker.qualified(client_keys, bx)
+        cats = await category_checker.categorize(client_keys, bx)
         for call in calls:
             if not call.client_key:
                 continue
             qual = quals.get(call.client_key) or UNKNOWN_QUALIFICATION
             call.client_qualified = qual.qualified
             call.client_qualified_at = qual.at
+            call.client_category = cats.get(call.client_key)
             _apply_scope(call, qual, stats)
 
     logger.info(

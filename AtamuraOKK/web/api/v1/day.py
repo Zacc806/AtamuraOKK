@@ -25,7 +25,7 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from AtamuraOKK.bitrix import BitrixClient, BitrixError
+from AtamuraOKK.bitrix import BitrixClient, BitrixError, crm_card_url
 from AtamuraOKK.db.models.department import Department
 from AtamuraOKK.db.models.manager import Manager
 from AtamuraOKK.settings import settings
@@ -283,15 +283,17 @@ def _build_actions(
         stage = str(d.get("STAGE_ID") or "")
         reason, heat, _ = _STAGE_SIGNALS.get(stage, _DEFAULT_SIGNAL)
         contact = contacts.get(int(d["CONTACT_ID"])) if d.get("CONTACT_ID") else None
+        deal_id = int(d["ID"])
         actions.append(
             DayActionItem(
-                deal_id=int(d["ID"]),
+                deal_id=deal_id,
                 client_name=_name_of(contact) if contact else None,
                 phone=_phone_of(contact) if contact else None,
                 stage_id=stage,
                 reason=reason,
                 heat=heat,
                 last_activity_at=_parse_dt(d.get("LAST_ACTIVITY_TIME")),
+                bitrix_url=crm_card_url("DEAL", deal_id),
             ),
         )
     return actions

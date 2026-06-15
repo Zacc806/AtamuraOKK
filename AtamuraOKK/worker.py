@@ -35,12 +35,14 @@ from AtamuraOKK.settings import settings
 
 async def _pipeline_pass() -> None:
     """Ingest new calls, then transcribe and score everything ready."""
+    from AtamuraOKK.dispatch.claim import report_today_start  # noqa: PLC0415
     from AtamuraOKK.ingestion.download import download_pending  # noqa: PLC0415
     from AtamuraOKK.ingestion.service import (  # noqa: PLC0415
         refresh_qualification,
         run_ingestion,
     )
     from AtamuraOKK.scoring.worker import score_pending  # noqa: PLC0415
+    from AtamuraOKK.settings import settings  # noqa: PLC0415
     from AtamuraOKK.transcription.worker import transcribe_pending  # noqa: PLC0415
 
     logger.info("Worker: pipeline pass (ingest -> download -> transcribe -> score)")
@@ -48,7 +50,8 @@ async def _pipeline_pass() -> None:
     await refresh_qualification()
     await download_pending()
     await transcribe_pending()
-    await score_pending()
+    since = report_today_start() if settings.score_auto_today_only else None
+    await score_pending(since=since)
 
 
 async def _job_pipeline() -> None:

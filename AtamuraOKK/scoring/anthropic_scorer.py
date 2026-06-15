@@ -79,10 +79,11 @@ class AnthropicScorer:
         transcript: str,
         rubric: Rubric,
         direction: str,
+        client_category: str | None = None,
     ) -> CallScore:
         """Return the structured QA assessment for one call."""
         client = self._get_client()
-        messages = build_messages(transcript, rubric, direction)
+        messages = build_messages(transcript, rubric, direction, client_category)
         system = next(m["content"] for m in messages if m["role"] == "system")
         user_messages = [
             {"role": m["role"], "content": m["content"]}

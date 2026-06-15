@@ -85,6 +85,7 @@ class Scorer(Protocol):
         transcript: str,
         rubric: Rubric,
         direction: str,
+        client_category: str | None = None,
     ) -> CallScore:
         """Return the structured QA assessment for one call."""
         ...

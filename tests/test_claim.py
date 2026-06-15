@@ -24,11 +24,22 @@ from AtamuraOKK.dispatch.claim import claim_ready, reclaim_stale
 _PREFIX = "claimtest-"
 
 
-async def _seed(n: int, status: CallStatus, tag: str = "a") -> list[int]:
+async def _seed(
+    n: int,
+    status: CallStatus,
+    tag: str = "a",
+    *,
+    started_at: datetime | None = None,
+) -> list[int]:
     """Commit ``n`` analyzable calls in ``status``; return their ids."""
     async with session_scope() as session:
         calls = [
-            Call(bitrix_call_id=f"{_PREFIX}{tag}-{i}", analyzable=True, status=status)
+            Call(
+                bitrix_call_id=f"{_PREFIX}{tag}-{i}",
+                analyzable=True,
+                status=status,
+                started_at=started_at,
+            )
             for i in range(n)
         ]
         session.add_all(calls)
@@ -85,6 +96,25 @@ async def test_claim_sets_claimed_at(_seeded: None) -> None:
         rows = (await session.scalars(select(Call).where(Call.id.in_(ids)))).all()
         assert all(c.status == CallStatus.DOWNLOADING for c in rows)
         assert all(c.claimed_at is not None for c in rows)
+
+
+async def test_claim_since_skips_older_calls(_seeded: None) -> None:
+    """With ``since`` set, only calls started at/after the cutoff are claimed."""
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(hours=12)
+    today = await _seed(2, CallStatus.TRANSCRIBED, tag="today", started_at=now)
+    old = await _seed(
+        2, CallStatus.TRANSCRIBED, tag="old", started_at=now - timedelta(days=2)
+    )
+
+    claimed = await claim_ready(
+        CallStatus.TRANSCRIBED, CallStatus.SCORING, 10, since=cutoff
+    )
+
+    assert sorted(claimed) == sorted(today)
+    statuses = await _statuses(today + old)
+    assert all(statuses[i] == CallStatus.SCORING for i in today)
+    assert all(statuses[i] == CallStatus.TRANSCRIBED for i in old)
 
 
 async def test_reclaim_stale_reverts_old_claims(_seeded: None) -> None:

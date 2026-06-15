@@ -1,10 +1,12 @@
 """Ingestion worker CLI: ``python -m AtamuraOKK.ingestion <command>``.
 
 Commands:
-  ingest    one incremental pull (Bitrix -> Postgres)
-  download  fetch analyzable calls' recordings -> object storage
-  run       ingest then download (one full pass)
-  schedule  run the full pass now, then every N hours (APScheduler)
+  ingest             one incremental pull (Bitrix -> Postgres)
+  download           fetch analyzable calls' recordings -> object storage
+  requalify          re-check pending first-calls; promote newly-qualified ones
+  discover-category  print Contact/Lead enum UF fields (find the A/B/C field)
+  run                ingest then download (one full pass)
+  schedule           run the full pass now, then every N hours (APScheduler)
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import asyncio
 
 from loguru import logger
 
+from AtamuraOKK.ingestion.category import discover_category_fields
 from AtamuraOKK.ingestion.download import download_pending
 from AtamuraOKK.ingestion.service import refresh_qualification, run_ingestion
 
@@ -34,6 +37,10 @@ def _cmd_download(args: argparse.Namespace) -> None:
 
 def _cmd_requalify(args: argparse.Namespace) -> None:
     asyncio.run(refresh_qualification(limit=args.limit))
+
+
+def _cmd_discover_category(_args: argparse.Namespace) -> None:
+    asyncio.run(discover_category_fields())
 
 
 def _cmd_run(args: argparse.Namespace) -> None:
@@ -83,6 +90,12 @@ def main() -> None:
     )
     p_requal.add_argument("--limit", type=int, default=1000)
     p_requal.set_defaults(func=_cmd_requalify)
+
+    p_disc = sub.add_parser(
+        "discover-category",
+        help="print Contact/Lead enum UF fields to find the A/B/C category field",
+    )
+    p_disc.set_defaults(func=_cmd_discover_category)
 
     p_run = sub.add_parser("run", help="ingest then download")
     p_run.add_argument("--limit", type=int, default=None)

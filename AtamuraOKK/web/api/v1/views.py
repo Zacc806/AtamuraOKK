@@ -317,6 +317,24 @@ def _user_view(user: CompanionUser) -> CompanionUserView:
     )
 
 
+@router.get(
+    "/departments",
+    response_model=list[DepartmentRef],
+    tags=["companion"],
+)
+async def list_departments(
+    _identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[DepartmentRef]:
+    """Departments (Bitrix id + name) for the office-РОП assignment dropdown.
+
+    Global head only — same gate as minting office-РОП keys; names are
+    backfilled from Bitrix so the picker shows offices, not raw ids.
+    """
+    ensure_global_head(_identity)
+    return await service.list_departments(session)
+
+
 @router.get("/users", response_model=list[CompanionUserView], tags=["companion"])
 async def list_companion_users(
     identity: CompanionIdentity = Depends(get_companion_identity),

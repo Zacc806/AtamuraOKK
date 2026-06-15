@@ -123,6 +123,8 @@ async def _seed_scored_call(
     percent: float,
     day: int = 15,
     is_qual: bool = True,
+    crm_entity_type: str | None = None,
+    crm_entity_id: int | None = None,
 ) -> Call:
     call = Call(
         bitrix_call_id=bitrix_call_id,
@@ -132,6 +134,8 @@ async def _seed_scored_call(
         started_at=datetime(2026, 3, day, 12, 0, tzinfo=_TZ),
         duration_sec=120,
         status=CallStatus.SCORED,
+        crm_entity_type=crm_entity_type,
+        crm_entity_id=crm_entity_id,
     )
     session.add(call)
     await session.flush()
@@ -275,14 +279,22 @@ async def test_calls_feed_and_feedback(
     client: AsyncClient,
     dbsession: AsyncSession,
     head_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The call feed and per-call авто-разбор expose the scored fields."""
+    monkeypatch.setattr(
+        settings,
+        "bitrix_webhook",
+        "https://portal.bitrix24.kz/rest/1/tok/",
+    )
     mgr = await _seed_manager(dbsession, bitrix_user_id=504)
     call = await _seed_scored_call(
         dbsession,
         bitrix_call_id="feed1",
         manager=mgr,
         percent=86.0,
+        crm_entity_type="DEAL",
+        crm_entity_id=777,
     )
     dbsession.add(
         Transcript(
@@ -310,6 +322,9 @@ async def test_calls_feed_and_feedback(
     assert items[0]["call_id"] == call.id
     assert items[0]["okk_5"] == 4  # 86 -> strong band
     assert items[0]["summary"]
+    assert (
+        items[0]["bitrix_url"] == "https://portal.bitrix24.kz/crm/deal/details/777/"
+    )
 
     detail = await client.get(f"/api/v1/calls/{call.id}/feedback", headers=head_auth)
     assert detail.status_code == 200
@@ -317,6 +332,7 @@ async def test_calls_feed_and_feedback(
     assert fb["strengths"] == "Хороший контакт"
     assert fb["training_recommendation"] == "Тренинг по СПИН"
     assert fb["sentiment_customer"] == "позитивный"
+    assert fb["bitrix_url"] == "https://portal.bitrix24.kz/crm/deal/details/777/"
     assert len(fb["criteria"]) == 1
     assert fb["criteria"][0]["percent_of_max"] == 80.0
     # Consecutive same-speaker segments coalesce into one block per speaker.
@@ -1019,6 +1035,37 @@ async def test_dept_head_team_summary_scoped(
 
     foreign = await client.get("/api/v1/teams/93/summary", headers=dept_head_auth)
     assert foreign.status_code == 403
+
+
+async def test_departments_list_for_global_head(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """The global head gets every department (Bitrix id + name), name-sorted."""
+    dbsession.add_all(
+        [
+            Department(bitrix_id=91, name="ОП Шымкент"),
+            Department(bitrix_id=92, name="ОП Астана"),
+        ],
+    )
+    await dbsession.flush()
+
+    resp = await client.get("/api/v1/departments", headers=head_auth)
+    assert resp.status_code == 200
+    assert resp.json() == [
+        {"bitrix_id": 92, "name": "ОП Астана"},
+        {"bitrix_id": 91, "name": "ОП Шымкент"},
+    ]
+
+
+async def test_departments_list_forbidden_for_scoped_head(
+    client: AsyncClient,
+    dept_head_auth: dict[str, str],
+) -> None:
+    """Listing departments stays a global-head action — an office РОП gets 403."""
+    resp = await client.get("/api/v1/departments", headers=dept_head_auth)
+    assert resp.status_code == 403
 
 
 async def test_dept_head_lists_only_own_dept_manager_keys(
