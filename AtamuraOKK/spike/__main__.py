@@ -35,6 +35,12 @@ def _cmd_wer(_: argparse.Namespace) -> None:
     report(compute())
 
 
+def _cmd_wazzup_probe(_: argparse.Namespace) -> None:
+    from AtamuraOKK.spike.wazzup_probe import run_probe  # noqa: PLC0415
+
+    asyncio.run(run_probe())
+
+
 def main() -> None:
     """Parse args and dispatch to the selected spike stage."""
     parser = argparse.ArgumentParser(
@@ -62,6 +68,11 @@ def main() -> None:
         "wer",
         help="compute WER vs hand-corrected references",
     ).set_defaults(func=_cmd_wer)
+
+    sub.add_parser(
+        "wazzup-probe",
+        help="probe the Wazzup API to discover the calls/recordings surface",
+    ).set_defaults(func=_cmd_wazzup_probe)
 
     args = parser.parse_args()
     args.func(args)

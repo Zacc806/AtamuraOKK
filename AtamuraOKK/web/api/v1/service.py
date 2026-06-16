@@ -22,7 +22,8 @@ from AtamuraOKK.db.models.department import Department
 from AtamuraOKK.db.models.manager import Manager
 from AtamuraOKK.db.models.meeting import Meeting
 from AtamuraOKK.db.models.rubric_version import RubricVersion
-from AtamuraOKK.web.api.v1 import okk
+from AtamuraOKK.settings import settings
+from AtamuraOKK.web.api.v1 import day, okk
 from AtamuraOKK.web.api.v1.schemas import (
     CallFeedback,
     CallFeedItem,
@@ -651,6 +652,21 @@ async def get_meeting_feedback(
     )
 
 
+async def _visits_by_tm(start: datetime, end: datetime) -> dict[int, int]:
+    """Conversions to «Фактический визит» per TM for the period, from Bitrix.
+
+    One ``crm.stagehistory.list`` pull (shared/cached with the /day view) keyed
+    by TM user id. Degrades to an empty mapping when the webhook is unset or
+    Bitrix is unreachable, so the team view simply omits the visit counts
+    instead of failing.
+    """
+    try:
+        async with BitrixClient() as bx:
+            return await day.conducted_meetings_by_tm(bx, start, end)
+    except BitrixError:
+        return {}
+
+
 async def get_team_summary(
     session: AsyncSession,
     department_bitrix_id: int,
@@ -708,6 +724,17 @@ async def get_team_summary(
         meetings_by_manager.setdefault(uid, []).append(meeting)
         names.setdefault(uid, _full_name(mgr))
 
+    # «Фактический визит» conversions per manager — TM department only (the funnel
+    # does not apply to meeting offices). Empty when Bitrix is unavailable.
+    is_tm = department.bitrix_id == settings.companion_tm_department_id
+    visits = await _visits_by_tm(start, end) if is_tm else {}
+    have_visits = is_tm and bool(visits)
+
+    def _money_for(uid: int) -> MoneyAxis:
+        if not have_visits:
+            return MoneyAxis()
+        return MoneyAxis(status="live", meetings=visits.get(uid, 0))
+
     roster: list[ManagerScorecard] = []
     for uid in set(by_manager) | set(meetings_by_manager):
         score, zone_dist, n = _okk_from_rows(by_manager.get(uid, []))
@@ -724,7 +751,7 @@ async def get_team_summary(
                 calls_scored=n,
                 zone_distribution=zone_dist,
                 meetings=_meetings_score_from(meetings_by_manager.get(uid, [])),
-                money=MoneyAxis(),
+                money=_money_for(uid),
             ),
         )
 
@@ -750,6 +777,16 @@ async def get_team_summary(
             okk=group_score,
             zone_distribution=group_zones,
             meetings=_meetings_score_from([m for m, _ in meeting_rows]),
+            money=(
+                MoneyAxis(
+                    status="live",
+                    meetings=sum(
+                        visits.get(c.manager.bitrix_user_id, 0) for c in roster
+                    ),
+                )
+                if have_visits
+                else MoneyAxis()
+            ),
         ),
         roster=roster,
     )

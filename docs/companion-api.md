@@ -109,7 +109,7 @@ score; reminders/vendor/internal/wrong-number calls are excluded.
 | GET | `/api/v1/meetings/{meeting_id}/feedback` | авто-разбор for one meeting — score/tone/red flags/criteria |
 | GET | `/api/v1/managers/{manager_id}/feed?since=&limit=` | unified Звонки+Встречи feed — kind-tagged items, newest first |
 | GET | `/api/v1/rubrics` | active criteria set per `source` (`"tm"` calls / `"op"` meetings) |
-| GET | `/api/v1/teams/{department_id}/summary?period=YYYY-MM` | РОП-вид — per-manager roster + group rollup, calls **and** meetings (**head only**; a scoped head only their own department) |
+| GET | `/api/v1/teams/{department_id}/summary?period=YYYY-MM` | РОП-вид — per-manager roster + group rollup, calls **and** meetings (**head only**; a scoped head only their own department). For the **TM department** each roster card + the group carry `money.meetings` = conversions to «Фактический визит» (live from Bitrix stage history; null when Bitrix is unavailable / non-TM department) |
 | GET | `/api/v1/departments` | departments (`{bitrix_id, name}`, name-sorted) for the office-РОП assignment dropdown; names lazily backfilled from Bitrix `department.get` (**global head only**) |
 | GET | `/api/v1/users` | cabinet users — all for the global head; a scoped head sees only their own department's manager keys (**head only**) |
 | POST | `/api/v1/users` | issue a key; raw key returned once. Manager (`{bitrix_user_id, name?}`): any head — a scoped head's manager is tied to their department. Head (`{role: "head", department_id, name? \| bitrix_user_id?}`): **global head only** |

@@ -181,6 +181,7 @@ async def transcribe_one(
             return "skipped"
         if result is not None:
             call.language = result.language
+            call.is_stereo = result.meta.get("stereo")
             handles_kazakh = getattr(transcriber, "handles_kazakh", False)
             if result.language == "kk" and not handles_kazakh:
                 # Park Kazakh when the engine can't handle it (whisper/openai).

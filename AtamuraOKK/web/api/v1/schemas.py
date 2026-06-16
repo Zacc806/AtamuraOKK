@@ -368,6 +368,13 @@ class TeamGroupStats(BaseModel):
     okk: OkkScore
     zone_distribution: dict[str, int]
     meetings: MeetingsScore = Field(default_factory=MeetingsScore)
+    money: MoneyAxis = Field(
+        default_factory=MoneyAxis,
+        description=(
+            "Group conversion axis; ``meetings`` is the team's total "
+            "conversions to «Фактический визит» (TM department only)"
+        ),
+    )
 
 
 class TeamSummary(BaseModel):

@@ -150,6 +150,9 @@ cython_debug/
 # Generated QA reports
 reports/
 
+# Ad-hoc data exports
+exports/
+
 # Ad-hoc backlog transcription log
 .transcribe_backlog.log
 

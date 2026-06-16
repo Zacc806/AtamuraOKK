@@ -126,6 +126,10 @@ class Settings(BaseSettings):
     yandex_stt_languages: list[str] = Field(
         default_factory=lambda: ["ru-RU", "kk-KZ"],
     )
+    # Mono safety net: ask SpeechKit to label speakers on single-channel calls so
+    # they yield turn-separated segments instead of one undifferentiated blob.
+    # Stereo calls separate by audio channel and ignore this.
+    yandex_speaker_labeling: bool = True
     # Which LLM scores calls: "anthropic" (Claude, the default) or "openai".
     scoring_provider: str = "anthropic"
     # Scoring model — needs Structured Outputs support (gpt-4o-2024-08-06+).
@@ -267,6 +271,11 @@ class Settings(BaseSettings):
     # (the "Телемаркетинг" cat 0 is legacy/closed-out; cat 2 "Отдел продаж" belongs
     # to the sales closer). See docs/companion-day.md.
     companion_tm_category_id: int = 24
+    # Bitrix department id of the telemarketing team. The team view counts
+    # conversions to «Фактический визит» (companion_meeting_stage_id) only for
+    # this department — other departments are meeting offices (ОП) scored on
+    # their own recordings, where the TM funnel does not apply.
+    companion_tm_department_id: int = 250
     # The Zvandau stage STATUS_ID that marks a conducted meeting (conversion num.).
     companion_meeting_stage_id: str = "C24:WON"  # "Фактический визит (успешная сделка)"
     # Deals never REST at the meeting stage: at the moment of the visit the deal

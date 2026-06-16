@@ -220,6 +220,19 @@ async def _meetings_by_tm(
     return counts
 
 
+async def conducted_meetings_by_tm(
+    bx: BitrixClient,
+    start: datetime,
+    end: datetime,
+) -> dict[int, int]:
+    """Public view of :func:`_meetings_by_tm` for cross-module reuse.
+
+    Conversions to «Фактический визит» per TM user id for the period (the team
+    view surfaces these per manager). Shares the period cache with /day.
+    """
+    return await _meetings_by_tm(bx, start, end)
+
+
 async def _money(
     bx: BitrixClient,
     uid: int,

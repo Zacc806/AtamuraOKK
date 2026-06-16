@@ -1,0 +1,43 @@
+{
+  "departments": [
+    {
+      "bitrix_department_id": 1964,
+      "label": "ОП Керуен",
+      "staff": [
+        { "bitrix_user_id": 55112, "role": "РОП",         "name": "Ембергенов Ермек" },
+        { "bitrix_user_id": 68488, "role": "МОКС",        "name": "Садырова Малика" },
+        { "bitrix_user_id": 68664, "role": "Оф.М",        "name": "Мординова Альфия" },
+        { "bitrix_user_id": 49464, "role": "МОП",         "name": "Абдрузак Заир" },
+        { "bitrix_user_id": 67442, "role": "МОП",         "name": "Алиядинова Самал" },
+        { "bitrix_user_id": 68542, "role": "МОП",         "name": "Қайса Ернур" },
+        { "bitrix_user_id": 68894, "role": "МОП",         "name": "Нурова Салима" }
+      ]
+    },
+    {
+      "bitrix_department_id": 1962,
+      "label": "ОП Атмосфера",
+      "staff": [
+        { "bitrix_user_id": 68560, "role": "РОП",         "name": "Сулейменова Гульзара" },
+        { "bitrix_user_id": 62528, "role": "МОП",         "name": "Гюзаль Худайкулова" },
+        { "bitrix_user_id": 45844, "role": "МОП",         "name": "Сабир Ниязов" },
+        { "bitrix_user_id": 46284, "role": "МОП",         "name": "Асхат Мырзакулов" },
+        { "bitrix_user_id": 27396, "role": "Ведущий МОП", "name": "Нургуль Мухамеджан" }
+      ]
+    },
+    {
+      "bitrix_department_id": 1966,
+      "label": "ОП толе би",
+      "staff": [
+        { "bitrix_user_id": 68748, "role": "РОП",         "name": "Алибек Абишев" },
+        { "bitrix_user_id": 66566, "role": "МОП",         "name": "Ким Яна" },
+        { "bitrix_user_id": 67332, "role": "МОП",         "name": "Музапбаров Олжас" },
+        { "bitrix_user_id": 68544, "role": "МОП",         "name": "Жумадилов Асет" },
+        { "bitrix_user_id": 68800, "role": "МОП",         "name": "Бекназар Аль-Нур" },
+        { "bitrix_user_id": 68840, "role": "МОП",         "name": "Отжагарова Жазира" },
+        { "bitrix_user_id": 68944, "role": "МОП",         "name": "Әбдіғали Куаныш" },
+        { "bitrix_user_id": 68366, "role": "ОМ",          "name": "Эльвира Байсуанова" },
+        { "bitrix_user_id": 68628, "role": "МОКС",        "name": "Касимжан Касимов" }
+      ]
+    }
+  ]
+}

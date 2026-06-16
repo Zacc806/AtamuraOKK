@@ -490,6 +490,70 @@ async def test_team_summary_rollup(
     assert body["roster"][0]["okk"]["score_5"] == 5
 
 
+async def test_team_summary_counts_visit_conversions(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The TM team view carries «Фактический визит» conversions per manager."""
+    dept = Department(bitrix_id=settings.companion_tm_department_id, name="ТМ")
+    dbsession.add(dept)
+    await dbsession.flush()
+    a = await _seed_manager(dbsession, bitrix_user_id=701, department=dept)
+    b = await _seed_manager(dbsession, bitrix_user_id=702, department=dept)
+    await _seed_scored_call(dbsession, bitrix_call_id="v1", manager=a, percent=90.0)
+    await _seed_scored_call(dbsession, bitrix_call_id="v2", manager=b, percent=70.0)
+
+    # Bitrix-derived visit counts (one stage-history pull, keyed by TM user id).
+    async def _fake_visits(_start: datetime, _end: datetime) -> dict[int, int]:
+        return {701: 7, 702: 3}
+
+    monkeypatch.setattr(service, "_visits_by_tm", _fake_visits)
+
+    resp = await client.get(
+        f"/api/v1/teams/{settings.companion_tm_department_id}/summary"
+        f"?period={_PERIOD}",
+        headers=head_auth,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    by_uid = {m["manager"]["bitrix_user_id"]: m for m in body["roster"]}
+    assert by_uid[701]["money"]["meetings"] == 7
+    assert by_uid[702]["money"]["meetings"] == 3
+    assert body["group"]["money"]["meetings"] == 10  # team total
+    assert body["group"]["money"]["status"] == "live"
+
+
+async def test_team_summary_visits_absent_when_bitrix_unavailable(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bitrix down → visit counts are simply omitted, the rollup still serves."""
+    dept = Department(bitrix_id=settings.companion_tm_department_id, name="ТМ")
+    dbsession.add(dept)
+    await dbsession.flush()
+    a = await _seed_manager(dbsession, bitrix_user_id=703, department=dept)
+    await _seed_scored_call(dbsession, bitrix_call_id="v3", manager=a, percent=88.0)
+
+    async def _no_visits(_start: datetime, _end: datetime) -> dict[int, int]:
+        return {}
+
+    monkeypatch.setattr(service, "_visits_by_tm", _no_visits)
+
+    resp = await client.get(
+        f"/api/v1/teams/{settings.companion_tm_department_id}/summary"
+        f"?period={_PERIOD}",
+        headers=head_auth,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["roster"][0]["money"]["meetings"] is None
+    assert body["group"]["money"]["meetings"] is None
+
+
 # --- meetings in scorecard / team summary (per-department items) ------------
 
 
