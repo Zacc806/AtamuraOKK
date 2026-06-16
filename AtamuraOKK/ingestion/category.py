@@ -150,9 +150,7 @@ async def discover_category_fields() -> None:
                 if meta.get("type") != "enumeration":
                     continue
                 label = str(meta.get("formLabel") or meta.get("title") or "")
-                hinted = any(
-                    h in label.casefold() for h in ("категори", "квалификац")
-                )
+                hinted = any(h in label.casefold() for h in ("категори", "квалификац"))
                 mark = "  <-- candidate" if hinted else ""
                 logger.info("{fid}  «{label}»{mark}", fid=fid, label=label, mark=mark)
                 for item in meta.get("items") or []:

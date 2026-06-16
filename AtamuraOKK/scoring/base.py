@@ -16,6 +16,9 @@ if TYPE_CHECKING:
 
 Sentiment = Literal["позитивный", "нейтральный", "негативный"]
 TargetStatus = Literal["целевой", "нецелевой", "неясно"]
+# How the client intends to pay, as stated/confirmed on the call. Drives the
+# cash-buyer manager alert (наличные); «неизвестно» when not discussed.
+PaymentMethod = Literal["наличные", "ипотека", "рассрочка", "другое", "неизвестно"]
 # Type of conversation — the qualification checklist only applies to a genuine
 # first-contact sales/qualification call. Everything else is excluded from the
 # team score so reminders/vendor/internal/wrong-number calls don't distort it.
@@ -68,6 +71,21 @@ class CallScore(BaseModel):
     strengths: str = Field(description="Сильные стороны менеджера")
     growth_zone: str = Field(description="Зона роста менеджера")
     training_recommendation: str = Field(description="Рекомендация по обучению")
+    # Defaults harden the existing prompt: an omitted field can't fail validation.
+    payment_method: PaymentMethod = Field(
+        default="неизвестно",
+        description="Способ оплаты, который клиент назвал/подтвердил "
+        "(наличные/ипотека/рассрочка); «неизвестно», если не обсуждалось",
+    )
+    wants_to_visit: bool = Field(
+        default=False,
+        description="Клиент согласился приехать в офис / на показ квартир (КЭВ) "
+        "или явно выразил такое намерение",
+    )
+    on_premises: bool = Field(
+        default=False,
+        description="Клиент уже находится в офисе / на объекте по словам в разговоре",
+    )
 
 
 @runtime_checkable

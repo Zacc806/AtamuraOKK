@@ -322,9 +322,7 @@ async def test_calls_feed_and_feedback(
     assert items[0]["call_id"] == call.id
     assert items[0]["okk_5"] == 4  # 86 -> strong band
     assert items[0]["summary"]
-    assert (
-        items[0]["bitrix_url"] == "https://portal.bitrix24.kz/crm/deal/details/777/"
-    )
+    assert items[0]["bitrix_url"] == "https://portal.bitrix24.kz/crm/deal/details/777/"
 
     detail = await client.get(f"/api/v1/calls/{call.id}/feedback", headers=head_auth)
     assert detail.status_code == 200
@@ -512,8 +510,7 @@ async def test_team_summary_counts_visit_conversions(
     monkeypatch.setattr(service, "_visits_by_tm", _fake_visits)
 
     resp = await client.get(
-        f"/api/v1/teams/{settings.companion_tm_department_id}/summary"
-        f"?period={_PERIOD}",
+        f"/api/v1/teams/{settings.companion_tm_department_id}/summary?period={_PERIOD}",
         headers=head_auth,
     )
     assert resp.status_code == 200
@@ -544,8 +541,7 @@ async def test_team_summary_visits_absent_when_bitrix_unavailable(
     monkeypatch.setattr(service, "_visits_by_tm", _no_visits)
 
     resp = await client.get(
-        f"/api/v1/teams/{settings.companion_tm_department_id}/summary"
-        f"?period={_PERIOD}",
+        f"/api/v1/teams/{settings.companion_tm_department_id}/summary?period={_PERIOD}",
         headers=head_auth,
     )
     assert resp.status_code == 200

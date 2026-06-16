@@ -201,8 +201,7 @@ async def get_department_ref(
 def _is_placeholder_name(department: Department) -> bool:
     """True while a department row still carries its get-or-create stub name."""
     return (
-        not department.name
-        or department.name == f"Department {department.bitrix_id}"
+        not department.name or department.name == f"Department {department.bitrix_id}"
     )
 
 

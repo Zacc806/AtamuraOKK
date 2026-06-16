@@ -118,7 +118,8 @@ class ManipulationDetector:
                 raise ProviderUnavailableError(f"anthropic: {exc}") from exc
             raise ScoringError(f"anthropic: {exc}") from exc
         return "".join(
-            getattr(b, "text", "") for b in resp.content
+            getattr(b, "text", "")
+            for b in resp.content
             if getattr(b, "type", None) == "text"
         ).strip()
 

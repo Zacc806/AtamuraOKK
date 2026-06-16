@@ -103,11 +103,13 @@ class TranscribeWorker:
 
 
 async def _score_startup(ctx: dict[str, Any]) -> None:
+    from AtamuraOKK.bitrix import get_notifier  # noqa: PLC0415
     from AtamuraOKK.scoring.factory import get_scorer  # noqa: PLC0415
     from AtamuraOKK.scoring.rubric import load_rubric  # noqa: PLC0415
 
     ctx["scorer"] = get_scorer()
     ctx["rubric"] = load_rubric()
+    ctx["notifier"] = get_notifier()
 
 
 class ScoreWorker:

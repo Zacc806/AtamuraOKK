@@ -139,9 +139,7 @@ class MeetingScorer:
         base_pct = round(total / self.rubric.max_total_score * 100, 1)
         client_agreed = any(r.client_agreed_meeting for r in results)
         kev_bonus = (
-            self.kev_bonus_points
-            if (self.kev_bonus_points and client_agreed)
-            else 0
+            self.kev_bonus_points if (self.kev_bonus_points and client_agreed) else 0
         )
         score_pct = min(100.0, round(base_pct + kev_bonus, 1))
 

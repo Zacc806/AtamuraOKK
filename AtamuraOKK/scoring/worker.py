@@ -8,16 +8,18 @@ percent (over the 91 audio-derivable points) is the headline metric.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from AtamuraOKK.bitrix import BitrixNotifier, crm_card_url, get_notifier
 from AtamuraOKK.db.models.call import Call
 from AtamuraOKK.db.models.enums import CallStatus
+from AtamuraOKK.db.models.manager import Manager
 from AtamuraOKK.db.models.score import Score
 from AtamuraOKK.db.models.transcript import Transcript
 from AtamuraOKK.db.session import session_scope
@@ -25,6 +27,7 @@ from AtamuraOKK.dispatch.claim import claim_ready
 from AtamuraOKK.scoring.base import CallScore, Scorer
 from AtamuraOKK.scoring.factory import get_scorer
 from AtamuraOKK.scoring.rubric import Rubric, load_rubric
+from AtamuraOKK.settings import settings
 
 
 @dataclass
@@ -117,6 +120,9 @@ def _assemble(
         "strengths": result.strengths,
         "growth_zone": result.growth_zone,
         "training_recommendation": result.training_recommendation,
+        "payment_method": result.payment_method,
+        "wants_to_visit": result.wants_to_visit,
+        "on_premises": result.on_premises,
     }
 
 
@@ -159,12 +165,105 @@ async def _persist_score(
     )
 
 
+def should_notify_cash(
+    result: CallScore,
+    *,
+    started_at: datetime | None,
+    now: datetime,
+    max_age_minutes: int,
+) -> bool:
+    """Whether a scored call should trigger a cash-buyer manager alert.
+
+    Fires only for a genuine qualification call where the client pays cash, and
+    only while the call is recent — the age guard keeps a backfill / ``run --all``
+    rescore from notifying managers about long-past calls.
+    """
+    if result.payment_method != "наличные" or not result.is_qualification_call:
+        return False
+    if started_at is None:
+        return False
+    return now - started_at <= timedelta(minutes=max_age_minutes)
+
+
+def _cash_alert_message(call: Call, result: CallScore) -> str:
+    """Manager-facing notification body for a cash-buyer call."""
+    lines = ["💰 Клиент готов оплатить наличными."]
+    if result.on_premises:
+        lines.append("📍 Клиент уже в офисе / на объекте.")
+    elif result.wants_to_visit:
+        lines.append("🚗 Клиент готов приехать на встречу / просмотр.")
+    if result.summary:
+        lines.append(f"Резюме звонка: {result.summary}")
+    url = crm_card_url(call.crm_entity_type, call.crm_entity_id)
+    if url:
+        lines.append(url)
+    return "\n".join(lines)
+
+
+async def maybe_notify_cash_buyer(
+    session: AsyncSession,
+    call: Call,
+    result: CallScore,
+    rubric: Rubric,
+    notifier: BitrixNotifier,
+) -> None:
+    """Notify the responsible manager when a scored call is a cash buyer.
+
+    Idempotent via ``scores.notified_at`` (survives re-score upserts), and fully
+    guarded: a Bitrix failure is logged and swallowed so it can never fail the
+    just-scored call (the caller keeps the call at ``SCORED``).
+    """
+    if not should_notify_cash(
+        result,
+        started_at=call.started_at,
+        now=datetime.now(UTC),
+        max_age_minutes=settings.cash_alert_max_age_minutes,
+    ):
+        return
+    try:
+        score = await session.scalar(
+            select(Score).where(
+                Score.call_id == call.id,
+                Score.rubric_version == rubric.version,
+            ),
+        )
+        if score is None or score.notified_at is not None:
+            return
+        if call.manager_id is None:
+            logger.warning(
+                "cash alert: call {id} has no manager — skipping",
+                id=call.bitrix_call_id,
+            )
+            return
+        bitrix_user_id = await session.scalar(
+            select(Manager.bitrix_user_id).where(Manager.id == call.manager_id),
+        )
+        if bitrix_user_id is None:
+            logger.warning(
+                "cash alert: manager {mid} has no Bitrix id — skipping",
+                mid=call.manager_id,
+            )
+            return
+        await notifier.send(int(bitrix_user_id), _cash_alert_message(call, result))
+        score.notified_at = func.now()
+        logger.info(
+            "cash alert sent to user {uid} for call {id}",
+            uid=bitrix_user_id,
+            id=call.bitrix_call_id,
+        )
+    except Exception as exc:  # never fail the score on a notification error
+        logger.warning(
+            "cash alert failed for call {id}: {e}", id=call.bitrix_call_id, e=exc
+        )
+
+
 async def _score_one(
     session: AsyncSession,
     call: Call,
     transcript: Transcript,
     scorer: Scorer,
     rubric: Rubric,
+    notifier: BitrixNotifier | None = None,
 ) -> None:
     result = await scorer.score(
         transcript=transcript.full_text,
@@ -175,6 +274,9 @@ async def _score_one(
     await _persist_score(session, call, result, rubric, scorer.model_label)
     call.status = CallStatus.SCORED
     call.error = None
+    await maybe_notify_cash_buyer(
+        session, call, result, rubric, notifier or get_notifier()
+    )
 
 
 async def score_one(
@@ -182,6 +284,7 @@ async def score_one(
     *,
     scorer: Scorer | None = None,
     rubric: Rubric | None = None,
+    notifier: BitrixNotifier | None = None,
 ) -> str:
     """Score one claimed (SCORING) call without holding a DB connection.
 
@@ -192,6 +295,7 @@ async def score_one(
     """
     scorer = scorer or get_scorer()
     rubric = rubric or load_rubric()
+    notifier = notifier or get_notifier()
 
     async with session_scope() as session:
         call = await session.get(Call, call_id)
@@ -231,6 +335,7 @@ async def score_one(
                 await _persist_score(session, call, result, rubric, scorer.model_label)
                 call.status = CallStatus.SCORED
                 call.error = None
+                await maybe_notify_cash_buyer(session, call, result, rubric, notifier)
             except Exception as exc:  # record + move on
                 call.attempts += 1
                 call.status = CallStatus.FAILED

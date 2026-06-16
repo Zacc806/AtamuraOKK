@@ -96,8 +96,7 @@ class MeetingStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
         existing = {
-            row["name"]
-            for row in self._conn.execute("PRAGMA table_info(recordings)")
+            row["name"] for row in self._conn.execute("PRAGMA table_info(recordings)")
         }
         for col, col_type in _LATER_COLUMNS:
             if col not in existing:

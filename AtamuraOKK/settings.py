@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     # Seconds to wait/retry on Bitrix QUERY_LIMIT_EXCEEDED throttling.
     bitrix_max_retries: int = 5
     bitrix_retry_base_delay: float = 1.0
+    # Safety latch for the only Bitrix *write* path (cash-buyer manager alert via
+    # im.notify.personal.add). Off until the webhook is granted the `im` scope and
+    # ops opts in; when off the notifier only logs.
+    bitrix_notify_enabled: bool = False
+    # Only alert for calls that started within this window — guards against a
+    # backfill / `scoring run --all` rescore spamming managers about old calls.
+    cash_alert_max_age_minutes: int = 60
 
     # --- Object storage (S3-compatible: MinIO in dev) ---
     s3_endpoint_url: str = "http://localhost:9000"

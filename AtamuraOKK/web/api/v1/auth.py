@@ -122,7 +122,8 @@ async def get_companion_identity(
         bitrix_user_id=user.bitrix_user_id,
         name=user.name,
         department_id=(
-            user.department_id if CompanionRole(user.role) is CompanionRole.HEAD
+            user.department_id
+            if CompanionRole(user.role) is CompanionRole.HEAD
             else None
         ),
     )

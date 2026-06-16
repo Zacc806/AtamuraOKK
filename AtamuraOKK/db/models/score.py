@@ -45,6 +45,10 @@ class Score(Base):
     # List of red-flag tags such as rudeness or missed compliance.
     flags: Mapped[list[Any] | None] = mapped_column(JSONB)
     model: Mapped[str | None] = mapped_column(String(length=128))
+    # When a manager alert was sent for this score (cash-buyer Bitrix notification).
+    # Deliberately NOT written by _persist_score, so it survives a re-score upsert
+    # and a re-score never re-notifies. NULL = not yet notified / not applicable.
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

@@ -40,11 +40,12 @@ async def transcribe_task(ctx: dict[str, Any], call_id: int) -> str:
 
 
 async def score_task(ctx: dict[str, Any], call_id: int) -> str:
-    """Score one claimed call, reusing the preloaded scorer/rubric from ctx."""
+    """Score one claimed call, reusing the preloaded scorer/rubric/notifier."""
     return await score_one(
         call_id,
         scorer=ctx.get("scorer"),
         rubric=ctx.get("rubric"),
+        notifier=ctx.get("notifier"),
     )
 
 

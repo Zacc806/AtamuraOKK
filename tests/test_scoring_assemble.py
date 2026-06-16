@@ -145,6 +145,31 @@ def test_category_c_omitting_closing_does_not_fail() -> None:
     assert payload["max_points"] == rubric.max_conversational - _CLOSING_MAX
 
 
+def test_sales_signals_in_payload() -> None:
+    """payment_method / wants_to_visit / on_premises flow into the score payload."""
+    rubric = load_rubric()
+    result = _call_score(rubric, objections_present=True)
+    result.payment_method = "наличные"
+    result.wants_to_visit = True
+    result.on_premises = False
+
+    payload = _assemble(result, rubric)
+
+    assert payload["payment_method"] == "наличные"
+    assert payload["wants_to_visit"] is True
+    assert payload["on_premises"] is False
+
+
+def test_sales_signals_default_when_omitted() -> None:
+    """An LLM that omits the new fields gets safe defaults, not a validation error."""
+    rubric = load_rubric()
+    payload = _assemble(_call_score(rubric, objections_present=True), rubric)
+
+    assert payload["payment_method"] == "неизвестно"
+    assert payload["wants_to_visit"] is False
+    assert payload["on_premises"] is False
+
+
 def test_max_for_category_weights() -> None:
     """Rubric.max_for resolves the per-category closing weight (and None = exclude)."""
     rubric = load_rubric()

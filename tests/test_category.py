@@ -30,7 +30,7 @@ class _FakeBitrix:
         assert method == "crm.deal.list"
         filter_ = (params or {}).get("filter", {})
         self.filters.append(filter_)
-        (key, value), = filter_.items()
+        ((key, value),) = filter_.items()
         for deal in self._deals.get(f"{key}={value}", []):
             yield deal
 

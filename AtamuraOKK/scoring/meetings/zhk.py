@@ -57,9 +57,7 @@ def _parse(data: dict[str, Any]) -> ZhkFacts:
         aliases=[str(a) for a in data.get("aliases", [])],
         floors=int(data["floors"]) if data.get("floors") is not None else None,
         has_elevator=(
-            bool(data["has_elevator"])
-            if data.get("has_elevator") is not None
-            else None
+            bool(data["has_elevator"]) if data.get("has_elevator") is not None else None
         ),
         finishing=str(data.get("finishing", "")),
         handover=str(data.get("handover", "")),
