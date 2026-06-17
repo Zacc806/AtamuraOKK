@@ -30,12 +30,16 @@ borderline / <75 risk**. The prior `tm_call_v1.json` (21-item) is kept for histo
 re-score calls (`make score` / re-run the score stage) to move them onto v2.
 
 ## Call-type classification (avoids polluting the metric)
-Not every answered+recorded "first call" is a qualification call. The scorer
-classifies `call_type` (квалификация / напоминание / вендор_или_спам / внутренний
+Not every answered+recorded "first call" is a qualification call — only a genuine
+conversation with a potential **buyer** is. The scorer classifies `call_type`
+(квалификация / напоминание / нецелевое_обращение / вендор_или_спам / внутренний
 / недозвон_или_ошибка / …) and sets **`is_qualification_call`**. Only qualification
-calls count toward team scores — reminders, vendor/spam, internal (e.g. headset
-tests), and wrong-numbers are scored but **excluded** from averages/zones in the
-reports and dashboards. The scorer also returns `manager_identified`.
+calls count toward team scores (and as an "attempt to book into ОП") — reminders,
+**non-client inquiries** (`нецелевое_обращение`: realtor/agent, job applicant
+(résumé), partner, complaint, …), vendor/spam/КП, internal (e.g. headset tests),
+and wrong-numbers are scored but **excluded** from averages/zones in the reports
+and dashboards (the report summarizes their count by `call_type`). The scorer also
+returns `manager_identified`.
 
 Speaker labels are presented to the model **by audio channel, not role** (the
 Atamura manager is often on either channel), and the prompt has it identify the

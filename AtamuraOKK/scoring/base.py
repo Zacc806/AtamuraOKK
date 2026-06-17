@@ -21,12 +21,14 @@ TargetStatus = Literal["целевой", "нецелевой", "неясно"]
 PaymentMethod = Literal["наличные", "ипотека", "рассрочка", "другое", "неизвестно"]
 # Type of conversation — the qualification checklist only applies to a genuine
 # first-contact sales/qualification call. Everything else is excluded from the
-# team score so reminders/vendor/internal/wrong-number calls don't distort it.
+# team score so reminders/vendor/internal/wrong-number/non-client calls don't
+# distort it (only «квалификация» counts as a real attempt to book into ОП).
 CallType = Literal[
     "квалификация",  # genuine sales/qualification call — score it
     "напоминание",  # appointment reminder to an already-booked client
     "повторный_сервисный",  # follow-up / service call, not a first qualification
-    "вендор_или_спам",  # an outside party selling to us / spam
+    "нецелевое_обращение",  # not a buyer: realtor/agent, job applicant, partner, etc.
+    "вендор_или_спам",  # an outside party selling to us / commercial offer (КП) / spam
     "внутренний",  # staff talking to each other (e.g. audio test)
     "недозвон_или_ошибка",  # no real conversation / wrong number
     "другое",
@@ -53,8 +55,9 @@ class CallScore(BaseModel):
 
     call_type: CallType = Field(description="Тип звонка")
     is_qualification_call: bool = Field(
-        description="Это настоящий квалификационный звонок ТМ, к которому применим "
-        "чек-лист (False для напоминаний, вендоров, внутренних, недозвонов)",
+        description="Это настоящий квалификационный звонок ТМ клиенту-покупателю, к "
+        "которому применим чек-лист. False для напоминаний, вендоров/КП, внутренних, "
+        "недозвонов и НЕЦЕЛЕВЫХ обращений (риэлтор/агент, резюме, прочие не-клиенты)",
     )
     manager_identified: bool = Field(
         description="Удалось ли однозначно определить менеджера Atamura в разговоре",
