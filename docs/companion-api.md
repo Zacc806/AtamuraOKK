@@ -105,7 +105,8 @@ score; reminders/vendor/internal/wrong-number calls are excluded.
 | GET | `/api/v1/managers/{manager_id}/scorecard?period=YYYY-MM` | ОКК scorecard (`okk` + `zone_distribution` + `meetings` + null `money`) |
 | GET | `/api/v1/managers/{manager_id}/calls?since=&limit=` | Звонки feed — scored calls, newest first; each carries `bitrix_url` (deep link to the call's CRM card, null when not derivable) |
 | GET | `/api/v1/calls/{call_id}/feedback` | авто-разбор за 90 сек — summary/strengths/growth/criteria + `bitrix_url` (CRM-card deep link) + `transcript` (speaker-labeled blocks: `agent`/`customer`, coalesced; falls back to one `unknown` block from `full_text`) |
-| GET | `/api/v1/deals/{deal_id}/calls` | scored calls attached to a Bitrix **deal** (the id in `…/crm/deal/details/<id>/`), newest first — same `CallFeedItem` shape as the manager feed. The deal is resolved live through Bitrix to its contact(s)/company (calls usually link to the contact, not the deal), then matched on any of those CRM entities; a Bitrix outage degrades to calls linked directly to the deal. Scoped to the caller — a manager sees only their own calls, a scoped head only their department's — so an unrelated/out-of-scope deal returns `[]` |
+| GET | `/api/v1/crm/{entity_type}/{entity_id}/calls` | scored calls attached to a Bitrix **CRM card**, newest first — same `CallFeedItem` shape as the manager feed. `entity_type`/`entity_id` are the card URL's path segments (`deal`/`contact`/`company`/`lead`); **opening a call from Bitrix lands on the contact card** (`…/crm/contact/details/429546/`) and calls link to the contact. The card is cross-resolved live through Bitrix (deal→its contacts/company; contact/company→their deals etc.) so the same calls surface whichever card is pasted; a Bitrix outage degrades to calls linked directly to the pasted entity. Scoped to the caller — a manager sees only their own calls, a scoped head only their department's — so an unrelated/out-of-scope card returns `[]`. Unknown `entity_type` → `404` |
+| GET | `/api/v1/deals/{deal_id}/calls` | alias of `/crm/deal/{deal_id}/calls` (kept for back-compat) |
 | GET | `/api/v1/managers/{manager_id}/meetings?since=&limit=` | Встречи feed — scored ОП meetings, newest first |
 | GET | `/api/v1/meetings/{meeting_id}/feedback` | авто-разбор for one meeting — score/tone/red flags/criteria |
 | GET | `/api/v1/managers/{manager_id}/feed?since=&limit=` | unified Звонки+Встречи feed — kind-tagged items, newest first |
@@ -115,6 +116,20 @@ score; reminders/vendor/internal/wrong-number calls are excluded.
 | GET | `/api/v1/users` | cabinet users — all for the global head; a scoped head sees only their own department's manager keys (**head only**) |
 | POST | `/api/v1/users` | issue a key; raw key returned once. Manager (`{bitrix_user_id, name?}`): any head — a scoped head's manager is tied to their department. Head (`{role: "head", department_id, name? \| bitrix_user_id?}`): **global head only** |
 | POST | `/api/v1/users/{id}/revoke` | deactivate a key. Global head: manager + scoped-head keys (dept-NULL head rows are `403`, env/CLI-only); scoped head: own department's manager keys only |
+| POST | `/api/v1/calls/{call_id}/appeal` | file an appeal against a call's ОКК score (`{reason?}`). **Manager only**, and only on their own call; an unscored call → `404`, a second appeal while one is still `pending` → `409`. Returns the `AppealView` |
+| GET | `/api/v1/appeals?status=&limit=` | appeals visible to the caller, newest first — a head sees their scope (global = all, office РОП = own department), a manager sees only their own. `?status=pending` is the head's review queue |
+| POST | `/api/v1/appeals/{appeal_id}/review` | head verdict (`{status: "accepted"\|"rejected", override_percent?, note?}`). **Head only** (a scoped head only their department's appeals). An `override_percent` (0–100) on an accepted appeal becomes the score the cabinet shows for that call |
+
+**Appeals** (апелляции) let a manager dispute a call's ОКК score for a head to
+re-check. They write only AtamuraOKK's own `appeals` table — never Bitrix or
+pipeline state. An accepted appeal's `override_percent` is preferred over the
+LLM percent **in the companion read layer only** (`service._score_overrides`):
+the call feed, per-call авто-разбор (`CallFeedback.appeal` carries the verdict),
+the scorecard aggregate, the team rollup and the CRM-card search all re-derive
+`zone`/`okk_5` from the corrected percent. It is **deliberately not** folded into
+the `call_scores_latest` view, so the twice-daily QA reports stay the model's
+verdict. `CallFeedback` now also returns an `appeal` field (latest appeal on the
+call, or null) so the cabinet can show its status.
 
 `period` defaults to the current month in `report_timezone`; a malformed value
 returns `422`. Unknown manager/department/call returns `404`; a manager asking

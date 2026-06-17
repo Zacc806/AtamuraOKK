@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 from loguru import logger
@@ -19,6 +20,11 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from AtamuraOKK.bitrix import BitrixClient, BitrixError, crm_card_url
+from AtamuraOKK.db.models.appeal import (
+    APPEAL_ACCEPTED,
+    APPEAL_PENDING,
+    Appeal,
+)
 from AtamuraOKK.db.models.department import Department
 from AtamuraOKK.db.models.enums import CompanionRole
 from AtamuraOKK.db.models.manager import Manager
@@ -28,6 +34,7 @@ from AtamuraOKK.settings import settings
 from AtamuraOKK.web.api.v1 import day, okk
 from AtamuraOKK.web.api.v1.auth import CompanionIdentity
 from AtamuraOKK.web.api.v1.schemas import (
+    AppealView,
     CallFeedback,
     CallFeedItem,
     CriterionFeedback,
@@ -113,6 +120,68 @@ def _okk_from_rows(rows: Sequence[Any]) -> tuple[OkkScore, dict[str, int], int]:
     return score, zone_dist, len(qual)
 
 
+async def _score_overrides(
+    session: AsyncSession,
+    call_ids: Sequence[int | None],
+) -> dict[int, float]:
+    """``call_id → corrected percent`` from the latest accepted appeal override.
+
+    A head re-checking an appeal may record a corrected percent; that value
+    supersedes the LLM percent everywhere a score is shown. Kept out of the
+    ``call_scores_latest`` view on purpose, so the official QA reports (which
+    read the same view) stay the model's verdict — only the companion read
+    layer prefers the human override.
+    """
+    ids = sorted({c for c in call_ids if c is not None})
+    if not ids:
+        return {}
+    rows = (
+        await session.execute(
+            text(
+                "SELECT DISTINCT ON (call_id) call_id, override_percent "
+                "FROM appeals "
+                "WHERE call_id = ANY(:ids) "
+                "AND status = 'accepted' AND override_percent IS NOT NULL "
+                "ORDER BY call_id, reviewed_at DESC NULLS LAST, id DESC",
+            ),
+            {"ids": ids},
+        )
+    ).all()
+    return {r.call_id: float(r.override_percent) for r in rows}
+
+
+def _with_overrides(rows: Sequence[Any], overrides: dict[int, float]) -> list[Any]:
+    """Replace each overridden row's ``percent``/``zone`` with the РОП correction.
+
+    Rows must carry ``call_id``. Untouched rows pass through as-is; an overridden
+    row becomes a namespace clone whose ``percent`` is the corrected value and
+    whose ``zone`` is re-derived from it (so ``okk_5`` and zone counting stay
+    consistent with the corrected number).
+    """
+    if not overrides:
+        return list(rows)
+    out: list[Any] = []
+    for r in rows:
+        corrected = overrides.get(r.call_id)
+        if corrected is None:
+            out.append(r)
+            continue
+        data = dict(r._mapping)  # noqa: SLF001 — read-only copy of a Core row
+        data["percent"] = corrected
+        data["zone"] = okk.zone_for(corrected)
+        out.append(SimpleNamespace(**data))
+    return out
+
+
+async def _apply_score_overrides(
+    session: AsyncSession,
+    rows: Sequence[Any],
+) -> list[Any]:
+    """Fetch and fold the РОП score overrides for a batch of score rows."""
+    overrides = await _score_overrides(session, [r.call_id for r in rows])
+    return _with_overrides(rows, overrides)
+
+
 def _meetings_score_from(meetings: Sequence[Meeting]) -> MeetingsScore:
     """Aggregate Meeting rows into the meetings block (pass/pct semantics)."""
     pcts = [float(m.score_pct) for m in meetings if m.score_pct is not None]
@@ -153,7 +222,7 @@ async def _scored_rows_for_manager(
         (
             await session.execute(
                 text(
-                    "SELECT percent, zone, is_qualification_call "
+                    "SELECT call_id, percent, zone, is_qualification_call "
                     "FROM call_scores_latest "
                     "WHERE manager_bitrix_user_id = :uid "
                     "AND started_at >= :start AND started_at < :end",
@@ -375,6 +444,7 @@ async def get_scorecard(
 
     start, end, label = okk.parse_period(period)
     rows = await _scored_rows_for_manager(session, bitrix_user_id, start, end)
+    rows = await _apply_score_overrides(session, rows)
     score, zone_dist, n = _okk_from_rows(rows)
     meetings = await _meetings_for_manager(session, bitrix_user_id, start, end)
 
@@ -418,6 +488,7 @@ async def get_calls_feed(
             {"uid": bitrix_user_id, "since": since, "limit": limit},
         )
     ).all()
+    rows = await _apply_score_overrides(session, rows)
     return [
         CallFeedItem(
             call_id=r.call_id,
@@ -445,42 +516,110 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
-async def _deal_entity_pairs(deal_id: int) -> list[tuple[str, int]]:
-    """CRM entities a deal's calls may be attached to (deal + company + contacts).
+#: CRM card path segment (as in ``…/crm/<type>/details/<id>/``) → the
+#: ``crm_entity_type`` calls are stored under.
+CRM_ENTITY_TYPES = {
+    "deal": "DEAL",
+    "contact": "CONTACT",
+    "company": "COMPANY",
+    "lead": "LEAD",
+}
 
-    Calls almost always link to the deal's **contact**, not the deal itself, so
-    the deal is resolved live through Bitrix. Best-effort: any Bitrix failure
-    degrades to just the deal, so directly-linked calls are still returned.
+
+def _add_pair(pairs: set[tuple[str, int]], entity_type: str, raw_id: Any) -> None:
+    value = _as_int(raw_id)
+    if value:  # Bitrix sends "0" for an absent link — treat as none.
+        pairs.add((entity_type, value))
+
+
+async def _resolve_deal(
+    bx: BitrixClient,
+    pairs: set[tuple[str, int]],
+    deal_id: int,
+) -> None:
+    deal = await bx.call("crm.deal.get", {"id": deal_id})
+    if deal:
+        _add_pair(pairs, "COMPANY", deal.get("COMPANY_ID"))
+        _add_pair(pairs, "CONTACT", deal.get("CONTACT_ID"))
+    for item in (await bx.call("crm.deal.contact.items.get", {"id": deal_id})) or []:
+        _add_pair(pairs, "CONTACT", item.get("CONTACT_ID"))
+
+
+async def _resolve_contact(
+    bx: BitrixClient,
+    pairs: set[tuple[str, int]],
+    contact_id: int,
+) -> None:
+    contact = await bx.call("crm.contact.get", {"id": contact_id})
+    if contact:
+        _add_pair(pairs, "COMPANY", contact.get("COMPANY_ID"))
+    async for deal in bx.list(
+        "crm.deal.list",
+        {"filter": {"CONTACT_ID": contact_id}, "select": ["ID"]},
+    ):
+        _add_pair(pairs, "DEAL", deal.get("ID"))
+
+
+async def _resolve_company(
+    bx: BitrixClient,
+    pairs: set[tuple[str, int]],
+    company_id: int,
+) -> None:
+    async for contact in bx.list(
+        "crm.contact.list",
+        {"filter": {"COMPANY_ID": company_id}, "select": ["ID"]},
+    ):
+        _add_pair(pairs, "CONTACT", contact.get("ID"))
+    async for deal in bx.list(
+        "crm.deal.list",
+        {"filter": {"COMPANY_ID": company_id}, "select": ["ID"]},
+    ):
+        _add_pair(pairs, "DEAL", deal.get("ID"))
+
+
+async def _crm_entity_pairs(entity_type: str, entity_id: int) -> list[tuple[str, int]]:
+    """CRM entities a card's calls may be attached to, resolved across links.
+
+    A call links to exactly **one** CRM entity — usually the **contact**, not
+    the deal. So whichever card the user pastes is cross-resolved through Bitrix
+    so the same calls surface either way: a deal → its contact(s)/company; a
+    contact/company → its deals (and the contact's company / the company's
+    contacts). Best-effort: a Bitrix failure degrades to the pasted entity
+    alone, which is still a direct hit for contact/lead cards (calls link to the
+    entity itself there).
     """
-    pairs: set[tuple[str, int]] = {("DEAL", deal_id)}
+    canonical = CRM_ENTITY_TYPES[entity_type]
+    pairs: set[tuple[str, int]] = {(canonical, entity_id)}
+    # LEAD: calls link to the lead itself; nothing to cross-resolve.
+    resolvers = {
+        "DEAL": _resolve_deal,
+        "CONTACT": _resolve_contact,
+        "COMPANY": _resolve_company,
+    }
+    resolver = resolvers.get(canonical)
+    if resolver is None:
+        return list(pairs)
     try:
         async with BitrixClient() as bx:
-            deal = await bx.call("crm.deal.get", {"id": deal_id})
-            if deal:
-                company_id = _as_int(deal.get("COMPANY_ID"))
-                if company_id:
-                    pairs.add(("COMPANY", company_id))
-                contact_id = _as_int(deal.get("CONTACT_ID"))
-                if contact_id:
-                    pairs.add(("CONTACT", contact_id))
-            items = await bx.call("crm.deal.contact.items.get", {"id": deal_id})
-            for item in items or []:
-                contact_id = _as_int(item.get("CONTACT_ID"))
-                if contact_id:
-                    pairs.add(("CONTACT", contact_id))
+            await resolver(bx, pairs, entity_id)
     except BitrixError as exc:
-        logger.warning("Deal {id} entity resolution failed: {e}", id=deal_id, e=exc)
+        logger.warning(
+            "CRM {type}:{id} entity resolution failed: {e}",
+            type=canonical,
+            id=entity_id,
+            e=exc,
+        )
     return list(pairs)
 
 
-def _can_view_deal_row(
+def _can_view_call_row(
     identity: CompanionIdentity,
     manager_bitrix_user_id: int | None,
     department_bitrix_id: int | None,
 ) -> bool:
     """Whether the caller may see a deal call row (mirrors ``ensure_can_view_manager``).
 
-    Filtered, not raised: one deal can hold several managers' calls, so the
+    Filtered, not raised: one CRM card can hold several managers' calls, so the
     feed is trimmed to the visible subset — a manager sees only their own, a
     scoped head only their department's, the global head everything.
     """
@@ -494,25 +633,27 @@ def _can_view_deal_row(
     )
 
 
-async def get_deal_calls(
+async def get_crm_entity_calls(
     session: AsyncSession,
-    deal_id: int,
+    entity_type: str,
+    entity_id: int,
     identity: CompanionIdentity,
 ) -> list[CallFeedItem]:
-    """Scored calls attached to a Bitrix deal, newest first.
+    """Scored calls attached to a Bitrix CRM card (deal/contact/company/lead).
 
-    The deal is resolved through Bitrix to its contact(s)/company and calls are
-    matched on any of those CRM entities (or the deal itself). Rows the caller
-    may not see are filtered out, so an unrelated or out-of-scope deal returns
-    an empty list rather than leaking another manager's calls.
+    ``entity_type`` is the card's path segment (``deal``/``contact``/…). The
+    card is cross-resolved through Bitrix (see ``_crm_entity_pairs``) and calls
+    are matched on any of the linked CRM entities. Rows the caller may not see
+    are filtered out, so an unrelated or out-of-scope card returns an empty list
+    rather than leaking another manager's calls.
     """
-    pairs = await _deal_entity_pairs(deal_id)
+    pairs = await _crm_entity_pairs(entity_type, entity_id)
     conditions: list[str] = []
     params: dict[str, Any] = {}
-    for i, (entity_type, entity_id) in enumerate(pairs):
+    for i, (pair_type, pair_id) in enumerate(pairs):
         conditions.append(f"(crm_entity_type = :t{i} AND crm_entity_id = :i{i})")
-        params[f"t{i}"] = entity_type
-        params[f"i{i}"] = entity_id
+        params[f"t{i}"] = pair_type
+        params[f"i{i}"] = pair_id
     rows = (
         await session.execute(
             # ``conditions`` are code-generated placeholder pairs; all values are
@@ -529,6 +670,7 @@ async def get_deal_calls(
             params,
         )
     ).all()
+    rows = await _apply_score_overrides(session, rows)
     return [
         CallFeedItem(
             call_id=r.call_id,
@@ -546,7 +688,7 @@ async def get_deal_calls(
             bitrix_url=crm_card_url(r.crm_entity_type, r.crm_entity_id),
         )
         for r in rows
-        if _can_view_deal_row(
+        if _can_view_call_row(
             identity,
             r.manager_bitrix_user_id,
             r.department_bitrix_id,
@@ -590,6 +732,22 @@ async def get_call_feedback(
         _transcript_blocks(transcript_row.segments, transcript_row.full_text)
         if transcript_row is not None
         else []
+    )
+
+    # Original LLM percent, captured before any head override is folded in so the
+    # appeal card can show "было X% → стало Y%".
+    original_percent = float(row.percent) if row.percent is not None else None
+    row = _with_overrides([row], await _score_overrides(session, [row.call_id]))[0]
+    appeal = await get_latest_appeal_for_call(session, call_id)
+    appeal_view = (
+        _appeal_view(
+            appeal,
+            manager_name=row.manager_name,
+            started_at=row.started_at,
+            original_percent=original_percent,
+        )
+        if appeal is not None
+        else None
     )
 
     percent = float(row.percent) if row.percent is not None else None
@@ -636,7 +794,219 @@ async def get_call_feedback(
             for cr in crit_rows
         ],
         transcript=transcript,
+        appeal=appeal_view,
     )
+
+
+# --- Appeals (апелляции) -----------------------------------------------------
+# A manager files an appeal against a call's ОКК score; the department head
+# reviews it and may record a corrected percent (see ``_score_overrides``).
+# Writes only AtamuraOKK's own ``appeals`` table — never Bitrix/pipeline state.
+
+
+def _appeal_view(
+    appeal: Appeal,
+    *,
+    manager_name: str | None = None,
+    started_at: datetime | None = None,
+    original_percent: float | None = None,
+) -> AppealView:
+    """Project an ``Appeal`` row into its DTO, with optional call context."""
+    override = (
+        float(appeal.override_percent)
+        if appeal.override_percent is not None
+        else None
+    )
+    return AppealView(
+        id=appeal.id,
+        call_id=appeal.call_id,
+        manager_bitrix_user_id=appeal.manager_bitrix_user_id,
+        created_by_bitrix_user_id=appeal.created_by_bitrix_user_id,
+        department_id=appeal.department_bitrix_id,
+        reason=appeal.reason,
+        status=appeal.status,
+        override_percent=override,
+        override_okk_5=okk.okk_5(override),
+        head_note=appeal.head_note,
+        reviewed_by_bitrix_user_id=appeal.reviewed_by_bitrix_user_id,
+        reviewed_at=appeal.reviewed_at,
+        created_at=appeal.created_at,
+        manager_name=manager_name,
+        started_at=started_at,
+        original_percent=original_percent,
+    )
+
+
+async def get_latest_appeal_for_call(
+    session: AsyncSession,
+    call_id: int,
+) -> Appeal | None:
+    """The most recent appeal on a call (any status), or None."""
+    return await session.scalar(
+        select(Appeal)
+        .where(Appeal.call_id == call_id)
+        .order_by(Appeal.created_at.desc(), Appeal.id.desc()),
+    )
+
+
+async def get_open_appeal_for_call(
+    session: AsyncSession,
+    call_id: int,
+) -> Appeal | None:
+    """A still-pending appeal on a call, or None — guards against duplicates."""
+    return await session.scalar(
+        select(Appeal).where(
+            Appeal.call_id == call_id,
+            Appeal.status == APPEAL_PENDING,
+        ),
+    )
+
+
+async def get_call_score_context(
+    session: AsyncSession,
+    call_id: int,
+) -> Any | None:
+    """Scoring context for a call (manager/department/started_at/percent), or None.
+
+    Sources the same read view the rest of the API uses, so a call only counts
+    as appealable once it actually has a score there.
+    """
+    return (
+        await session.execute(
+            text(
+                "SELECT manager_bitrix_user_id, department_bitrix_id, "
+                "manager_name, started_at, percent "
+                "FROM call_scores_latest WHERE call_id = :cid",
+            ),
+            {"cid": call_id},
+        )
+    ).first()
+
+
+async def create_appeal(
+    session: AsyncSession,
+    *,
+    call_id: int,
+    manager_bitrix_user_id: int,
+    created_by_bitrix_user_id: int,
+    department_bitrix_id: int | None,
+    reason: str | None,
+) -> Appeal:
+    """Persist a new pending appeal and return it."""
+    appeal = Appeal(
+        call_id=call_id,
+        manager_bitrix_user_id=manager_bitrix_user_id,
+        created_by_bitrix_user_id=created_by_bitrix_user_id,
+        department_bitrix_id=department_bitrix_id,
+        reason=reason,
+        status=APPEAL_PENDING,
+    )
+    session.add(appeal)
+    await session.flush()
+    await session.refresh(appeal)
+    return appeal
+
+
+async def _appeal_context(
+    session: AsyncSession,
+    call_ids: Sequence[int],
+) -> dict[int, Any]:
+    """``call_id → row(manager_name, started_at, percent)`` for the review list."""
+    ids = sorted(set(call_ids))
+    if not ids:
+        return {}
+    rows = (
+        await session.execute(
+            text(
+                "SELECT call_id, manager_name, started_at, percent "
+                "FROM call_scores_latest WHERE call_id = ANY(:ids)",
+            ),
+            {"ids": ids},
+        )
+    ).all()
+    return {r.call_id: r for r in rows}
+
+
+async def view_for_appeal(session: AsyncSession, appeal: Appeal) -> AppealView:
+    """One appeal as its DTO, enriched with the appealed call's context."""
+    ctx = (await _appeal_context(session, [appeal.call_id])).get(appeal.call_id)
+    return _appeal_view(
+        appeal,
+        manager_name=getattr(ctx, "manager_name", None),
+        started_at=getattr(ctx, "started_at", None),
+        original_percent=(
+            float(ctx.percent)
+            if ctx is not None and ctx.percent is not None
+            else None
+        ),
+    )
+
+
+async def list_appeals(
+    session: AsyncSession,
+    *,
+    department_bitrix_id: int | None = None,
+    manager_bitrix_user_id: int | None = None,
+    status: str | None = None,
+    limit: int = 100,
+) -> list[AppealView]:
+    """Appeals matching the given scope, newest first, with call context.
+
+    A global head passes no scope; an office РОП passes their
+    ``department_bitrix_id``; a manager passes their ``manager_bitrix_user_id``.
+    """
+    query = select(Appeal).order_by(Appeal.created_at.desc(), Appeal.id.desc())
+    if department_bitrix_id is not None:
+        query = query.where(Appeal.department_bitrix_id == department_bitrix_id)
+    if manager_bitrix_user_id is not None:
+        query = query.where(
+            Appeal.manager_bitrix_user_id == manager_bitrix_user_id,
+        )
+    if status is not None:
+        query = query.where(Appeal.status == status)
+    appeals = list((await session.scalars(query.limit(limit))).all())
+    context = await _appeal_context(session, [a.call_id for a in appeals])
+    return [
+        _appeal_view(
+            a,
+            manager_name=getattr(context.get(a.call_id), "manager_name", None),
+            started_at=getattr(context.get(a.call_id), "started_at", None),
+            original_percent=(
+                float(ctx.percent)
+                if (ctx := context.get(a.call_id)) is not None
+                and ctx.percent is not None
+                else None
+            ),
+        )
+        for a in appeals
+    ]
+
+
+async def get_appeal(session: AsyncSession, appeal_id: int) -> Appeal | None:
+    """Fetch one appeal by its internal id, or None."""
+    return await session.get(Appeal, appeal_id)
+
+
+async def review_appeal(
+    session: AsyncSession,
+    appeal: Appeal,
+    *,
+    status: str,
+    override_percent: float | None,
+    note: str | None,
+    reviewed_by_bitrix_user_id: int | None,
+) -> Appeal:
+    """Record a head's verdict. An override only sticks on an accepted appeal."""
+    appeal.status = status
+    appeal.override_percent = (
+        override_percent if status == APPEAL_ACCEPTED else None
+    )
+    appeal.head_note = note
+    appeal.reviewed_by_bitrix_user_id = reviewed_by_bitrix_user_id
+    appeal.reviewed_at = datetime.now(UTC)
+    await session.flush()
+    await session.refresh(appeal)
+    return appeal
 
 
 def _meeting_feed_item(meeting: Meeting) -> MeetingFeedItem:
@@ -801,14 +1171,15 @@ async def get_team_summary(
     rows = (
         await session.execute(
             text(
-                "SELECT manager_bitrix_user_id, manager_name, percent, zone, "
-                "is_qualification_call FROM call_scores_latest "
+                "SELECT call_id, manager_bitrix_user_id, manager_name, percent, "
+                "zone, is_qualification_call FROM call_scores_latest "
                 "WHERE department_id = :dept "
                 "AND started_at >= :start AND started_at < :end",
             ),
             {"dept": department.id, "start": start, "end": end},
         )
     ).all()
+    rows = await _apply_score_overrides(session, rows)
 
     group_score, group_zones, group_n = _okk_from_rows(rows)
 

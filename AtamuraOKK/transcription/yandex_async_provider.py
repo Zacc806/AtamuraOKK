@@ -58,8 +58,10 @@ _CONTAINER_BY_SUFFIX = {
 }
 # 60 MB inline limit for API v3 RecognizeFile (Yandex hard limit).
 _MAX_INLINE_BYTES = 60 * 1024 * 1024
-# Lowest channel/speaker tag = agent, next = customer (role is decided later, by
-# content, in scoring — these are neutral side labels).
+# Neutral side labels for the mono speaker-labeling path (role is decided later,
+# by content, in scoring). Stereo uses the fixed channel convention in
+# `settings.stereo_agent_channel` instead — Voximplant's two channels carry the
+# same role every call, so the side is read from the channel, not guessed.
 _SIDE_SPEAKERS = ("agent", "customer")
 
 
@@ -110,13 +112,23 @@ def _ordered_dialogue(segments: list[Segment]) -> list[Segment]:
     return merged
 
 
+def _channel_side(position: int, total: int, tag: str) -> str:
+    """Side label for the channel at sorted ``position`` of ``total`` channels.
+
+    The common (stereo) case maps the configured agent channel to "agent" and the
+    other to "customer"; degenerate channel counts fall back to neutral labels.
+    """
+    if total == 2:
+        return "agent" if position == settings.stereo_agent_channel else "customer"
+    if position < len(_SIDE_SPEAKERS):
+        return _SIDE_SPEAKERS[position]
+    return f"channel{tag}"
+
+
 def _segments_by_channel(utterances: list[_Utterance]) -> list[Segment]:
     """Stereo: map each channel to a side and interleave utterances by time."""
     tags = sorted({u.channel_tag for u in utterances})
-    mapping = {
-        tag: _SIDE_SPEAKERS[i] if i < len(_SIDE_SPEAKERS) else f"channel{tag}"
-        for i, tag in enumerate(tags)
-    }
+    mapping = {tag: _channel_side(i, len(tags), tag) for i, tag in enumerate(tags)}
     segs = [
         Segment(mapping[u.channel_tag], u.start_ms / 1000, u.end_ms / 1000, u.text)
         for u in utterances

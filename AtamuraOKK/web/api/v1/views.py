@@ -41,6 +41,9 @@ from AtamuraOKK.web.api.v1.auth import (
 )
 from AtamuraOKK.web.api.v1.okk import PeriodError
 from AtamuraOKK.web.api.v1.schemas import (
+    AppealCreate,
+    AppealReview,
+    AppealView,
     CallFeedback,
     CallFeedItem,
     CompanionUserCreate,
@@ -190,6 +193,43 @@ async def manager_feed(
 
 
 @router.get(
+    "/crm/{entity_type}/{entity_id}/calls",
+    response_model=list[CallFeedItem],
+    tags=["companion"],
+)
+async def crm_entity_calls(
+    entity_type: str,
+    entity_id: int,
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[CallFeedItem]:
+    """Scored calls attached to a Bitrix CRM card, newest first.
+
+    ``entity_type``/``entity_id`` are the card URL's path segments
+    («…/crm/**contact**/details/**429546**/»). Opening a call from Bitrix lands
+    on the **contact** card, and calls link to the contact — so contact, deal,
+    company and lead cards are all accepted and cross-resolved through Bitrix so
+    the same calls surface whichever card is pasted. Scoped to what the caller
+    may see (a manager only their own calls, a scoped head only their
+    department's), so an unrelated/out-of-scope card returns an empty list.
+    """
+    if entity_type.lower() not in service.CRM_ENTITY_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "Unknown CRM entity type — expected one of "
+                f"{', '.join(service.CRM_ENTITY_TYPES)}."
+            ),
+        )
+    return await service.get_crm_entity_calls(
+        session,
+        entity_type.lower(),
+        entity_id,
+        identity,
+    )
+
+
+@router.get(
     "/deals/{deal_id}/calls",
     response_model=list[CallFeedItem],
     tags=["companion"],
@@ -199,15 +239,8 @@ async def deal_calls(
     identity: CompanionIdentity = Depends(get_companion_identity),
     session: AsyncSession = Depends(get_db_session),
 ) -> list[CallFeedItem]:
-    """Scored calls attached to a Bitrix deal, newest first.
-
-    ``deal_id`` is the id in the CRM card URL («…/crm/deal/details/536096/»).
-    Calls usually link to the deal's contact, so the deal is resolved through
-    Bitrix to its contact(s)/company and matched on any of those entities.
-    Scoped to what the caller may see (a manager only their own calls, a scoped
-    head only their department's), so an unrelated deal returns an empty list.
-    """
-    return await service.get_deal_calls(session, deal_id, identity)
+    """Scored calls attached to a Bitrix deal — alias of ``/crm/deal/{id}/calls``."""
+    return await service.get_crm_entity_calls(session, "deal", deal_id, identity)
 
 
 @router.get("/rubrics", response_model=list[RubricView], tags=["companion"])
@@ -312,6 +345,130 @@ async def manager_day(
         return await day.get_day(session, manager_id, period)
     except PeriodError as exc:
         raise _bad_period(exc) from exc
+
+
+# --- Appeals (апелляции) -----------------------------------------------------
+# A manager disputes a call's ОКК score; their department head re-checks it and
+# may record a corrected percent the read layer then prefers (see
+# ``service._score_overrides``). Manager-initiated, head-resolved; writes only
+# AtamuraOKK's own ``appeals`` table.
+
+
+@router.post(
+    "/calls/{call_id}/appeal",
+    response_model=AppealView,
+    status_code=status.HTTP_201_CREATED,
+    tags=["companion"],
+)
+async def file_call_appeal(
+    call_id: int,
+    payload: AppealCreate,
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> AppealView:
+    """Подать апелляцию: a manager flags their call's ОКК score for РОП re-check.
+
+    Only the manager who made the call may appeal it (a head re-checks, never
+    appeals). One pending appeal per call — a duplicate returns 409.
+    """
+    ctx = await service.get_call_score_context(session, call_id)
+    if ctx is None:
+        raise HTTPException(status_code=404, detail="Call not scored.")
+    if (
+        identity.role is not CompanionRole.MANAGER
+        or identity.bitrix_user_id is None
+        or ctx.manager_bitrix_user_id != identity.bitrix_user_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the manager who made the call can appeal its score.",
+        )
+    if await service.get_open_appeal_for_call(session, call_id) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An appeal for this call is already pending review.",
+        )
+    appeal = await service.create_appeal(
+        session,
+        call_id=call_id,
+        manager_bitrix_user_id=ctx.manager_bitrix_user_id,
+        created_by_bitrix_user_id=identity.bitrix_user_id,
+        department_bitrix_id=ctx.department_bitrix_id,
+        reason=payload.reason,
+    )
+    return await service.view_for_appeal(session, appeal)
+
+
+@router.get("/appeals", response_model=list[AppealView], tags=["companion"])
+async def list_appeals(
+    status_filter: str | None = Query(
+        default=None,
+        alias="status",
+        description="pending | accepted | rejected; default all",
+    ),
+    limit: int = Query(default=100, ge=1, le=500),
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[AppealView]:
+    """Appeals visible to the caller, newest first.
+
+    A head sees their scope's appeals (global = all, office РОП = own
+    department); a manager sees only their own. Pair with ``?status=pending``
+    for the head's review queue.
+    """
+    if identity.role is CompanionRole.HEAD:
+        return await service.list_appeals(
+            session,
+            department_bitrix_id=identity.department_id,
+            status=status_filter,
+            limit=limit,
+        )
+    return await service.list_appeals(
+        session,
+        manager_bitrix_user_id=identity.bitrix_user_id,
+        status=status_filter,
+        limit=limit,
+    )
+
+
+@router.post(
+    "/appeals/{appeal_id}/review",
+    response_model=AppealView,
+    tags=["companion"],
+)
+async def review_appeal(
+    appeal_id: int,
+    payload: AppealReview,
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> AppealView:
+    """РОП verdict: accept (optionally with a corrected percent) or reject.
+
+    Global head reviews any appeal; an office РОП only their own department's.
+    An ``override_percent`` on an accepted appeal becomes the score the cabinet
+    shows for that call everywhere.
+    """
+    ensure_head(identity)
+    appeal = await service.get_appeal(session, appeal_id)
+    if appeal is None:
+        raise HTTPException(status_code=404, detail="Appeal not found.")
+    if (
+        identity.department_id is not None
+        and appeal.department_bitrix_id != identity.department_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="A department head can only review their own department's appeals.",
+        )
+    reviewed = await service.review_appeal(
+        session,
+        appeal,
+        status=payload.status,
+        override_percent=payload.override_percent,
+        note=payload.note,
+        reviewed_by_bitrix_user_id=identity.bitrix_user_id,
+    )
+    return await service.view_for_appeal(session, reviewed)
 
 
 # --- Access management (head-tiered) -----------------------------------------

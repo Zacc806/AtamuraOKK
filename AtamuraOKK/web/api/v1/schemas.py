@@ -240,6 +240,77 @@ class TranscriptBlock(BaseModel):
     text: str
 
 
+class AppealView(BaseModel):
+    """A manager appeal against a call's ОКК score and its РОП verdict.
+
+    ``override_percent``/``override_okk_5`` are populated once a head accepts the
+    appeal with a numeric correction; until then (and on rejection) they are
+    null and the original LLM score stands. The trailing context fields
+    (``manager_name``/``started_at``/``original_percent``) let the head's review
+    list render without a second round-trip.
+    """
+
+    id: int
+    call_id: int
+    manager_bitrix_user_id: int
+    created_by_bitrix_user_id: int
+    department_id: int | None = Field(default=None, description="Bitrix department id")
+    reason: str | None = None
+    status: str = Field(description="pending | accepted | rejected")
+    override_percent: float | None = Field(
+        default=None,
+        description="РОП-corrected 0–100 percent, when set",
+    )
+    override_okk_5: int | None = Field(
+        default=None,
+        description="ОКК 1–5 derived from override_percent",
+    )
+    head_note: str | None = None
+    reviewed_by_bitrix_user_id: int | None = None
+    reviewed_at: datetime | None = None
+    created_at: datetime | None = None
+    manager_name: str | None = None
+    started_at: datetime | None = Field(
+        default=None,
+        description="The appealed call's start time",
+    )
+    original_percent: float | None = Field(
+        default=None,
+        description="The LLM percent being appealed (pre-override)",
+    )
+
+
+class AppealCreate(BaseModel):
+    """File an appeal against a call's score (manager → РОП)."""
+
+    reason: str | None = Field(
+        default=None,
+        description="Почему менеджер не согласен с оценкой ОКК",
+        max_length=2000,
+    )
+
+
+class AppealReview(BaseModel):
+    """A head's verdict on an appeal."""
+
+    status: Literal["accepted", "rejected"]
+    override_percent: float | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description="Corrected 0–100 percent (accepted appeals only)",
+    )
+    note: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _override_only_on_accept(self) -> AppealReview:
+        if self.status == "rejected" and self.override_percent is not None:
+            raise ValueError(
+                "override_percent is only valid when accepting an appeal",
+            )
+        return self
+
+
 class CallFeedback(BaseModel):
     """Full авто-разбор за 90 сек for a single call."""
 
@@ -268,6 +339,10 @@ class CallFeedback(BaseModel):
     )
     criteria: list[CriterionFeedback] = Field(default_factory=list)
     transcript: list[TranscriptBlock] = Field(default_factory=list)
+    appeal: AppealView | None = Field(
+        default=None,
+        description="The latest appeal on this call (status/verdict), if any",
+    )
 
 
 class MeetingFeedItem(BaseModel):

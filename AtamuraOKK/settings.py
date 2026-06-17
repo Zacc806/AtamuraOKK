@@ -137,6 +137,14 @@ class Settings(BaseSettings):
     # they yield turn-separated segments instead of one undifferentiated blob.
     # Stereo calls separate by audio channel and ignore this.
     yandex_speaker_labeling: bool = True
+    # Stereo channel -> role convention. Voximplant records the *customer* on the
+    # first channel (lowest channel_tag / left) and our *agent* (manager) on the
+    # second — the same layout for inbound and outbound, but the recording is not
+    # self-describing, so the mapping is fixed here. This is the 0-based channel
+    # that carries the agent; the other channel is the customer. Flip to 0 only if
+    # a telephony change reverses the layout (re-check % correct roles on a sample
+    # before a paid re-run).
+    stereo_agent_channel: int = 1
     # Which LLM scores calls: "anthropic" (Claude, the default) or "openai".
     scoring_provider: str = "anthropic"
     # Scoring model — needs Structured Outputs support (gpt-4o-2024-08-06+).

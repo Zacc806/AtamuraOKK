@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from AtamuraOKK.transcription.base import Segment
 from AtamuraOKK.transcription.yandex_async_provider import (
     _ordered_dialogue,
@@ -23,12 +25,14 @@ from AtamuraOKK.transcription.yandex_async_provider import (
 
 def test_stereo_channels_interleave_by_time() -> None:
     """Finals grouped by channel must come out ordered by start time."""
-    # Finals arrive grouped by channel (both ch0 finals, then the ch1 final);
-    # the result must still be ordered by start time across channels.
+    # Voximplant puts our agent (the one greeting with the brand) on channel "1"
+    # and the customer on channel "0" (see settings.stereo_agent_channel, default
+    # 1). Finals arrive grouped by channel; the result must still be ordered by
+    # start time across channels.
     utterances = [
-        _Utterance("0", 0, 1000, "Здравствуйте, Atamura"),
-        _Utterance("0", 2100, 3000, "По вашей заявке"),
-        _Utterance("1", 1100, 2000, "Да, слушаю"),
+        _Utterance("1", 0, 1000, "Здравствуйте, Atamura"),
+        _Utterance("1", 2100, 3000, "По вашей заявке"),
+        _Utterance("0", 1100, 2000, "Да, слушаю"),
     ]
     segs = _segments_by_channel(utterances)
 
@@ -40,9 +44,9 @@ def test_stereo_channels_interleave_by_time() -> None:
 def test_consecutive_same_speaker_merge() -> None:
     """Adjacent same-speaker utterances collapse into one turn."""
     utterances = [
-        _Utterance("0", 0, 500, "Алло"),
-        _Utterance("0", 500, 700, "это Atamura"),
-        _Utterance("1", 1000, 1500, "Да"),
+        _Utterance("1", 0, 500, "Алло"),
+        _Utterance("1", 500, 700, "это Atamura"),
+        _Utterance("0", 1000, 1500, "Да"),
     ]
     segs = _segments_by_channel(utterances)
 
@@ -51,6 +55,22 @@ def test_consecutive_same_speaker_merge() -> None:
     assert segs[0].text == "Алло это Atamura"
     assert segs[0].end == 0.7
     assert segs[1].speaker == "customer"
+
+
+def test_stereo_agent_channel_is_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The agent side follows settings.stereo_agent_channel, not a fixed channel."""
+    from AtamuraOKK.settings import settings
+
+    utterances = [
+        _Utterance("0", 0, 1000, "Здравствуйте, Atamura"),
+        _Utterance("1", 1100, 2000, "Да, слушаю"),
+    ]
+    # Flip the convention: agent now on channel "0".
+    monkeypatch.setattr(settings, "stereo_agent_channel", 0)
+    segs = _segments_by_channel(utterances)
+    assert [s.speaker for s in segs] == ["agent", "customer"]
 
 
 def test_mono_attributed_by_speaker_windows() -> None:

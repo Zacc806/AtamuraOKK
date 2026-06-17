@@ -11,6 +11,7 @@ that department), and not-found / bad-period handling.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Any, Self
 from zoneinfo import ZoneInfo
@@ -341,22 +342,30 @@ async def test_calls_feed_and_feedback(
     ]
 
 
-class _FakeDealBitrix:
-    """Stands in for BitrixClient in the deal→calls resolution.
+class _FakeCrmBitrix:
+    """Stands in for BitrixClient in the CRM card → calls resolution.
 
-    Replays ``crm.deal.get`` and ``crm.deal.contact.items.get``; pass
-    ``raises=True`` to exercise the degrade-to-direct-deal path.
+    Replays the reads ``_crm_entity_pairs`` makes: ``crm.deal.get`` /
+    ``crm.contact.get`` / ``crm.deal.contact.items.get`` via ``call``, and
+    ``crm.deal.list`` / ``crm.contact.list`` via ``list``. Pass ``raises=True``
+    to exercise the degrade-to-direct-entity path.
     """
 
     def __init__(
         self,
         *,
         deal: dict[str, Any] | None = None,
+        contact: dict[str, Any] | None = None,
         contacts: list[dict[str, Any]] | None = None,
+        deal_ids: list[int] | None = None,
+        contact_ids: list[int] | None = None,
         raises: bool = False,
     ) -> None:
         self.deal = deal
+        self.contact = contact
         self.contacts = contacts or []
+        self.deal_ids = deal_ids or []
+        self.contact_ids = contact_ids or []
         self.raises = raises
 
     async def __aenter__(self) -> Self:
@@ -370,14 +379,34 @@ class _FakeDealBitrix:
             raise BitrixError("ERR", "boom", method)
         if method == "crm.deal.get":
             return self.deal
+        if method == "crm.contact.get":
+            return self.contact
         if method == "crm.deal.contact.items.get":
             return self.contacts
         raise AssertionError(f"unexpected method {method}")
 
+    async def list(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        max_items: int | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        if self.raises:
+            raise BitrixError("ERR", "boom", method)
+        rows = {
+            "crm.deal.list": self.deal_ids,
+            "crm.contact.list": self.contact_ids,
+        }.get(method)
+        if rows is None:
+            raise AssertionError(f"unexpected list {method}")
+        for row_id in rows:
+            yield {"ID": str(row_id)}
 
-def _patch_deal_bitrix(
+
+def _patch_crm_bitrix(
     monkeypatch: pytest.MonkeyPatch,
-    fake: _FakeDealBitrix,
+    fake: _FakeCrmBitrix,
 ) -> None:
     monkeypatch.setattr(service, "BitrixClient", lambda *a, **k: fake)
 
@@ -389,9 +418,9 @@ async def test_deal_calls_resolved_via_contact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A deal's calls are found through its contact, not just the deal itself."""
-    _patch_deal_bitrix(
+    _patch_crm_bitrix(
         monkeypatch,
-        _FakeDealBitrix(deal={"CONTACT_ID": "123", "COMPANY_ID": "0"}),
+        _FakeCrmBitrix(deal={"CONTACT_ID": "123", "COMPANY_ID": "0"}),
     )
     mgr = await _seed_manager(dbsession, bitrix_user_id=520)
     via_contact = await _seed_scored_call(
@@ -436,7 +465,7 @@ async def test_deal_calls_degrade_when_bitrix_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A Bitrix failure still returns calls linked directly to the deal."""
-    _patch_deal_bitrix(monkeypatch, _FakeDealBitrix(raises=True))
+    _patch_crm_bitrix(monkeypatch, _FakeCrmBitrix(raises=True))
     mgr = await _seed_manager(dbsession, bitrix_user_id=521)
     direct = await _seed_scored_call(
         dbsession,
@@ -458,9 +487,9 @@ async def test_deal_calls_scoped_to_manager(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A manager sees only their own calls on a shared deal's contact."""
-    _patch_deal_bitrix(
+    _patch_crm_bitrix(
         monkeypatch,
-        _FakeDealBitrix(deal={"CONTACT_ID": "321", "COMPANY_ID": "0"}),
+        _FakeCrmBitrix(deal={"CONTACT_ID": "321", "COMPANY_ID": "0"}),
     )
     # manager_auth already seeded manager 701; reuse that row.
     me = (
@@ -486,6 +515,85 @@ async def test_deal_calls_scoped_to_manager(
     resp = await client.get("/api/v1/deals/536096/calls", headers=manager_auth)
     assert resp.status_code == 200
     assert [item["call_id"] for item in resp.json()] == [mine.id]
+
+
+async def test_crm_contact_calls_direct_match(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A contact card (where Bitrix lands on call-open) finds the contact's calls.
+
+    Calls link to the contact directly, plus any linked via the contact's deal.
+    """
+    _patch_crm_bitrix(
+        monkeypatch,
+        _FakeCrmBitrix(contact={"COMPANY_ID": "0"}, deal_ids=[536096]),
+    )
+    mgr = await _seed_manager(dbsession, bitrix_user_id=530)
+    on_contact = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="ct-1",
+        manager=mgr,
+        percent=91.0,
+        day=14,
+        crm_entity_type="CONTACT",
+        crm_entity_id=429546,
+    )
+    on_contact_deal = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="ct-2",
+        manager=mgr,
+        percent=72.0,
+        day=11,
+        crm_entity_type="DEAL",
+        crm_entity_id=536096,
+    )
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="ct-3",
+        manager=mgr,
+        percent=55.0,
+        crm_entity_type="CONTACT",
+        crm_entity_id=111,
+    )
+
+    resp = await client.get("/api/v1/crm/contact/429546/calls", headers=head_auth)
+    assert resp.status_code == 200
+    ids = [item["call_id"] for item in resp.json()]
+    assert ids == [on_contact.id, on_contact_deal.id]
+
+
+async def test_crm_contact_calls_degrade_when_bitrix_down(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even with Bitrix down, a contact card still matches the contact directly."""
+    _patch_crm_bitrix(monkeypatch, _FakeCrmBitrix(raises=True))
+    mgr = await _seed_manager(dbsession, bitrix_user_id=531)
+    direct = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="ct-d1",
+        manager=mgr,
+        percent=83.0,
+        crm_entity_type="CONTACT",
+        crm_entity_id=700700,
+    )
+    resp = await client.get("/api/v1/crm/contact/700700/calls", headers=head_auth)
+    assert resp.status_code == 200
+    assert [item["call_id"] for item in resp.json()] == [direct.id]
+
+
+async def test_crm_unknown_entity_type_404(
+    client: AsyncClient,
+    head_auth: dict[str, str],
+) -> None:
+    """An unsupported CRM entity type is rejected."""
+    resp = await client.get("/api/v1/crm/invoice/123/calls", headers=head_auth)
+    assert resp.status_code == 404
 
 
 async def test_feedback_unknown_call_404(
@@ -1742,3 +1850,271 @@ async def test_global_head_issue_keeps_no_dept_tie(
         select(Manager).where(Manager.bitrix_user_id == 841),
     )
     assert mgr is None
+
+
+# --- appeals (апелляции) -----------------------------------------------------
+
+
+async def _manager_701(session: AsyncSession) -> Manager:
+    """The manager the ``manager_auth`` fixture already seeded (Bitrix 701)."""
+    mgr = await session.scalar(select(Manager).where(Manager.bitrix_user_id == 701))
+    assert mgr is not None
+    return mgr
+
+
+async def test_manager_files_appeal(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+) -> None:
+    """A manager files an appeal on their own scored call → pending, with context."""
+    mgr = await _manager_701(dbsession)
+    call = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="ap1",
+        manager=mgr,
+        percent=70.0,
+    )
+    resp = await client.post(
+        f"/api/v1/calls/{call.id}/appeal",
+        headers=manager_auth,
+        json={"reason": "Клиент сам бросил трубку, оценка несправедлива"},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["status"] == "pending"
+    assert body["call_id"] == call.id
+    assert body["manager_bitrix_user_id"] == 701
+    assert body["original_percent"] == 70.0
+    assert body["override_percent"] is None
+    assert body["reason"].startswith("Клиент")
+
+
+async def test_manager_cannot_appeal_another_managers_call(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+) -> None:
+    """Only the call's own manager may appeal it."""
+    other = await _seed_manager(dbsession, bitrix_user_id=702)
+    call = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="ap-other",
+        manager=other,
+        percent=60.0,
+    )
+    resp = await client.post(
+        f"/api/v1/calls/{call.id}/appeal",
+        headers=manager_auth,
+        json={"reason": "не моя"},
+    )
+    assert resp.status_code == 403
+
+
+async def test_appeal_on_unscored_call_404(
+    client: AsyncClient,
+    manager_auth: dict[str, str],
+) -> None:
+    """Appealing a call with no score returns 404."""
+    resp = await client.post(
+        "/api/v1/calls/999999/appeal",
+        headers=manager_auth,
+        json={"reason": "нет такой"},
+    )
+    assert resp.status_code == 404
+
+
+async def test_duplicate_pending_appeal_conflicts(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+) -> None:
+    """A second appeal while one is still pending returns 409."""
+    mgr = await _manager_701(dbsession)
+    call = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="ap-dup",
+        manager=mgr,
+        percent=72.0,
+    )
+    path = f"/api/v1/calls/{call.id}/appeal"
+    first = await client.post(path, headers=manager_auth, json={"reason": "раз"})
+    assert first.status_code == 201
+    second = await client.post(path, headers=manager_auth, json={"reason": "два"})
+    assert second.status_code == 409
+
+
+async def test_head_lists_and_overrides_score(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+    head_auth: dict[str, str],
+) -> None:
+    """Head accepts an appeal with a corrected percent; it surfaces everywhere."""
+    mgr = await _manager_701(dbsession)
+    call = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="ap-ovr",
+        manager=mgr,
+        percent=70.0,  # zone risk, окк 1
+    )
+    filed = await client.post(
+        f"/api/v1/calls/{call.id}/appeal",
+        headers=manager_auth,
+        json={"reason": "оценка занижена"},
+    )
+    appeal_id = filed.json()["id"]
+
+    # The head's review queue surfaces it with call context.
+    queue = await client.get("/api/v1/appeals?status=pending", headers=head_auth)
+    assert queue.status_code == 200
+    rows = queue.json()
+    assert [r["id"] for r in rows] == [appeal_id]
+    assert rows[0]["original_percent"] == 70.0
+
+    # Accept with a corrected percent.
+    review = await client.post(
+        f"/api/v1/appeals/{appeal_id}/review",
+        headers=head_auth,
+        json={"status": "accepted", "override_percent": 88.0, "note": "перепроверено"},
+    )
+    assert review.status_code == 200
+    rb = review.json()
+    assert rb["status"] == "accepted"
+    assert rb["override_percent"] == 88.0
+    assert rb["override_okk_5"] == 4
+
+    # The override now drives the per-call feedback...
+    fb = (
+        await client.get(f"/api/v1/calls/{call.id}/feedback", headers=head_auth)
+    ).json()
+    assert fb["percent"] == 88.0
+    assert fb["zone"] == "strong"
+    assert fb["okk_5"] == 4
+    assert fb["appeal"]["status"] == "accepted"
+    assert fb["appeal"]["original_percent"] == 70.0
+
+    # ...and the aggregate scorecard.
+    card = (
+        await client.get(
+            f"/api/v1/managers/701/scorecard?period={_PERIOD}",
+            headers=head_auth,
+        )
+    ).json()
+    assert card["okk"]["percent"] == 88.0
+    assert card["okk"]["score_5"] == 4
+    assert card["okk"]["zone"] == "strong"
+
+
+async def test_head_rejects_appeal_leaves_score(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+    head_auth: dict[str, str],
+) -> None:
+    """A rejected appeal records the verdict but leaves the original score."""
+    mgr = await _manager_701(dbsession)
+    call = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="ap-rej",
+        manager=mgr,
+        percent=70.0,
+    )
+    filed = await client.post(
+        f"/api/v1/calls/{call.id}/appeal",
+        headers=manager_auth,
+        json={"reason": "не согласен"},
+    )
+    appeal_id = filed.json()["id"]
+    review = await client.post(
+        f"/api/v1/appeals/{appeal_id}/review",
+        headers=head_auth,
+        json={"status": "rejected", "note": "оценка верная"},
+    )
+    assert review.status_code == 200
+    assert review.json()["override_percent"] is None
+
+    fb = (
+        await client.get(f"/api/v1/calls/{call.id}/feedback", headers=head_auth)
+    ).json()
+    assert fb["percent"] == 70.0
+    assert fb["appeal"]["status"] == "rejected"
+
+
+async def test_manager_cannot_review_appeals(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+) -> None:
+    """The review endpoint is head-only."""
+    mgr = await _manager_701(dbsession)
+    call = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="ap-mgr-review",
+        manager=mgr,
+        percent=70.0,
+    )
+    filed = await client.post(
+        f"/api/v1/calls/{call.id}/appeal",
+        headers=manager_auth,
+        json={"reason": "x"},
+    )
+    appeal_id = filed.json()["id"]
+    resp = await client.post(
+        f"/api/v1/appeals/{appeal_id}/review",
+        headers=manager_auth,
+        json={"status": "accepted", "override_percent": 90.0},
+    )
+    assert resp.status_code == 403
+
+
+async def test_scoped_head_only_reviews_own_department(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    op_department: Department,
+    head_auth: dict[str, str],
+    dept_head_auth: dict[str, str],
+) -> None:
+    """An office head can't review an appeal from outside their department."""
+    # A manager in a *different* department files an appeal.
+    other_dept = Department(bitrix_id=92, name="ОП Астана")
+    dbsession.add(other_dept)
+    await dbsession.flush()
+    mgr = await _seed_manager(
+        dbsession,
+        bitrix_user_id=910,
+        department=other_dept,
+    )
+    await _seed_companion_user(
+        dbsession,
+        key="mgr-910-key",
+        role=CompanionRole.MANAGER,
+        bitrix_user_id=910,
+    )
+    call = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="ap-foreign",
+        manager=mgr,
+        percent=70.0,
+    )
+    filed = await client.post(
+        f"/api/v1/calls/{call.id}/appeal",
+        headers=_headers("mgr-910-key"),
+        json={"reason": "из другого отдела"},
+    )
+    appeal_id = filed.json()["id"]
+
+    # The dept-91 head is scoped out of it…
+    blocked = await client.post(
+        f"/api/v1/appeals/{appeal_id}/review",
+        headers=dept_head_auth,
+        json={"status": "rejected"},
+    )
+    assert blocked.status_code == 403
+    # …but the global head can review it.
+    ok = await client.post(
+        f"/api/v1/appeals/{appeal_id}/review",
+        headers=head_auth,
+        json={"status": "rejected"},
+    )
+    assert ok.status_code == 200

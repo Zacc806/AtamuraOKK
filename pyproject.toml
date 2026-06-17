@@ -158,6 +158,8 @@ line-length = 88
 ]
 # Intentionally full of Cyrillic (Kazakh) letters for language detection.
 "AtamuraOKK/transcription/language.py" = ["RUF001", "RUF002", "RUF003"]
+# Brand/name mis-hearing corrections — intentionally full of Cyrillic.
+"AtamuraOKK/transcription/glossary.py" = ["RUF001", "RUF002", "RUF003"]
 # Scoring prompts/rubric/schema are intentionally in Russian.
 "AtamuraOKK/scoring/*" = ["RUF001", "RUF002", "RUF003"]
 # Report narrative/render are intentionally in Russian.

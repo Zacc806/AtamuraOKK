@@ -28,6 +28,7 @@ from AtamuraOKK.storage import get_storage
 from AtamuraOKK.storage.base import ObjectStorage
 from AtamuraOKK.transcription.base import AsyncTranscriber, Segment, TranscriptResult
 from AtamuraOKK.transcription.factory import get_transcriber
+from AtamuraOKK.transcription.glossary import correct_terms
 from AtamuraOKK.transcription.language import detect_language
 
 
@@ -47,6 +48,13 @@ def _blocks(segments: list[Segment]) -> str:
     return "\n\n".join(parts)
 
 
+def _apply_glossary(result: TranscriptResult) -> None:
+    """Repair known brand/name mis-hearings in-place (full text + each segment)."""
+    result.full_text = correct_terms(result.full_text)
+    for seg in result.segments:
+        seg.text = correct_terms(seg.text)
+
+
 async def _transcribe_audio(
     transcriber: AsyncTranscriber,
     audio_path: Path,
@@ -63,9 +71,11 @@ async def _transcribe_audio(
     segments: list[Segment] = []
     model_label = ""
     if channels >= 2:
-        for idx, speaker in ((0, "agent"), (1, "customer")):
+        agent_ch = settings.stereo_agent_channel
+        sides = {agent_ch: "agent", 1 - agent_ch: "customer"}
+        for idx in (0, 1):
             chan = extract_channel(audio_path, idx, workdir / f"ch{idx}.wav")
-            res = await transcriber.transcribe_async(chan, speaker=speaker)
+            res = await transcriber.transcribe_async(chan, speaker=sides[idx])
             segments.extend(res.segments)
             model_label = res.model
     else:
@@ -174,6 +184,9 @@ async def transcribe_one(
     except Exception as exc:  # record + move on
         error = f"transcription: {exc}"
         logger.warning("Transcription failed for {id}: {e}", id=bx_id, e=exc)
+
+    if result is not None:
+        _apply_glossary(result)
 
     async with session_scope() as session:
         call = await session.get(Call, call_id)
