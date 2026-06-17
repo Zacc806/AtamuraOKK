@@ -12,7 +12,7 @@ that department), and not-found / bad-period handling.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Self
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -20,6 +20,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from AtamuraOKK.bitrix import BitrixError
 from AtamuraOKK.db.models.call import Call
 from AtamuraOKK.db.models.companion_user import CompanionUser
 from AtamuraOKK.db.models.department import Department
@@ -338,6 +339,153 @@ async def test_calls_feed_and_feedback(
         {"speaker": "agent", "text": "Добрый день!"},
         {"speaker": "customer", "text": "Здравствуйте."},
     ]
+
+
+class _FakeDealBitrix:
+    """Stands in for BitrixClient in the deal→calls resolution.
+
+    Replays ``crm.deal.get`` and ``crm.deal.contact.items.get``; pass
+    ``raises=True`` to exercise the degrade-to-direct-deal path.
+    """
+
+    def __init__(
+        self,
+        *,
+        deal: dict[str, Any] | None = None,
+        contacts: list[dict[str, Any]] | None = None,
+        raises: bool = False,
+    ) -> None:
+        self.deal = deal
+        self.contacts = contacts or []
+        self.raises = raises
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        if self.raises:
+            raise BitrixError("ERR", "boom", method)
+        if method == "crm.deal.get":
+            return self.deal
+        if method == "crm.deal.contact.items.get":
+            return self.contacts
+        raise AssertionError(f"unexpected method {method}")
+
+
+def _patch_deal_bitrix(
+    monkeypatch: pytest.MonkeyPatch,
+    fake: _FakeDealBitrix,
+) -> None:
+    monkeypatch.setattr(service, "BitrixClient", lambda *a, **k: fake)
+
+
+async def test_deal_calls_resolved_via_contact(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deal's calls are found through its contact, not just the deal itself."""
+    _patch_deal_bitrix(
+        monkeypatch,
+        _FakeDealBitrix(deal={"CONTACT_ID": "123", "COMPANY_ID": "0"}),
+    )
+    mgr = await _seed_manager(dbsession, bitrix_user_id=520)
+    via_contact = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="deal-c1",
+        manager=mgr,
+        percent=90.0,
+        day=10,
+        crm_entity_type="CONTACT",
+        crm_entity_id=123,
+    )
+    via_deal = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="deal-c2",
+        manager=mgr,
+        percent=70.0,
+        day=12,
+        crm_entity_type="DEAL",
+        crm_entity_id=536096,
+    )
+    # A different contact's call must NOT come back.
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="deal-c3",
+        manager=mgr,
+        percent=50.0,
+        crm_entity_type="CONTACT",
+        crm_entity_id=999,
+    )
+
+    resp = await client.get("/api/v1/deals/536096/calls", headers=head_auth)
+    assert resp.status_code == 200
+    ids = [item["call_id"] for item in resp.json()]
+    # Both the contact-linked and the deal-linked call, newest first.
+    assert ids == [via_deal.id, via_contact.id]
+
+
+async def test_deal_calls_degrade_when_bitrix_down(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Bitrix failure still returns calls linked directly to the deal."""
+    _patch_deal_bitrix(monkeypatch, _FakeDealBitrix(raises=True))
+    mgr = await _seed_manager(dbsession, bitrix_user_id=521)
+    direct = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="deal-d1",
+        manager=mgr,
+        percent=80.0,
+        crm_entity_type="DEAL",
+        crm_entity_id=440000,
+    )
+    resp = await client.get("/api/v1/deals/440000/calls", headers=head_auth)
+    assert resp.status_code == 200
+    assert [item["call_id"] for item in resp.json()] == [direct.id]
+
+
+async def test_deal_calls_scoped_to_manager(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manager sees only their own calls on a shared deal's contact."""
+    _patch_deal_bitrix(
+        monkeypatch,
+        _FakeDealBitrix(deal={"CONTACT_ID": "321", "COMPANY_ID": "0"}),
+    )
+    # manager_auth already seeded manager 701; reuse that row.
+    me = (
+        await dbsession.execute(select(Manager).where(Manager.bitrix_user_id == 701))
+    ).scalar_one()
+    other = await _seed_manager(dbsession, bitrix_user_id=702)
+    mine = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="deal-m1",
+        manager=me,
+        percent=88.0,
+        crm_entity_type="CONTACT",
+        crm_entity_id=321,
+    )
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="deal-m2",
+        manager=other,
+        percent=88.0,
+        crm_entity_type="CONTACT",
+        crm_entity_id=321,
+    )
+    resp = await client.get("/api/v1/deals/536096/calls", headers=manager_auth)
+    assert resp.status_code == 200
+    assert [item["call_id"] for item in resp.json()] == [mine.id]
 
 
 async def test_feedback_unknown_call_404(

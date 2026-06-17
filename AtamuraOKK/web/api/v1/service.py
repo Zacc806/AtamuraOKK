@@ -14,16 +14,19 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from loguru import logger
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from AtamuraOKK.bitrix import BitrixClient, BitrixError, crm_card_url
 from AtamuraOKK.db.models.department import Department
+from AtamuraOKK.db.models.enums import CompanionRole
 from AtamuraOKK.db.models.manager import Manager
 from AtamuraOKK.db.models.meeting import Meeting
 from AtamuraOKK.db.models.rubric_version import RubricVersion
 from AtamuraOKK.settings import settings
 from AtamuraOKK.web.api.v1 import day, okk
+from AtamuraOKK.web.api.v1.auth import CompanionIdentity
 from AtamuraOKK.web.api.v1.schemas import (
     CallFeedback,
     CallFeedItem,
@@ -432,6 +435,122 @@ async def get_calls_feed(
             bitrix_url=crm_card_url(r.crm_entity_type, r.crm_entity_id),
         )
         for r in rows
+    ]
+
+
+def _as_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _deal_entity_pairs(deal_id: int) -> list[tuple[str, int]]:
+    """CRM entities a deal's calls may be attached to (deal + company + contacts).
+
+    Calls almost always link to the deal's **contact**, not the deal itself, so
+    the deal is resolved live through Bitrix. Best-effort: any Bitrix failure
+    degrades to just the deal, so directly-linked calls are still returned.
+    """
+    pairs: set[tuple[str, int]] = {("DEAL", deal_id)}
+    try:
+        async with BitrixClient() as bx:
+            deal = await bx.call("crm.deal.get", {"id": deal_id})
+            if deal:
+                company_id = _as_int(deal.get("COMPANY_ID"))
+                if company_id:
+                    pairs.add(("COMPANY", company_id))
+                contact_id = _as_int(deal.get("CONTACT_ID"))
+                if contact_id:
+                    pairs.add(("CONTACT", contact_id))
+            items = await bx.call("crm.deal.contact.items.get", {"id": deal_id})
+            for item in items or []:
+                contact_id = _as_int(item.get("CONTACT_ID"))
+                if contact_id:
+                    pairs.add(("CONTACT", contact_id))
+    except BitrixError as exc:
+        logger.warning("Deal {id} entity resolution failed: {e}", id=deal_id, e=exc)
+    return list(pairs)
+
+
+def _can_view_deal_row(
+    identity: CompanionIdentity,
+    manager_bitrix_user_id: int | None,
+    department_bitrix_id: int | None,
+) -> bool:
+    """Whether the caller may see a deal call row (mirrors ``ensure_can_view_manager``).
+
+    Filtered, not raised: one deal can hold several managers' calls, so the
+    feed is trimmed to the visible subset — a manager sees only their own, a
+    scoped head only their department's, the global head everything.
+    """
+    if identity.role is CompanionRole.HEAD:
+        if identity.department_id is None:
+            return True
+        return department_bitrix_id == identity.department_id
+    return (
+        manager_bitrix_user_id is not None
+        and manager_bitrix_user_id == identity.bitrix_user_id
+    )
+
+
+async def get_deal_calls(
+    session: AsyncSession,
+    deal_id: int,
+    identity: CompanionIdentity,
+) -> list[CallFeedItem]:
+    """Scored calls attached to a Bitrix deal, newest first.
+
+    The deal is resolved through Bitrix to its contact(s)/company and calls are
+    matched on any of those CRM entities (or the deal itself). Rows the caller
+    may not see are filtered out, so an unrelated or out-of-scope deal returns
+    an empty list rather than leaking another manager's calls.
+    """
+    pairs = await _deal_entity_pairs(deal_id)
+    conditions: list[str] = []
+    params: dict[str, Any] = {}
+    for i, (entity_type, entity_id) in enumerate(pairs):
+        conditions.append(f"(crm_entity_type = :t{i} AND crm_entity_id = :i{i})")
+        params[f"t{i}"] = entity_type
+        params[f"i{i}"] = entity_id
+    rows = (
+        await session.execute(
+            # ``conditions`` are code-generated placeholder pairs; all values are
+            # bound via :params — no user text reaches the SQL string.
+            text(
+                "SELECT call_id, bitrix_call_id, started_at, percent, zone, "  # noqa: S608
+                "target_status, sentiment_customer, red_flags, call_type, "
+                "is_qualification_call, summary, crm_entity_type, crm_entity_id, "
+                "manager_bitrix_user_id, department_bitrix_id "
+                "FROM call_scores_latest "
+                f"WHERE {' OR '.join(conditions)} "
+                "ORDER BY started_at DESC NULLS LAST",
+            ),
+            params,
+        )
+    ).all()
+    return [
+        CallFeedItem(
+            call_id=r.call_id,
+            bitrix_call_id=r.bitrix_call_id,
+            started_at=r.started_at,
+            percent=float(r.percent) if r.percent is not None else None,
+            zone=r.zone,
+            okk_5=okk.okk_5(float(r.percent) if r.percent is not None else None),
+            target_status=r.target_status,
+            sentiment_customer=r.sentiment_customer,
+            red_flags=_flags(r.red_flags),
+            call_type=r.call_type,
+            is_qualification_call=_is_qual(r),
+            summary=r.summary or "",
+            bitrix_url=crm_card_url(r.crm_entity_type, r.crm_entity_id),
+        )
+        for r in rows
+        if _can_view_deal_row(
+            identity,
+            r.manager_bitrix_user_id,
+            r.department_bitrix_id,
+        )
     ]
 
 

@@ -189,6 +189,27 @@ async def manager_feed(
     return await service.get_unified_feed(session, manager_id, since, limit)
 
 
+@router.get(
+    "/deals/{deal_id}/calls",
+    response_model=list[CallFeedItem],
+    tags=["companion"],
+)
+async def deal_calls(
+    deal_id: int,
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[CallFeedItem]:
+    """Scored calls attached to a Bitrix deal, newest first.
+
+    ``deal_id`` is the id in the CRM card URL («…/crm/deal/details/536096/»).
+    Calls usually link to the deal's contact, so the deal is resolved through
+    Bitrix to its contact(s)/company and matched on any of those entities.
+    Scoped to what the caller may see (a manager only their own calls, a scoped
+    head only their department's), so an unrelated deal returns an empty list.
+    """
+    return await service.get_deal_calls(session, deal_id, identity)
+
+
 @router.get("/rubrics", response_model=list[RubricView], tags=["companion"])
 async def active_rubrics(
     _identity: CompanionIdentity = Depends(get_companion_identity),
