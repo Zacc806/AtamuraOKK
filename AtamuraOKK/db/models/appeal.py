@@ -52,6 +52,10 @@ class Appeal(Base):
     # The manager's Bitrix department id at filing time, so a scoped office head
     # can list only their own department's appeals without a join.
     department_bitrix_id: Mapped[int | None] = mapped_column(BigInteger, index=True)
+    # The checklist block the manager contests (its block_name from the
+    # auto-review criteria), or NULL if they dispute the call's score as a whole.
+    disputed_block: Mapped[str | None] = mapped_column(String(length=255))
+    # The manager's own feedback on the call - why they disagree.
     reason: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(
         String(length=16),

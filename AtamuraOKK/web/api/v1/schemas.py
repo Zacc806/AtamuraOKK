@@ -255,6 +255,10 @@ class AppealView(BaseModel):
     manager_bitrix_user_id: int
     created_by_bitrix_user_id: int
     department_id: int | None = Field(default=None, description="Bitrix department id")
+    disputed_block: str | None = Field(
+        default=None,
+        description="The checklist block the manager contests (block_name), if any",
+    )
     reason: str | None = None
     status: str = Field(description="pending | accepted | rejected")
     override_percent: float | None = Field(
@@ -283,9 +287,14 @@ class AppealView(BaseModel):
 class AppealCreate(BaseModel):
     """File an appeal against a call's score (manager → РОП)."""
 
+    disputed_block: str | None = Field(
+        default=None,
+        description="Блок чек-листа, с которым менеджер не согласен (block_name)",
+        max_length=255,
+    )
     reason: str | None = Field(
         default=None,
-        description="Почему менеджер не согласен с оценкой ОКК",
+        description="Обратная связь менеджера по звонку — почему не согласен с оценкой",
         max_length=2000,
     )
 

@@ -823,6 +823,7 @@ def _appeal_view(
         manager_bitrix_user_id=appeal.manager_bitrix_user_id,
         created_by_bitrix_user_id=appeal.created_by_bitrix_user_id,
         department_id=appeal.department_bitrix_id,
+        disputed_block=appeal.disputed_block,
         reason=appeal.reason,
         status=appeal.status,
         override_percent=override,
@@ -890,6 +891,7 @@ async def create_appeal(
     manager_bitrix_user_id: int,
     created_by_bitrix_user_id: int,
     department_bitrix_id: int | None,
+    disputed_block: str | None,
     reason: str | None,
 ) -> Appeal:
     """Persist a new pending appeal and return it."""
@@ -898,6 +900,7 @@ async def create_appeal(
         manager_bitrix_user_id=manager_bitrix_user_id,
         created_by_bitrix_user_id=created_by_bitrix_user_id,
         department_bitrix_id=department_bitrix_id,
+        disputed_block=disputed_block,
         reason=reason,
         status=APPEAL_PENDING,
     )

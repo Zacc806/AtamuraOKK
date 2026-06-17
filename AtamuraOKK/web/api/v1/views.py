@@ -394,6 +394,7 @@ async def file_call_appeal(
         manager_bitrix_user_id=ctx.manager_bitrix_user_id,
         created_by_bitrix_user_id=identity.bitrix_user_id,
         department_bitrix_id=ctx.department_bitrix_id,
+        disputed_block=payload.disputed_block,
         reason=payload.reason,
     )
     return await service.view_for_appeal(session, appeal)

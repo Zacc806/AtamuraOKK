@@ -1878,7 +1878,10 @@ async def test_manager_files_appeal(
     resp = await client.post(
         f"/api/v1/calls/{call.id}/appeal",
         headers=manager_auth,
-        json={"reason": "Клиент сам бросил трубку, оценка несправедлива"},
+        json={
+            "disputed_block": "Установление контакта",
+            "reason": "Клиент сам бросил трубку, оценка несправедлива",
+        },
     )
     assert resp.status_code == 201
     body = resp.json()
@@ -1887,6 +1890,7 @@ async def test_manager_files_appeal(
     assert body["manager_bitrix_user_id"] == 701
     assert body["original_percent"] == 70.0
     assert body["override_percent"] is None
+    assert body["disputed_block"] == "Установление контакта"
     assert body["reason"].startswith("Клиент")
 
 
@@ -1961,7 +1965,7 @@ async def test_head_lists_and_overrides_score(
     filed = await client.post(
         f"/api/v1/calls/{call.id}/appeal",
         headers=manager_auth,
-        json={"reason": "оценка занижена"},
+        json={"disputed_block": "Установление контакта", "reason": "оценка занижена"},
     )
     appeal_id = filed.json()["id"]
 
@@ -1971,6 +1975,7 @@ async def test_head_lists_and_overrides_score(
     rows = queue.json()
     assert [r["id"] for r in rows] == [appeal_id]
     assert rows[0]["original_percent"] == 70.0
+    assert rows[0]["disputed_block"] == "Установление контакта"
 
     # Accept with a corrected percent.
     review = await client.post(
