@@ -128,10 +128,18 @@ async def _push_batch(
     payloads: list[dict[str, Any]],
 ) -> list[int]:
     """Upsert payloads into ``meetings``; returns the pushed Bitrix file ids."""
-    from sqlalchemy import func  # noqa: PLC0415
+    from sqlalchemy import String, func  # noqa: PLC0415
     from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: PLC0415
 
     from AtamuraOKK.db.models.meeting import Meeting  # noqa: PLC0415
+
+    # A chatty LLM can return e.g. a call_type far longer than its VARCHAR;
+    # truncate every string column to its width so the upsert can never fail.
+    str_limits = {
+        c.name: c.type.length
+        for c in Meeting.__table__.columns
+        if isinstance(c.type, String) and c.type.length is not None
+    }
 
     uids = {
         int(p["uploaded_by_bitrix_id"])
@@ -147,6 +155,17 @@ async def _push_batch(
             **payload,
             "manager_id": manager_ids.get(int(uid)) if uid is not None else None,
         }
+        for col, limit in str_limits.items():
+            text = values.get(col)
+            if isinstance(text, str) and len(text) > limit:
+                logger.warning(
+                    "Meeting push: clamped {col} ({n}>{limit}) for file {fid}",
+                    col=col,
+                    n=len(text),
+                    limit=limit,
+                    fid=payload["bitrix_file_id"],
+                )
+                values[col] = text[:limit]
         stmt = pg_insert(Meeting).values(**values)
         stmt = stmt.on_conflict_do_update(
             index_elements=[Meeting.bitrix_file_id],

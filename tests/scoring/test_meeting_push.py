@@ -212,6 +212,32 @@ async def test_push_skips_bad_score_payload(
         assert store.get(2)["pushed_at"] is None
 
 
+async def test_push_clamps_overlong_call_type(
+    dbsession: AsyncSession,
+    tmp_path: Path,
+) -> None:
+    """A chatty LLM call_type is truncated to the column width, not dropped."""
+    long_type = "фрагмент встречи (предположительно повторная или середина первичной)"
+    assert len(long_type) > 64  # would overflow VARCHAR(64) without clamping
+
+    with MeetingStore(tmp_path / "m.db") as store:
+        score = json.loads(_score_json())
+        score["call_type"] = long_type
+        store.upsert_new(_file(1))
+        store.mark_downloaded(1, "/audio/1.mp4", 1800)
+        store.mark_transcribed(1, "[agent] добрый день", "ru")
+        store.mark_scored(1, json.dumps(score, ensure_ascii=False), 80.0, passed=True)
+
+        stats = await push_pending(store=store, session=dbsession)
+        assert (stats.attempted, stats.pushed, stats.failed) == (1, 1, 0)
+
+    meeting = await dbsession.scalar(
+        select(Meeting).where(Meeting.bitrix_file_id == 1),
+    )
+    assert meeting is not None
+    assert meeting.call_type == long_type[:64]
+
+
 def test_store_migrates_old_schema(tmp_path: Path) -> None:
     """Opening a pre-push-era meetings.db adds the new columns in place."""
     db = tmp_path / "old.db"

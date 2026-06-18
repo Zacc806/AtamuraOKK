@@ -70,7 +70,7 @@ class Meeting(Base):
     rubric_version: Mapped[str | None] = mapped_column(String(length=64))
     score_pct: Mapped[float | None] = mapped_column(Numeric(5, 2))
     passed: Mapped[bool | None] = mapped_column(Boolean)
-    call_type: Mapped[str | None] = mapped_column(String(length=32))
+    call_type: Mapped[str | None] = mapped_column(String(length=64))
     manager_tone: Mapped[str | None] = mapped_column(String(length=32))
     needs_human_review: Mapped[bool] = mapped_column(
         Boolean,
