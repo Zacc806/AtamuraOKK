@@ -1,5 +1,8 @@
 ### Python template
 
+# Large binary artifacts (e.g. spike audio bundles — never commit, blew GitHub's 100MB limit)
+*.zip
+
 .idea/
 .vscode/
 # Byte-compiled / optimized / DLL files
