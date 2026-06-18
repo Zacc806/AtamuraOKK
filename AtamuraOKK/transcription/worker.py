@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from loguru import logger
@@ -23,6 +24,7 @@ from AtamuraOKK.db.models.enums import CallStatus
 from AtamuraOKK.db.models.transcript import Transcript
 from AtamuraOKK.db.session import session_scope
 from AtamuraOKK.dispatch.claim import claim_ready
+from AtamuraOKK.glossary.llm_correct import EntityCorrector
 from AtamuraOKK.settings import settings
 from AtamuraOKK.storage import get_storage
 from AtamuraOKK.storage.base import ObjectStorage
@@ -53,6 +55,34 @@ def _apply_glossary(result: TranscriptResult) -> None:
     result.full_text = correct_terms(result.full_text)
     for seg in result.segments:
         seg.text = correct_terms(seg.text)
+
+
+@lru_cache(maxsize=1)
+def _build_corrector() -> EntityCorrector:
+    """Build the entity corrector once per process (broker calls one per task)."""
+    return EntityCorrector(
+        api_key=settings.anthropic_api_key,
+        model=settings.glossary_correct_model,
+    )
+
+
+def _get_corrector() -> EntityCorrector | None:
+    """The shared LLM entity corrector, or None when correction is disabled."""
+    if not settings.glossary_correct_enabled:
+        return None
+    return _build_corrector()
+
+
+async def _apply_entity_correction(result: TranscriptResult) -> None:
+    """LLM-correct ЖК names & addresses in ``full_text`` (no-op if disabled).
+
+    v1 corrects ``full_text`` only — that is what scoring reads — leaving the raw
+    per-segment STT text untouched to keep this to one API call per transcript.
+    """
+    corrector = _get_corrector()
+    if corrector is None:
+        return
+    result.full_text = await corrector.correct(result.full_text)
 
 
 async def _transcribe_audio(
@@ -187,6 +217,7 @@ async def transcribe_one(
 
     if result is not None:
         _apply_glossary(result)
+        await _apply_entity_correction(result)
 
     async with session_scope() as session:
         call = await session.get(Call, call_id)

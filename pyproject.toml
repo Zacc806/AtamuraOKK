@@ -160,6 +160,10 @@ line-length = 88
 "AtamuraOKK/transcription/language.py" = ["RUF001", "RUF002", "RUF003"]
 # Brand/name mis-hearing corrections — intentionally full of Cyrillic.
 "AtamuraOKK/transcription/glossary.py" = ["RUF001", "RUF002", "RUF003"]
+# Canonical ЖК names/addresses + the correction prompt — intentionally Cyrillic.
+"AtamuraOKK/glossary/*" = ["RUF001", "RUF002", "RUF003"]
+# Glossary sample harness docstring carries Russian business terms (ЖК).
+"AtamuraOKK/spike/glossary_sample.py" = ["RUF001", "RUF002", "RUF003"]
 # Scoring prompts/rubric/schema are intentionally in Russian.
 "AtamuraOKK/scoring/*" = ["RUF001", "RUF002", "RUF003"]
 # Report narrative/render are intentionally in Russian.

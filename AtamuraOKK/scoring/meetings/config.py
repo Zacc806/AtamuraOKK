@@ -34,6 +34,12 @@ class MeetingScoringConfig(BaseSettings):
     meetings_scoring_engine: str = "anthropic"
     openai_scoring_model: str = "gpt-4o"
 
+    # Post-STT LLM correction of ЖК names & addresses (shared with the call
+    # pipeline; both read the same ATAMURAOKK_GLOSSARY_* vars from one .env).
+    # Off by default — enable once a sample validates the prompt/glossary.
+    glossary_correct_enabled: bool = False
+    glossary_correct_model: str = "claude-haiku-4-5"
+
     # Scoring engine knobs.
     score_pass_threshold: int = 75
     score_max_retries: int = 5

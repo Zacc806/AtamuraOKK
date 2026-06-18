@@ -19,6 +19,7 @@ from typing import Protocol, runtime_checkable
 
 from loguru import logger
 
+from AtamuraOKK.glossary.llm_correct import EntityCorrector
 from AtamuraOKK.scoring.meetings.config import config
 from AtamuraOKK.scoring.meetings.media import to_mono_opus, to_mono_wav
 from AtamuraOKK.scoring.meetings.store import MeetingStatus, MeetingStore
@@ -122,6 +123,14 @@ async def transcribe_pending(
     transcriber = transcriber or build_transcriber()
     suffix = getattr(transcriber, "audio_suffix", ".wav")
     semaphore = asyncio.Semaphore(max(1, concurrency))
+    corrector = (
+        EntityCorrector(
+            api_key=config.anthropic_api_key,
+            model=config.glossary_correct_model,
+        )
+        if config.glossary_correct_enabled
+        else None
+    )
 
     async def _one(row: sqlite3.Row) -> None:
         stats.attempted += 1
@@ -136,6 +145,11 @@ async def transcribe_pending(
                         _prepare_audio, Path(audio_path), Path(tmp), suffix=suffix
                     )
                     result = await transcriber.transcribe(src)
+                    if corrector is not None:
+                        result = TranscriptText(
+                            text=await corrector.correct(result.text),
+                            language=result.language,
+                        )
             if not result.text.strip():
                 raise ValueError("empty transcript")
             store.mark_transcribed(file_id, result.text, result.language)

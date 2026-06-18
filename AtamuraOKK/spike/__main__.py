@@ -41,6 +41,12 @@ def _cmd_wazzup_probe(_: argparse.Namespace) -> None:
     asyncio.run(run_probe())
 
 
+def _cmd_glossary_sample(args: argparse.Namespace) -> None:
+    from AtamuraOKK.spike.glossary_sample import run_sample  # noqa: PLC0415
+
+    run_sample(limit=args.limit)
+
+
 def main() -> None:
     """Parse args and dispatch to the selected spike stage."""
     parser = argparse.ArgumentParser(
@@ -73,6 +79,13 @@ def main() -> None:
         "wazzup-probe",
         help="probe the Wazzup API to discover the calls/recordings surface",
     ).set_defaults(func=_cmd_wazzup_probe)
+
+    p_gloss = sub.add_parser(
+        "glossary-sample",
+        help="LLM-correct existing meeting transcripts; dump before→after diffs",
+    )
+    p_gloss.add_argument("--limit", type=int, default=20, help="transcripts to sample")
+    p_gloss.set_defaults(func=_cmd_glossary_sample)
 
     args = parser.parse_args()
     args.func(args)

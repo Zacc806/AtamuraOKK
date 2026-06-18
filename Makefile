@@ -1,6 +1,6 @@
 .PHONY: help install install-spike lint fmt typecheck test up down migrate \
         worker worker-up worker-logs \
-        spike-fetch spike-download spike-transcribe spike-wer
+        spike-fetch spike-download spike-transcribe spike-wer glossary-sample
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -117,3 +117,6 @@ spike-transcribe: ## Transcribe with faster-whisper (needs spike group + ffmpeg)
 
 spike-wer: ## Compute WER vs hand-corrected references
 	uv run python -m AtamuraOKK.spike wer
+
+glossary-sample: ## LLM-correct existing meeting transcripts; dump before→after diffs (ARGS="--limit 20")
+	uv run python -m AtamuraOKK.spike glossary-sample $(ARGS)
