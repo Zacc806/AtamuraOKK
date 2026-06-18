@@ -86,6 +86,19 @@ class CompanionIdentity:
         """The unscoped head of sales — sees every department."""
         return self.role is CompanionRole.HEAD and self.department_id is None
 
+    def can_view_department(self, department_bitrix_id: int | None) -> bool:
+        """Whether a HEAD identity may see data scoped to this Bitrix department.
+
+        Global head: any department (including unattributed / ``None``). Scoped
+        head: only their own — an unknown/``None`` department stays
+        global-head-only. Assumes the caller has already confirmed the identity
+        is a head; the single source of truth for the department-scoping rule
+        shared by ``ensure_can_view_manager``, ``_can_view_call_row`` and revoke.
+        """
+        if self.department_id is None:
+            return True
+        return department_bitrix_id == self.department_id
+
 
 async def get_companion_identity(
     x_companion_user_key: str | None = Header(default=None),
@@ -129,11 +142,13 @@ async def get_companion_identity(
     )
 
 
-async def _manager_department_bitrix_id(
+async def manager_department_bitrix_id(
     session: AsyncSession,
-    manager_bitrix_user_id: int,
+    manager_bitrix_user_id: int | None,
 ) -> int | None:
     """The Bitrix department id of a manager, or None if unknown/unenriched."""
+    if manager_bitrix_user_id is None:
+        return None
     return await session.scalar(
         select(Department.bitrix_id)
         .join(Manager, Manager.department_id == Department.id)
@@ -153,15 +168,11 @@ async def ensure_can_view_manager(
     unknown/unenriched managers (and unattributed items) stay global-head-only.
     """
     if identity.role is CompanionRole.HEAD:
-        if identity.department_id is None:
+        if identity.department_id is None:  # global head: no lookup needed
             return
-        if manager_bitrix_user_id is not None:
-            dept = await _manager_department_bitrix_id(
-                session,
-                manager_bitrix_user_id,
-            )
-            if dept == identity.department_id:
-                return
+        dept = await manager_department_bitrix_id(session, manager_bitrix_user_id)
+        if identity.can_view_department(dept):
+            return
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="A department head can only view their own department.",

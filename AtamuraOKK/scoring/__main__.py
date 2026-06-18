@@ -7,17 +7,14 @@ import asyncio
 
 
 def _cmd_run(args: argparse.Namespace) -> None:
-    from AtamuraOKK.dispatch.claim import report_today_start  # noqa: PLC0415
     from AtamuraOKK.scoring.worker import score_pending  # noqa: PLC0415
-    from AtamuraOKK.settings import settings  # noqa: PLC0415
 
     if args.all:
-        since = None  # score the whole backlog, including older calls
-    elif settings.score_auto_today_only:
-        since = report_today_start()
+        # score the whole backlog, including older calls
+        asyncio.run(score_pending(limit=args.limit, since=None))
     else:
-        since = None
-    asyncio.run(score_pending(limit=args.limit, since=since))
+        # default: the auto window (today-only when score_auto_today_only is set)
+        asyncio.run(score_pending(limit=args.limit))
 
 
 def _cmd_seed(_: argparse.Namespace) -> None:

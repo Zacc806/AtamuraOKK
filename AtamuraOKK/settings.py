@@ -160,11 +160,6 @@ class Settings(BaseSettings):
     # run --all`. Set to False to auto-score the full backlog again.
     score_auto_today_only: bool = True
 
-    # --- Auphonic audio cleanup (spike only; ATAMURAOKK_AUPHONIC_API_KEY) ---
-    # Bearer token for the Auphonic API, used by the spike/auphonic_ab A/B harness
-    # to denoise/level call recordings before transcription. Not on the prod path.
-    auphonic_api_key: str = ""
-
     # --- Glossary correction (post-STT LLM repair of ЖК names & addresses) ---
     # Yandex v3 has no vocabulary API, so a cheap Claude pass fixes complex names
     # and Kazakh toponyms after transcription. Off by default — enable only once a

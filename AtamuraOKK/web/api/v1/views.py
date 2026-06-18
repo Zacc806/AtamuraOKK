@@ -37,6 +37,7 @@ from AtamuraOKK.web.api.v1.auth import (
     ensure_head,
     get_companion_identity,
     hash_key,
+    manager_department_bitrix_id,
     require_companion_token,
 )
 from AtamuraOKK.web.api.v1.okk import PeriodError
@@ -632,13 +633,10 @@ async def revoke_companion_user(
                 detail="Global head keys are managed via env/CLI, not the cabinet.",
             )
     else:
-        dept = await service.get_manager_department_bitrix_id(
-            session,
-            user.bitrix_user_id,
-        )
+        dept = await manager_department_bitrix_id(session, user.bitrix_user_id)
         if (
             CompanionRole(user.role) is not CompanionRole.MANAGER
-            or dept != identity.department_id
+            or not identity.can_view_department(dept)
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

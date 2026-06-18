@@ -23,7 +23,7 @@ from AtamuraOKK.db.models.manager import Manager
 from AtamuraOKK.db.models.score import Score
 from AtamuraOKK.db.models.transcript import Transcript
 from AtamuraOKK.db.session import session_scope
-from AtamuraOKK.dispatch.claim import claim_ready
+from AtamuraOKK.dispatch.claim import auto_since, claim_ready
 from AtamuraOKK.scoring.base import CallScore, Scorer
 from AtamuraOKK.scoring.factory import get_scorer
 from AtamuraOKK.scoring.rubric import Rubric, load_rubric
@@ -182,6 +182,10 @@ def should_notify_cash(
         return False
     if started_at is None:
         return False
+    # ``now`` is tz-aware (UTC); coerce a naive ``started_at`` so the subtraction
+    # can't raise and silently suppress the alert on this Bitrix-write path.
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=UTC)
     return now - started_at <= timedelta(minutes=max_age_minutes)
 
 
@@ -351,20 +355,31 @@ async def score_one(
         return call.status.value
 
 
+class _Auto:
+    """Sentinel for ``score_pending(since=...)``'s 'use the auto window' default."""
+
+
+_AUTO = _Auto()
+
+
 async def score_pending(
-    *, limit: int = 50, since: datetime | None = None
+    *, limit: int = 50, since: datetime | None | _Auto = _AUTO
 ) -> ScoreStats:
     """Claim and score analyzable TRANSCRIBED calls against the active rubric.
 
-    When ``since`` is given, only calls that started at or after it are claimed;
-    pass ``None`` to score the full backlog (the manual ``run --all`` path).
+    ``since`` defaults to :func:`auto_since` (today-only when the knob is set), so
+    the safe automatic window is the default and no caller can accidentally score
+    the whole paid backlog by forgetting the cutoff. Pass an explicit ``since=None``
+    to score the full backlog (the manual ``run --all`` path), or a datetime to
+    score a custom window.
     """
+    window = auto_since() if isinstance(since, _Auto) else since
     stats = ScoreStats()
     rubric = load_rubric()
     scorer = get_scorer()
 
     call_ids = await claim_ready(
-        CallStatus.TRANSCRIBED, CallStatus.SCORING, limit, since=since
+        CallStatus.TRANSCRIBED, CallStatus.SCORING, limit, since=window
     )
     for call_id in call_ids:
         status = await score_one(call_id, scorer=scorer, rubric=rubric)

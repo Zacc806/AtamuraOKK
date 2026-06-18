@@ -48,6 +48,17 @@ def report_today_start() -> datetime:
     return datetime(now.year, now.month, now.day, tzinfo=tz)
 
 
+def auto_since() -> datetime | None:
+    """Default cutoff for *automatic* scoring.
+
+    Returns midnight today (report tz) when ``score_auto_today_only`` is set, so
+    auto-scoring leaves the historical backlog parked in ``TRANSCRIBED``; returns
+    ``None`` (no cutoff, whole backlog) when the knob is off. This is the single
+    place the today-only invariant is expressed — callers should not re-derive it.
+    """
+    return report_today_start() if settings.score_auto_today_only else None
+
+
 def _stages() -> tuple[Stage, ...]:
     """Stage table (settings read lazily so tests can override knobs)."""
     return (

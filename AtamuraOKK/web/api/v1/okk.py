@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from AtamuraOKK.scoring.rubric import load_rubric
 from AtamuraOKK.settings import settings
 
 
@@ -31,16 +32,14 @@ def okk_5(percent: float | None) -> int | None:
 
 
 def zone_for(percent: float | None) -> str | None:
-    """Zone band for an aggregate percent (mirrors reporting._zone_for)."""
+    """Zone band for an aggregate percent.
+
+    Delegates to the active call rubric's zones so the bands stay aligned with
+    per-call scoring and the report layer when the rubric JSON is retuned.
+    """
     if percent is None:
         return None
-    if percent >= 85:
-        return "strong"
-    if percent >= 80:
-        return "normal"
-    if percent >= 75:
-        return "borderline"
-    return "risk"
+    return load_rubric().zone_for(percent)
 
 
 class PeriodError(ValueError):

@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import text
 
 from AtamuraOKK.db.session import session_scope
+from AtamuraOKK.scoring.rubric import load_rubric
 from AtamuraOKK.settings import settings
 
 Half = str  # "morning" | "afternoon"
@@ -166,6 +167,11 @@ async def aggregate_window(
         lambda c: c.call_type,
     )
 
+    # Manager-average zones must use the same rubric thresholds as per-call
+    # scoring (scoring/worker.py), so retuning the rubric JSON's zones stays
+    # consistent across per-call and report-level zones.
+    rubric = load_rubric()
+
     calls = [_call_row(r) for r in qual_rows]
     by_manager: dict[str, list[CallRow]] = {}
     mgr_dept: dict[str, str | None] = {}
@@ -183,7 +189,7 @@ async def aggregate_window(
                 department=mgr_dept.get(name),
                 n_calls=len(mcalls),
                 avg_percent=avg,
-                zone=_zone_for(avg),
+                zone=rubric.zone_for(avg),
                 calls=sorted(mcalls, key=lambda c: c.percent, reverse=True),
             ),
         )
@@ -226,16 +232,6 @@ async def aggregate_window(
         n_excluded=len(excluded),
         excluded_by_type=excluded_by_type,
     )
-
-
-def _zone_for(percent: float) -> str:
-    if percent >= 85:
-        return "strong"
-    if percent >= 80:
-        return "normal"
-    if percent >= 75:
-        return "borderline"
-    return "risk"
 
 
 def _count(calls: list[CallRow], key: Any) -> dict[str, int]:

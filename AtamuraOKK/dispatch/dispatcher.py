@@ -19,9 +19,9 @@ from loguru import logger
 
 from AtamuraOKK.dispatch.claim import (
     STAGES,
+    auto_since,
     claim_ready,
     reclaim_all_stale,
-    report_today_start,
 )
 from AtamuraOKK.dispatch.tasks import STAGE_TASKS, queue_for
 from AtamuraOKK.ingestion.service import refresh_qualification, run_ingestion
@@ -44,11 +44,7 @@ async def dispatch_tick(ctx: dict[str, Any]) -> int:
 
     enqueued = 0
     for stage in STAGES:
-        since = (
-            report_today_start()
-            if stage.today_only and settings.score_auto_today_only
-            else None
-        )
+        since = auto_since() if stage.today_only else None
         try:
             call_ids = await claim_ready(
                 stage.ready,

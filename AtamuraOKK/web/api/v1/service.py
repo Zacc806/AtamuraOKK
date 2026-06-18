@@ -365,20 +365,6 @@ async def resolve_manager_name(
     return await _bitrix_user_name(bitrix_user_id)
 
 
-async def get_manager_department_bitrix_id(
-    session: AsyncSession,
-    bitrix_user_id: int | None,
-) -> int | None:
-    """The Bitrix department id a manager belongs to, or None if unknown."""
-    if bitrix_user_id is None:
-        return None
-    return await session.scalar(
-        select(Department.bitrix_id)
-        .join(Manager, Manager.department_id == Department.id)
-        .where(Manager.bitrix_user_id == bitrix_user_id),
-    )
-
-
 async def _ensure_department_by_bitrix_id(
     session: AsyncSession,
     bitrix_dept_id: int,
@@ -624,9 +610,7 @@ def _can_view_call_row(
     scoped head only their department's, the global head everything.
     """
     if identity.role is CompanionRole.HEAD:
-        if identity.department_id is None:
-            return True
-        return department_bitrix_id == identity.department_id
+        return identity.can_view_department(department_bitrix_id)
     return (
         manager_bitrix_user_id is not None
         and manager_bitrix_user_id == identity.bitrix_user_id
