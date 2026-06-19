@@ -23,6 +23,7 @@ from AtamuraOKK.bitrix import BitrixClient, BitrixError, crm_card_url
 from AtamuraOKK.db.models.appeal import (
     APPEAL_ACCEPTED,
     APPEAL_PENDING,
+    APPEAL_REJECTED,
     Appeal,
 )
 from AtamuraOKK.db.models.department import Department
@@ -30,10 +31,12 @@ from AtamuraOKK.db.models.enums import CompanionRole
 from AtamuraOKK.db.models.manager import Manager
 from AtamuraOKK.db.models.meeting import Meeting
 from AtamuraOKK.db.models.rubric_version import RubricVersion
+from AtamuraOKK.scoring.recompute import recompute_percent
 from AtamuraOKK.settings import settings
 from AtamuraOKK.web.api.v1 import day, okk
 from AtamuraOKK.web.api.v1.auth import CompanionIdentity
 from AtamuraOKK.web.api.v1.schemas import (
+    AppealCriterionView,
     AppealView,
     CallFeedback,
     CallFeedItem,
@@ -723,15 +726,25 @@ async def get_call_feedback(
     original_percent = float(row.percent) if row.percent is not None else None
     row = _with_overrides([row], await _score_overrides(session, [row.call_id]))[0]
     appeal = await get_latest_appeal_for_call(session, call_id)
+    criteria_index = {cr.criterion_id: cr for cr in crit_rows}
     appeal_view = (
         _appeal_view(
             appeal,
             manager_name=row.manager_name,
             started_at=row.started_at,
             original_percent=original_percent,
+            criteria_index=criteria_index,
         )
         if appeal is not None
         else None
+    )
+    # An accepted appeal awards its confirmed criteria full marks; reflect that in
+    # the per-criterion breakdown so it stays consistent with the corrected
+    # headline percent (already folded in above via _with_overrides).
+    corrected_ids = (
+        {int(c) for c in (appeal.confirmed_criteria or [])}
+        if appeal is not None and appeal.status == APPEAL_ACCEPTED
+        else set()
     )
 
     percent = float(row.percent) if row.percent is not None else None
@@ -762,19 +775,7 @@ async def get_call_feedback(
         is_qualification_call=_is_qual(row),
         bitrix_url=crm_card_url(row.crm_entity_type, row.crm_entity_id),
         criteria=[
-            CriterionFeedback(
-                criterion_id=cr.criterion_id,
-                block_name=cr.block_name,
-                criterion_text=cr.criterion_text,
-                score=float(cr.score) if cr.score is not None else None,
-                max=float(cr.max) if cr.max is not None else None,
-                percent_of_max=(
-                    float(cr.percent_of_max) if cr.percent_of_max is not None else None
-                ),
-                justification=cr.justification,
-                evidence=cr.evidence,
-                recommendation=cr.recommendation,
-            )
+            _criterion_feedback(cr, corrected=cr.criterion_id in corrected_ids)
             for cr in crit_rows
         ],
         transcript=transcript,
@@ -783,9 +784,79 @@ async def get_call_feedback(
 
 
 # --- Appeals (апелляции) -----------------------------------------------------
-# A manager files an appeal against a call's ОКК score; the department head
-# reviews it and may record a corrected percent (see ``_score_overrides``).
-# Writes only AtamuraOKK's own ``appeals`` table — never Bitrix/pipeline state.
+# A manager files an appeal listing the specific criteria they contest; the
+# department head confirms a subset and each confirmed criterion is awarded full
+# marks, recomputing the corrected percent (see ``_score_overrides`` /
+# ``recompute_percent``). Writes only AtamuraOKK's own ``appeals`` table — never
+# Bitrix/pipeline state.
+
+
+def _disputed_views(
+    appeal: Appeal,
+    criteria_index: dict[int, Any] | None,
+) -> list[AppealCriterionView]:
+    """Enrich an appeal's disputed criteria with their scored text + max.
+
+    ``criteria_index`` maps ``criterion_id → row`` from ``call_criteria_latest``
+    for the appealed call; absent it, the views carry ids/reasons only.
+    """
+    index = criteria_index or {}
+    confirmed = {int(c) for c in (appeal.confirmed_criteria or [])}
+    views: list[AppealCriterionView] = []
+    for item in appeal.disputed_criteria or []:
+        cid = int(item["criterion_id"])
+        info = index.get(cid)
+        views.append(
+            AppealCriterionView(
+                criterion_id=cid,
+                block_name=getattr(info, "block_name", None),
+                criterion_text=getattr(info, "criterion_text", None),
+                original_score=(
+                    float(info.score)
+                    if info is not None and info.score is not None
+                    else None
+                ),
+                max=(
+                    float(info.max)
+                    if info is not None and info.max is not None
+                    else None
+                ),
+                reason=item.get("reason"),
+                confirmed=cid in confirmed,
+            ),
+        )
+    return views
+
+
+def _criterion_feedback(cr: Any, *, corrected: bool) -> CriterionFeedback:
+    """One ``call_criteria_latest`` row as a DTO; ``corrected`` awards full marks.
+
+    A criterion an accepted appeal confirmed is shown at its ``max`` (100% of max)
+    so the breakdown matches the corrected headline percent.
+    """
+    crit_max = float(cr.max) if cr.max is not None else None
+    score = (
+        crit_max
+        if corrected and crit_max is not None
+        else (float(cr.score) if cr.score is not None else None)
+    )
+    pct_of_max = (
+        100.0
+        if corrected and crit_max is not None
+        else (float(cr.percent_of_max) if cr.percent_of_max is not None else None)
+    )
+    return CriterionFeedback(
+        criterion_id=cr.criterion_id,
+        block_name=cr.block_name,
+        criterion_text=cr.criterion_text,
+        score=score,
+        max=crit_max,
+        percent_of_max=pct_of_max,
+        justification=cr.justification,
+        evidence=cr.evidence,
+        recommendation=cr.recommendation,
+        corrected=corrected,
+    )
 
 
 def _appeal_view(
@@ -794,6 +865,7 @@ def _appeal_view(
     manager_name: str | None = None,
     started_at: datetime | None = None,
     original_percent: float | None = None,
+    criteria_index: dict[int, Any] | None = None,
 ) -> AppealView:
     """Project an ``Appeal`` row into its DTO, with optional call context."""
     override = (
@@ -807,7 +879,8 @@ def _appeal_view(
         manager_bitrix_user_id=appeal.manager_bitrix_user_id,
         created_by_bitrix_user_id=appeal.created_by_bitrix_user_id,
         department_id=appeal.department_bitrix_id,
-        disputed_block=appeal.disputed_block,
+        disputed_criteria=_disputed_views(appeal, criteria_index),
+        confirmed_criteria=sorted({int(c) for c in (appeal.confirmed_criteria or [])}),
         reason=appeal.reason,
         status=appeal.status,
         override_percent=override,
@@ -868,6 +941,40 @@ async def get_call_score_context(
     ).first()
 
 
+async def _criteria_rows(
+    session: AsyncSession,
+    call_ids: Sequence[int],
+) -> dict[int, dict[int, Any]]:
+    """``call_id → {criterion_id → row(block_name, criterion_text, score, max)}``.
+
+    Sourced from ``call_criteria_latest`` (the same view the call-detail
+    breakdown uses), so the appeal review screen renders each contested criterion
+    without a second round-trip.
+    """
+    ids = sorted(set(call_ids))
+    if not ids:
+        return {}
+    rows = (
+        await session.execute(
+            text(
+                "SELECT call_id, criterion_id, block_name, criterion_text, "
+                "score, max FROM call_criteria_latest WHERE call_id = ANY(:ids)",
+            ),
+            {"ids": ids},
+        )
+    ).all()
+    out: dict[int, dict[int, Any]] = {}
+    for r in rows:
+        out.setdefault(r.call_id, {})[r.criterion_id] = r
+    return out
+
+
+async def valid_criterion_ids(session: AsyncSession, call_id: int) -> set[int]:
+    """The set of scorable criterion ids on a call (for validating an appeal)."""
+    index = (await _criteria_rows(session, [call_id])).get(call_id, {})
+    return set(index.keys())
+
+
 async def create_appeal(
     session: AsyncSession,
     *,
@@ -875,7 +982,7 @@ async def create_appeal(
     manager_bitrix_user_id: int,
     created_by_bitrix_user_id: int,
     department_bitrix_id: int | None,
-    disputed_block: str | None,
+    disputed_criteria: list[dict[str, Any]],
     reason: str | None,
 ) -> Appeal:
     """Persist a new pending appeal and return it."""
@@ -884,7 +991,7 @@ async def create_appeal(
         manager_bitrix_user_id=manager_bitrix_user_id,
         created_by_bitrix_user_id=created_by_bitrix_user_id,
         department_bitrix_id=department_bitrix_id,
-        disputed_block=disputed_block,
+        disputed_criteria=disputed_criteria,
         reason=reason,
         status=APPEAL_PENDING,
     )
@@ -917,6 +1024,9 @@ async def _appeal_context(
 async def view_for_appeal(session: AsyncSession, appeal: Appeal) -> AppealView:
     """One appeal as its DTO, enriched with the appealed call's context."""
     ctx = (await _appeal_context(session, [appeal.call_id])).get(appeal.call_id)
+    criteria_index = (await _criteria_rows(session, [appeal.call_id])).get(
+        appeal.call_id,
+    )
     return _appeal_view(
         appeal,
         manager_name=getattr(ctx, "manager_name", None),
@@ -926,6 +1036,7 @@ async def view_for_appeal(session: AsyncSession, appeal: Appeal) -> AppealView:
             if ctx is not None and ctx.percent is not None
             else None
         ),
+        criteria_index=criteria_index,
     )
 
 
@@ -952,7 +1063,9 @@ async def list_appeals(
     if status is not None:
         query = query.where(Appeal.status == status)
     appeals = list((await session.scalars(query.limit(limit))).all())
-    context = await _appeal_context(session, [a.call_id for a in appeals])
+    call_ids = [a.call_id for a in appeals]
+    context = await _appeal_context(session, call_ids)
+    criteria = await _criteria_rows(session, call_ids)
     return [
         _appeal_view(
             a,
@@ -964,6 +1077,7 @@ async def list_appeals(
                 and ctx.percent is not None
                 else None
             ),
+            criteria_index=criteria.get(a.call_id),
         )
         for a in appeals
     ]
@@ -978,16 +1092,32 @@ async def review_appeal(
     session: AsyncSession,
     appeal: Appeal,
     *,
-    status: str,
-    override_percent: float | None,
+    confirmed_criteria: Sequence[int],
     note: str | None,
     reviewed_by_bitrix_user_id: int | None,
 ) -> Appeal:
-    """Record a head's verdict. An override only sticks on an accepted appeal."""
-    appeal.status = status
-    appeal.override_percent = (
-        override_percent if status == APPEAL_ACCEPTED else None
-    )
+    """Record a head's verdict and recompute the corrected percent.
+
+    Each confirmed criterion is awarded full marks; the corrected total is
+    derived from the call's stored per-criterion breakdown and persisted to
+    ``override_percent`` (which the read layer then prefers). Confirming nothing
+    is a rejection — the original LLM score stands.
+    """
+    confirmed = sorted({int(c) for c in confirmed_criteria})
+    appeal.confirmed_criteria = confirmed
+    appeal.status = APPEAL_ACCEPTED if confirmed else APPEAL_REJECTED
+    if confirmed:
+        index = (await _criteria_rows(session, [appeal.call_id])).get(
+            appeal.call_id,
+            {},
+        )
+        per_criterion = [
+            {"id": cid, "score": row.score, "max": row.max}
+            for cid, row in index.items()
+        ]
+        appeal.override_percent = recompute_percent(per_criterion, set(confirmed))
+    else:
+        appeal.override_percent = None
     appeal.head_note = note
     appeal.reviewed_by_bitrix_user_id = reviewed_by_bitrix_user_id
     appeal.reviewed_at = datetime.now(UTC)

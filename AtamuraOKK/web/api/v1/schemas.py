@@ -231,6 +231,10 @@ class CriterionFeedback(BaseModel):
     justification: str | None
     evidence: str | None
     recommendation: str | None
+    corrected: bool = Field(
+        default=False,
+        description="True when an accepted appeal awarded this criterion full marks",
+    )
 
 
 class TranscriptBlock(BaseModel):
@@ -240,14 +244,43 @@ class TranscriptBlock(BaseModel):
     text: str
 
 
+class AppealCriterionInput(BaseModel):
+    """One criterion a manager contests when filing an appeal."""
+
+    criterion_id: int = Field(description="Номер критерия из чек-листа звонка")
+    reason: str | None = Field(
+        default=None,
+        description="Почему менеджер не согласен с оценкой по этому критерию",
+        max_length=2000,
+    )
+
+
+class AppealCriterionView(BaseModel):
+    """A contested criterion enriched with its scored text for the review screen."""
+
+    criterion_id: int
+    block_name: str | None = None
+    criterion_text: str | None = None
+    original_score: float | None = Field(
+        default=None,
+        description="The LLM score for this criterion being appealed",
+    )
+    max: float | None = None
+    reason: str | None = None
+    confirmed: bool = Field(
+        default=False,
+        description="True once the head confirmed this criterion (full marks)",
+    )
+
+
 class AppealView(BaseModel):
     """A manager appeal against a call's ОКК score and its РОП verdict.
 
-    ``override_percent``/``override_okk_5`` are populated once a head accepts the
-    appeal with a numeric correction; until then (and on rejection) they are
-    null and the original LLM score stands. The trailing context fields
-    (``manager_name``/``started_at``/``original_percent``) let the head's review
-    list render without a second round-trip.
+    ``override_percent``/``override_okk_5`` are populated once a head confirms at
+    least one criterion (the recomputed total); until then (and on a verdict that
+    confirms nothing) they are null and the original LLM score stands. The
+    trailing context fields (``manager_name``/``started_at``/``original_percent``)
+    let the head's review list render without a second round-trip.
     """
 
     id: int
@@ -255,15 +288,19 @@ class AppealView(BaseModel):
     manager_bitrix_user_id: int
     created_by_bitrix_user_id: int
     department_id: int | None = Field(default=None, description="Bitrix department id")
-    disputed_block: str | None = Field(
-        default=None,
-        description="The checklist block the manager contests (block_name), if any",
+    disputed_criteria: list[AppealCriterionView] = Field(
+        default_factory=list,
+        description="The specific criteria the manager contests, enriched",
+    )
+    confirmed_criteria: list[int] = Field(
+        default_factory=list,
+        description="Criterion ids the head confirmed (awarded full marks)",
     )
     reason: str | None = None
     status: str = Field(description="pending | accepted | rejected")
     override_percent: float | None = Field(
         default=None,
-        description="РОП-corrected 0–100 percent, when set",
+        description="Recomputed 0–100 percent after confirmed criteria, when any",
     )
     override_okk_5: int | None = Field(
         default=None,
@@ -287,10 +324,10 @@ class AppealView(BaseModel):
 class AppealCreate(BaseModel):
     """File an appeal against a call's score (manager → РОП)."""
 
-    disputed_block: str | None = Field(
-        default=None,
-        description="Блок чек-листа, с которым менеджер не согласен (block_name)",
-        max_length=255,
+    disputed_criteria: list[AppealCriterionInput] = Field(
+        default_factory=list,
+        description="Критерии чек-листа, с которыми менеджер не согласен",
+        max_length=100,
     )
     reason: str | None = Field(
         default=None,
@@ -300,24 +337,20 @@ class AppealCreate(BaseModel):
 
 
 class AppealReview(BaseModel):
-    """A head's verdict on an appeal."""
+    """A head's verdict on an appeal: which contested criteria to confirm.
 
-    status: Literal["accepted", "rejected"]
-    override_percent: float | None = Field(
-        default=None,
-        ge=0,
-        le=100,
-        description="Corrected 0–100 percent (accepted appeals only)",
+    Each confirmed criterion is awarded full marks and the call's total
+    recalculates automatically. Confirming nothing is a rejection (the original
+    LLM score stands). ``confirmed_criteria`` must be a subset of the appeal's
+    disputed criteria — enforced in the service against the stored appeal.
+    """
+
+    confirmed_criteria: list[int] = Field(
+        default_factory=list,
+        description="Criterion ids to confirm (full marks); empty = reject",
+        max_length=100,
     )
     note: str | None = Field(default=None, max_length=2000)
-
-    @model_validator(mode="after")
-    def _override_only_on_accept(self) -> AppealReview:
-        if self.status == "rejected" and self.override_percent is not None:
-            raise ValueError(
-                "override_percent is only valid when accepting an appeal",
-            )
-        return self
 
 
 class CallFeedback(BaseModel):

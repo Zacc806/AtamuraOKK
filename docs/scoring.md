@@ -113,6 +113,21 @@ distributions stay correct after re-scoring:
 (Migration `b2c3d4e5f6a7`. Views aren't autogen-tracked, so `alembic check` stays
 clean.)
 
+## Per-criterion appeals (cabinet-only correction)
+A manager can contest specific criteria of a call's score; the head listens to
+the recording and confirms the ones the manager was right about. Each confirmed
+criterion is **awarded full marks** and the call's percent **recalculates
+automatically** from the stored `per_criterion` breakdown
+(`AtamuraOKK/scoring/recompute.py:recompute_percent`, the same numerator/
+denominator math as `worker._assemble`). The corrected percent is stored on the
+appeal and preferred over the LLM percent in the **companion read layer only** —
+the `call_scores_latest` view and the twice-daily QA reports keep the model's
+original verdict for audit. See `docs/companion-api.md` for the API surface.
+
+**Known limitation:** the corrected percent is computed and stored at review
+time, so re-scoring a call (a fresh LLM run) after an appeal was accepted won't
+auto-update an existing override — same behaviour as any stored correction.
+
 ## Not yet scored (deferred)
 The 9 CRM/WhatsApp points (#13/#19/#20). Add later via Wazzup (WhatsApp) + Bitrix
 (deal fields, tasks/activities) for full 100-point parity.

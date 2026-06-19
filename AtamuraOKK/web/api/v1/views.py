@@ -349,10 +349,12 @@ async def manager_day(
 
 
 # --- Appeals (апелляции) -----------------------------------------------------
-# A manager disputes a call's ОКК score; their department head re-checks it and
-# may record a corrected percent the read layer then prefers (see
-# ``service._score_overrides``). Manager-initiated, head-resolved; writes only
-# AtamuraOKK's own ``appeals`` table.
+# A manager disputes specific criteria of a call's ОКК score; their department
+# head confirms the ones the manager was right about, each awarded full marks,
+# and the corrected percent the read layer then prefers is recomputed
+# automatically (see ``service.review_appeal`` / ``service._score_overrides``).
+# Manager-initiated, head-resolved; writes only AtamuraOKK's own ``appeals``
+# table.
 
 
 @router.post(
@@ -389,13 +391,22 @@ async def file_call_appeal(
             status_code=status.HTTP_409_CONFLICT,
             detail="An appeal for this call is already pending review.",
         )
+    valid_ids = await service.valid_criterion_ids(session, call_id)
+    unknown = sorted(
+        {c.criterion_id for c in payload.disputed_criteria} - valid_ids,
+    )
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Unknown criterion ids for this call: {unknown}",
+        )
     appeal = await service.create_appeal(
         session,
         call_id=call_id,
         manager_bitrix_user_id=ctx.manager_bitrix_user_id,
         created_by_bitrix_user_id=identity.bitrix_user_id,
         department_bitrix_id=ctx.department_bitrix_id,
-        disputed_block=payload.disputed_block,
+        disputed_criteria=[c.model_dump() for c in payload.disputed_criteria],
         reason=payload.reason,
     )
     return await service.view_for_appeal(session, appeal)
@@ -444,11 +455,12 @@ async def review_appeal(
     identity: CompanionIdentity = Depends(get_companion_identity),
     session: AsyncSession = Depends(get_db_session),
 ) -> AppealView:
-    """РОП verdict: accept (optionally with a corrected percent) or reject.
+    """РОП verdict: confirm the contested criteria the manager was right about.
 
     Global head reviews any appeal; an office РОП only their own department's.
-    An ``override_percent`` on an accepted appeal becomes the score the cabinet
-    shows for that call everywhere.
+    Each confirmed criterion is awarded full marks and the call's score
+    recalculates automatically — that corrected percent is what the cabinet shows
+    for the call everywhere. Confirming nothing rejects the appeal.
     """
     ensure_head(identity)
     appeal = await service.get_appeal(session, appeal_id)
@@ -462,11 +474,19 @@ async def review_appeal(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="A department head can only review their own department's appeals.",
         )
+    disputed_ids = {
+        int(c["criterion_id"]) for c in (appeal.disputed_criteria or [])
+    }
+    invalid = sorted(set(payload.confirmed_criteria) - disputed_ids)
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Cannot confirm criteria not in the appeal: {invalid}",
+        )
     reviewed = await service.review_appeal(
         session,
         appeal,
-        status=payload.status,
-        override_percent=payload.override_percent,
+        confirmed_criteria=payload.confirmed_criteria,
         note=payload.note,
         reviewed_by_bitrix_user_id=identity.bitrix_user_id,
     )

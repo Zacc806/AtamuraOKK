@@ -116,23 +116,28 @@ score; reminders/vendor/internal/wrong-number calls are excluded.
 | GET | `/api/v1/users` | cabinet users — all for the global head; a scoped head sees only their own department's manager keys (**head only**) |
 | POST | `/api/v1/users` | issue a key; raw key returned once. Manager (`{bitrix_user_id, name?}`): any head — a scoped head's manager is tied to their department. Head (`{role: "head", department_id, name? \| bitrix_user_id?}`): **global head only** |
 | POST | `/api/v1/users/{id}/revoke` | deactivate a key. Global head: manager + scoped-head keys (dept-NULL head rows are `403`, env/CLI-only); scoped head: own department's manager keys only |
-| POST | `/api/v1/calls/{call_id}/appeal` | file an appeal against a call's ОКК score (`{disputed_block?, reason?}` — `disputed_block` is the `block_name` of the checklist block the manager contests, `reason` is their feedback on the call). **Manager only**, and only on their own call; an unscored call → `404`, a second appeal while one is still `pending` → `409`. Returns the `AppealView` |
+| POST | `/api/v1/calls/{call_id}/appeal` | file an appeal against specific criteria of a call's ОКК score (`{disputed_criteria?: [{criterion_id, reason?}], reason?}` — each `criterion_id` is a checklist criterion number from the call's per-criterion breakdown; `reason` is overall feedback). **Manager only**, and only on their own call; an unscored call → `404`, an unknown `criterion_id` for the call → `422`, a second appeal while one is still `pending` → `409`. Returns the `AppealView` |
 | GET | `/api/v1/appeals?status=&limit=` | appeals visible to the caller, newest first — a head sees their scope (global = all, office РОП = own department), a manager sees only their own. `?status=pending` is the head's review queue |
-| POST | `/api/v1/appeals/{appeal_id}/review` | head verdict (`{status: "accepted"\|"rejected", override_percent?, note?}`). **Head only** (a scoped head only their department's appeals). An `override_percent` (0–100) on an accepted appeal becomes the score the cabinet shows for that call |
+| POST | `/api/v1/appeals/{appeal_id}/review` | head verdict (`{confirmed_criteria?: [criterion_id, ...], note?}`). **Head only** (a scoped head only their department's appeals). Each confirmed criterion (must be one the manager contested, else `422`) is awarded **full marks** and the call's percent **recalculates automatically**; confirming nothing rejects the appeal. The recomputed percent becomes the score the cabinet shows for that call |
 
-**Appeals** (апелляции) let a manager dispute a call's ОКК score for a head to
-re-check. They write only AtamuraOKK's own `appeals` table — never Bitrix or
-pipeline state. An accepted appeal's `override_percent` is preferred over the
-LLM percent **in the companion read layer only** (`service._score_overrides`):
-the call feed, per-call авто-разбор (`CallFeedback.appeal` carries the verdict),
-the scorecard aggregate, the team rollup and the CRM-card search all re-derive
-`zone`/`okk_5` from the corrected percent. It is **deliberately not** folded into
-the `call_scores_latest` view, so the twice-daily QA reports stay the model's
-verdict. `CallFeedback` now also returns an `appeal` field (latest appeal on the
-call, or null) so the cabinet can show its status. An appeal carries the
-manager's `disputed_block` (which auto-review block they contest, by
-`block_name`) and `reason` (their feedback), both surfaced in the head's
-review queue.
+**Appeals** (апелляции) let a manager contest **specific criteria** of a call's
+ОКК score for a head to re-check by listening to the recording. They write only
+AtamuraOKK's own `appeals` table — never Bitrix or pipeline state. The head
+confirms the subset of criteria the manager was right about; each confirmed
+criterion is awarded full marks and the corrected total (`override_percent`) is
+**recomputed from the stored per-criterion breakdown** — never hand-typed. That
+corrected percent is preferred over the LLM percent **in the companion read
+layer only** (`service._score_overrides`): the call feed, per-call авто-разбор
+(`CallFeedback.appeal` carries the verdict), the scorecard aggregate, the team
+rollup and the CRM-card search all re-derive `zone`/`okk_5` from it. It is
+**deliberately not** folded into the `call_scores_latest` view, so the
+twice-daily QA reports stay the model's verdict. `CallFeedback` returns an
+`appeal` field (latest appeal on the call, or null), and each entry of its
+`criteria` breakdown carries a `corrected` flag — `true` when an accepted appeal
+flipped that criterion to full marks. The `AppealView` enriches every contested
+criterion (`disputed_criteria`) with its `block_name`/`criterion_text`/
+`original_score`/`max`, and lists the head's `confirmed_criteria`, so the review
+queue renders in one round-trip.
 
 `period` defaults to the current month in `report_timezone`; a malformed value
 returns `422`. Unknown manager/department/call returns `404`; a manager asking

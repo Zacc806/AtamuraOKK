@@ -1862,12 +1862,81 @@ async def _manager_701(session: AsyncSession) -> Manager:
     return mgr
 
 
+async def _seed_call_with_criteria(
+    session: AsyncSession,
+    *,
+    bitrix_call_id: str,
+    manager: Manager,
+    scores: list[tuple[int, int, int]],
+) -> Call:
+    """Seed a SCORED call whose per_criterion is ``[(id, score, max), ...]``.
+
+    ``total_score`` is the percent those criteria imply, so the headline matches
+    the breakdown (and an appeal recompute is meaningful).
+    """
+    raw = sum(s for _, s, _ in scores)
+    mx = sum(m for _, _, m in scores)
+    percent = round(100.0 * raw / mx, 2) if mx else 0.0
+    call = Call(
+        bitrix_call_id=bitrix_call_id,
+        portal_user_id=manager.bitrix_user_id,
+        manager_id=manager.id,
+        direction=CallDirection.OUTBOUND,
+        started_at=datetime(2026, 3, 15, 12, 0, tzinfo=_TZ),
+        duration_sec=120,
+        status=CallStatus.SCORED,
+    )
+    session.add(call)
+    await session.flush()
+    session.add(
+        Score(
+            call_id=call.id,
+            rubric_version="okk-1",
+            total_score=percent,
+            criteria={
+                "per_criterion": [
+                    {
+                        "id": cid,
+                        "block_id": f"B{cid}",
+                        "block_name": f"Блок {cid}",
+                        "text": f"Критерий {cid}",
+                        "score": s,
+                        "max": m,
+                        "justification": "ок",
+                        "evidence": "—",
+                    }
+                    for cid, s, m in scores
+                ],
+                "blocks": {},
+                "raw_points": raw,
+                "max_points": mx,
+                "percent": percent,
+                "zone": "strong" if percent >= 85 else "risk",
+                "call_type": "квалификация",
+                "is_qualification_call": True,
+                "manager_identified": True,
+                "objections_present": True,
+                "target_status": "целевой",
+                "strengths": "—",
+                "growth_zone": "—",
+                "training_recommendation": "—",
+            },
+            sentiment={"customer": "позитивный", "agent": "нейтральный"},
+            summary="Тестовый звонок.",
+            flags=[],
+            model="fake/test",
+        ),
+    )
+    await session.flush()
+    return call
+
+
 async def test_manager_files_appeal(
     client: AsyncClient,
     dbsession: AsyncSession,
     manager_auth: dict[str, str],
 ) -> None:
-    """A manager files an appeal on their own scored call → pending, with context."""
+    """A manager files a per-criterion appeal → pending, with enriched criteria."""
     mgr = await _manager_701(dbsession)
     call = await _seed_scored_call(
         dbsession,
@@ -1879,8 +1948,10 @@ async def test_manager_files_appeal(
         f"/api/v1/calls/{call.id}/appeal",
         headers=manager_auth,
         json={
-            "disputed_block": "Установление контакта",
-            "reason": "Клиент сам бросил трубку, оценка несправедлива",
+            "disputed_criteria": [
+                {"criterion_id": 1, "reason": "Я поздоровался, СТТ не распознал"},
+            ],
+            "reason": "Оценка несправедлива",
         },
     )
     assert resp.status_code == 201
@@ -1890,8 +1961,37 @@ async def test_manager_files_appeal(
     assert body["manager_bitrix_user_id"] == 701
     assert body["original_percent"] == 70.0
     assert body["override_percent"] is None
-    assert body["disputed_block"] == "Установление контакта"
-    assert body["reason"].startswith("Клиент")
+    assert body["confirmed_criteria"] == []
+    # The contested criterion is enriched with its scored text + max for the РОП.
+    disputed = body["disputed_criteria"]
+    assert len(disputed) == 1
+    assert disputed[0]["criterion_id"] == 1
+    assert disputed[0]["criterion_text"] == "Поздоровался"
+    assert disputed[0]["original_score"] == 4.0
+    assert disputed[0]["max"] == 5.0
+    assert disputed[0]["confirmed"] is False
+    assert disputed[0]["reason"].startswith("Я поздоровался")
+
+
+async def test_appeal_unknown_criterion_422(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+) -> None:
+    """Disputing a criterion that isn't on the call is rejected."""
+    mgr = await _manager_701(dbsession)
+    call = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="ap-unknown",
+        manager=mgr,
+        percent=70.0,
+    )
+    resp = await client.post(
+        f"/api/v1/calls/{call.id}/appeal",
+        headers=manager_auth,
+        json={"disputed_criteria": [{"criterion_id": 99}]},
+    )
+    assert resp.status_code == 422
 
 
 async def test_manager_cannot_appeal_another_managers_call(
@@ -1948,56 +2048,71 @@ async def test_duplicate_pending_appeal_conflicts(
     assert second.status_code == 409
 
 
-async def test_head_lists_and_overrides_score(
+async def test_head_confirms_criterion_and_score_recalculates(
     client: AsyncClient,
     dbsession: AsyncSession,
     manager_auth: dict[str, str],
     head_auth: dict[str, str],
 ) -> None:
-    """Head accepts an appeal with a corrected percent; it surfaces everywhere."""
+    """Head confirms one of two contested criteria; the total recomputes itself."""
     mgr = await _manager_701(dbsession)
-    call = await _seed_scored_call(
+    # Two criteria, 2/5 and 3/5 → 5/10 = 50%.
+    call = await _seed_call_with_criteria(
         dbsession,
-        bitrix_call_id="ap-ovr",
+        bitrix_call_id="ap-recalc",
         manager=mgr,
-        percent=70.0,  # zone risk, окк 1
+        scores=[(1, 2, 5), (2, 3, 5)],
     )
     filed = await client.post(
         f"/api/v1/calls/{call.id}/appeal",
         headers=manager_auth,
-        json={"disputed_block": "Установление контакта", "reason": "оценка занижена"},
+        json={
+            "disputed_criteria": [
+                {"criterion_id": 1, "reason": "поздоровался"},
+                {"criterion_id": 2, "reason": "выявил потребность"},
+            ],
+            "reason": "СТТ не распознал часть разговора",
+        },
     )
     appeal_id = filed.json()["id"]
 
-    # The head's review queue surfaces it with call context.
+    # The head's review queue surfaces it with the contested criteria enriched.
     queue = await client.get("/api/v1/appeals?status=pending", headers=head_auth)
     assert queue.status_code == 200
     rows = queue.json()
     assert [r["id"] for r in rows] == [appeal_id]
-    assert rows[0]["original_percent"] == 70.0
-    assert rows[0]["disputed_block"] == "Установление контакта"
+    assert rows[0]["original_percent"] == 50.0
+    assert {c["criterion_id"] for c in rows[0]["disputed_criteria"]} == {1, 2}
 
-    # Accept with a corrected percent.
+    # Confirm only criterion 1 → it gets full marks (5), criterion 2 stays 3:
+    # (5 + 3) / 10 = 80%.
     review = await client.post(
         f"/api/v1/appeals/{appeal_id}/review",
         headers=head_auth,
-        json={"status": "accepted", "override_percent": 88.0, "note": "перепроверено"},
+        json={"confirmed_criteria": [1], "note": "прослушал, менеджер прав по п.1"},
     )
     assert review.status_code == 200
     rb = review.json()
     assert rb["status"] == "accepted"
-    assert rb["override_percent"] == 88.0
-    assert rb["override_okk_5"] == 4
+    assert rb["confirmed_criteria"] == [1]
+    assert rb["override_percent"] == 80.0
+    assert rb["override_okk_5"] == 3
 
-    # The override now drives the per-call feedback...
+    # The recomputed score now drives the per-call feedback...
     fb = (
         await client.get(f"/api/v1/calls/{call.id}/feedback", headers=head_auth)
     ).json()
-    assert fb["percent"] == 88.0
-    assert fb["zone"] == "strong"
-    assert fb["okk_5"] == 4
+    assert fb["percent"] == 80.0
+    assert fb["okk_5"] == 3
     assert fb["appeal"]["status"] == "accepted"
-    assert fb["appeal"]["original_percent"] == 70.0
+    assert fb["appeal"]["original_percent"] == 50.0
+    # ...and the confirmed criterion shows at full marks, the other unchanged.
+    by_id = {c["criterion_id"]: c for c in fb["criteria"]}
+    assert by_id[1]["corrected"] is True
+    assert by_id[1]["score"] == 5.0
+    assert by_id[1]["percent_of_max"] == 100.0
+    assert by_id[2]["corrected"] is False
+    assert by_id[2]["score"] == 3.0
 
     # ...and the aggregate scorecard.
     card = (
@@ -2006,9 +2121,35 @@ async def test_head_lists_and_overrides_score(
             headers=head_auth,
         )
     ).json()
-    assert card["okk"]["percent"] == 88.0
-    assert card["okk"]["score_5"] == 4
-    assert card["okk"]["zone"] == "strong"
+    assert card["okk"]["percent"] == 80.0
+
+
+async def test_review_confirm_outside_disputed_422(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+    head_auth: dict[str, str],
+) -> None:
+    """A head can't confirm a criterion the manager never contested."""
+    mgr = await _manager_701(dbsession)
+    call = await _seed_call_with_criteria(
+        dbsession,
+        bitrix_call_id="ap-outside",
+        manager=mgr,
+        scores=[(1, 2, 5), (2, 3, 5)],
+    )
+    filed = await client.post(
+        f"/api/v1/calls/{call.id}/appeal",
+        headers=manager_auth,
+        json={"disputed_criteria": [{"criterion_id": 1}]},
+    )
+    appeal_id = filed.json()["id"]
+    resp = await client.post(
+        f"/api/v1/appeals/{appeal_id}/review",
+        headers=head_auth,
+        json={"confirmed_criteria": [2]},
+    )
+    assert resp.status_code == 422
 
 
 async def test_head_rejects_appeal_leaves_score(
@@ -2017,7 +2158,7 @@ async def test_head_rejects_appeal_leaves_score(
     manager_auth: dict[str, str],
     head_auth: dict[str, str],
 ) -> None:
-    """A rejected appeal records the verdict but leaves the original score."""
+    """Confirming nothing rejects the appeal and leaves the original score."""
     mgr = await _manager_701(dbsession)
     call = await _seed_scored_call(
         dbsession,
@@ -2028,22 +2169,25 @@ async def test_head_rejects_appeal_leaves_score(
     filed = await client.post(
         f"/api/v1/calls/{call.id}/appeal",
         headers=manager_auth,
-        json={"reason": "не согласен"},
+        json={"disputed_criteria": [{"criterion_id": 1}], "reason": "не согласен"},
     )
     appeal_id = filed.json()["id"]
     review = await client.post(
         f"/api/v1/appeals/{appeal_id}/review",
         headers=head_auth,
-        json={"status": "rejected", "note": "оценка верная"},
+        json={"confirmed_criteria": [], "note": "оценка верная"},
     )
     assert review.status_code == 200
-    assert review.json()["override_percent"] is None
+    rb = review.json()
+    assert rb["status"] == "rejected"
+    assert rb["override_percent"] is None
 
     fb = (
         await client.get(f"/api/v1/calls/{call.id}/feedback", headers=head_auth)
     ).json()
     assert fb["percent"] == 70.0
     assert fb["appeal"]["status"] == "rejected"
+    assert fb["criteria"][0]["corrected"] is False
 
 
 async def test_manager_cannot_review_appeals(
@@ -2062,13 +2206,13 @@ async def test_manager_cannot_review_appeals(
     filed = await client.post(
         f"/api/v1/calls/{call.id}/appeal",
         headers=manager_auth,
-        json={"reason": "x"},
+        json={"disputed_criteria": [{"criterion_id": 1}]},
     )
     appeal_id = filed.json()["id"]
     resp = await client.post(
         f"/api/v1/appeals/{appeal_id}/review",
         headers=manager_auth,
-        json={"status": "accepted", "override_percent": 90.0},
+        json={"confirmed_criteria": [1]},
     )
     assert resp.status_code == 403
 
@@ -2105,7 +2249,10 @@ async def test_scoped_head_only_reviews_own_department(
     filed = await client.post(
         f"/api/v1/calls/{call.id}/appeal",
         headers=_headers("mgr-910-key"),
-        json={"reason": "из другого отдела"},
+        json={
+            "disputed_criteria": [{"criterion_id": 1}],
+            "reason": "из другого отдела",
+        },
     )
     appeal_id = filed.json()["id"]
 
@@ -2113,13 +2260,13 @@ async def test_scoped_head_only_reviews_own_department(
     blocked = await client.post(
         f"/api/v1/appeals/{appeal_id}/review",
         headers=dept_head_auth,
-        json={"status": "rejected"},
+        json={"confirmed_criteria": []},
     )
     assert blocked.status_code == 403
     # …but the global head can review it.
     ok = await client.post(
         f"/api/v1/appeals/{appeal_id}/review",
         headers=head_auth,
-        json={"status": "rejected"},
+        json={"confirmed_criteria": []},
     )
     assert ok.status_code == 200
