@@ -1,0 +1,10 @@
+# Runs the backup nightly at 03:30, catching up if the box was off.
+[Unit]
+Description=Nightly AtamuraOKK backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

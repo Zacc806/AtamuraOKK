@@ -1,0 +1,16 @@
+# Nightly Postgres + MinIO backup. Pairs with okk-backup.timer.
+# Install: copy both to /etc/systemd/system/, then:
+#   systemctl enable --now okk-backup.timer
+[Unit]
+Description=AtamuraOKK Postgres + MinIO backup
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# Adjust to the deploy path + the user that can talk to docker.
+WorkingDirectory=/opt/AtamuraOKK
+User=okk
+Environment=BACKUP_DIR=/var/backups/atamuraokk
+Environment=RETENTION_DAYS=14
+ExecStart=/opt/AtamuraOKK/deploy/backup.sh
