@@ -38,7 +38,7 @@ async def dispatch_tick(ctx: dict[str, Any]) -> int:
     await reclaim_all_stale()
 
     try:
-        await run_ingestion()
+        await run_ingestion(limit=settings.ingest_batch_size)
     except Exception:
         logger.exception("dispatch: ingestion pass failed")
 

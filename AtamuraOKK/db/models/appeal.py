@@ -71,6 +71,12 @@ class Appeal(Base):
     # disputed_criteria) confirmed in the manager's favour and awarded full
     # marks. Drives the recomputed override_percent. NULL/empty = none confirmed.
     confirmed_criteria: Mapped[list[Any] | None] = mapped_column(JSONB)
+    # Red flags the head cleared when accepting the appeal, as a JSONB list of
+    # the flag strings (matched against the call's ``Score.flags``). Lets a
+    # presentation red flag disappear once its criterion is upheld, so the
+    # corrected breakdown stays self-consistent. Only applied on an accepted
+    # appeal; the read layer hides these flags (QA reports keep them).
+    dismissed_flags: Mapped[list[Any] | None] = mapped_column(JSONB)
     # The manager's own feedback on the call - why they disagree.
     reason: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(

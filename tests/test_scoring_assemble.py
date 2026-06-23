@@ -6,7 +6,7 @@ from AtamuraOKK.scoring.base import CallScore, CriterionScore
 from AtamuraOKK.scoring.rubric import Rubric, load_rubric
 from AtamuraOKK.scoring.worker import _assemble
 
-_OBJECTIONS_MAX = 21  # max of the objection criterion in tm-call-v2
+_OBJECTIONS_MAX = 21  # objections block max in tm-call-v3 (sum of its 5 criteria)
 _CLOSING_MAX = 37  # full max of the «Закрытие на КЭВ» criterion (category A)
 _CLOSING_B_MAX = 18  # reduced max for category B
 
@@ -61,12 +61,12 @@ def test_objections_scored_when_present() -> None:
     assert payload["percent"] == 100.0
 
 
-def test_five_criteria_with_recommendation() -> None:
-    """tm-call-v2 collapses to 5 criteria, each carrying a recommendation."""
+def test_granular_criteria_with_recommendation() -> None:
+    """tm-call-v3 is granular (15 criteria), each carrying a recommendation."""
     rubric = load_rubric()
     payload = _assemble(_call_score(rubric, objections_present=True), rubric)
 
-    assert len(payload["per_criterion"]) == 5
+    assert len(payload["per_criterion"]) == 15
     assert {c["block_id"] for c in payload["per_criterion"]} == {
         "greeting",
         "needs",
@@ -137,7 +137,7 @@ def test_category_c_omitting_closing_does_not_fail() -> None:
     """C excludes closing *before* the missing-criterion guard — no ValueError."""
     rubric = load_rubric()
     result = _call_score(rubric, objections_present=True)
-    result.criteria = [c for c in result.criteria if c.id != 4]  # model omits closing
+    result.criteria = [c for c in result.criteria if c.id != 10]  # model omits closing
 
     payload = _assemble(result, rubric, "C")
 

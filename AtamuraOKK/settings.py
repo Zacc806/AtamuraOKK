@@ -177,6 +177,13 @@ class Settings(BaseSettings):
     # 90s+ only: shorter calls have too little conversation to score meaningfully.
     ingest_success_code: str = "200"
     ingest_min_duration_sec: int = 90
+    # Max calls scanned per ingestion pass. Caps per-tick work so a large
+    # cold-start backlog drains over several committed chunks instead of one
+    # transaction that overruns the arq job timeout and rolls back — leaving the
+    # cursor unadvanced and re-scanning from scratch forever. Each chunk upserts
+    # its calls and advances the cursor, so the next tick resumes after it.
+    # None = unbounded (the pre-fix behaviour). Override via ATAMURAOKK_INGEST_BATCH_SIZE.
+    ingest_batch_size: int | None = 300
 
     # --- Analysis-scope filter (every recorded call until qualification) ---
     # A call is analyzable until its client "qualifies": the moment a deal of

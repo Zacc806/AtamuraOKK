@@ -153,6 +153,40 @@ async def _score_overrides(
     return {r.call_id: float(r.override_percent) for r in rows}
 
 
+async def _dismissed_flags(
+    session: AsyncSession,
+    call_ids: Sequence[int | None],
+) -> dict[int, set[str]]:
+    """``call_id → red-flag strings`` cleared by the latest accepted appeal.
+
+    Accepting an appeal can clear the red flags it resolves (e.g. a presentation
+    flag once that criterion is upheld); those strings are hidden wherever the
+    call's flags are shown. Mirrors ``_score_overrides`` — companion read layer
+    only, never the QA reports. A flag string that no longer matches the call's
+    flags (e.g. after a re-score) simply matches nothing, so the flag reappears.
+    """
+    ids = sorted({c for c in call_ids if c is not None})
+    if not ids:
+        return {}
+    rows = (
+        await session.execute(
+            text(
+                "SELECT DISTINCT ON (call_id) call_id, dismissed_flags "
+                "FROM appeals "
+                "WHERE call_id = ANY(:ids) AND status = 'accepted' "
+                "ORDER BY call_id, reviewed_at DESC NULLS LAST, id DESC",
+            ),
+            {"ids": ids},
+        )
+    ).all()
+    return {r.call_id: set(_flags(r.dismissed_flags)) for r in rows}
+
+
+def _visible_flags(value: Any, dismissed: set[str]) -> list[str]:
+    """The call's red flags with any an accepted appeal dismissed removed."""
+    return [f for f in _flags(value) if f not in dismissed]
+
+
 def _with_overrides(rows: Sequence[Any], overrides: dict[int, float]) -> list[Any]:
     """Replace each overridden row's ``percent``/``zone`` with the РОП correction.
 
@@ -478,6 +512,7 @@ async def get_calls_feed(
         )
     ).all()
     rows = await _apply_score_overrides(session, rows)
+    dismissed = await _dismissed_flags(session, [r.call_id for r in rows])
     return [
         CallFeedItem(
             call_id=r.call_id,
@@ -488,7 +523,7 @@ async def get_calls_feed(
             okk_5=okk.okk_5(float(r.percent) if r.percent is not None else None),
             target_status=r.target_status,
             sentiment_customer=r.sentiment_customer,
-            red_flags=_flags(r.red_flags),
+            red_flags=_visible_flags(r.red_flags, dismissed.get(r.call_id, set())),
             call_type=r.call_type,
             is_qualification_call=_is_qual(r),
             summary=r.summary or "",
@@ -658,6 +693,7 @@ async def get_crm_entity_calls(
         )
     ).all()
     rows = await _apply_score_overrides(session, rows)
+    dismissed = await _dismissed_flags(session, [r.call_id for r in rows])
     return [
         CallFeedItem(
             call_id=r.call_id,
@@ -668,7 +704,7 @@ async def get_crm_entity_calls(
             okk_5=okk.okk_5(float(r.percent) if r.percent is not None else None),
             target_status=r.target_status,
             sentiment_customer=r.sentiment_customer,
-            red_flags=_flags(r.red_flags),
+            red_flags=_visible_flags(r.red_flags, dismissed.get(r.call_id, set())),
             call_type=r.call_type,
             is_qualification_call=_is_qual(r),
             summary=r.summary or "",
@@ -734,18 +770,21 @@ async def get_call_feedback(
             started_at=row.started_at,
             original_percent=original_percent,
             criteria_index=criteria_index,
+            red_flags=_flags(row.red_flags),
         )
         if appeal is not None
         else None
     )
     # An accepted appeal awards its confirmed criteria full marks; reflect that in
     # the per-criterion breakdown so it stays consistent with the corrected
-    # headline percent (already folded in above via _with_overrides).
-    corrected_ids = (
-        {int(c) for c in (appeal.confirmed_criteria or [])}
-        if appeal is not None and appeal.status == APPEAL_ACCEPTED
-        else set()
-    )
+    # headline percent (already folded in above via _with_overrides). It can also
+    # clear the red flags the head judged resolved, so they don't contradict a
+    # criterion now shown at full marks.
+    corrected_ids: set[int] = set()
+    dismissed_flags: set[str] = set()
+    if appeal is not None and appeal.status == APPEAL_ACCEPTED:
+        corrected_ids = {int(c) for c in (appeal.confirmed_criteria or [])}
+        dismissed_flags = set(_flags(appeal.dismissed_flags))
 
     percent = float(row.percent) if row.percent is not None else None
     return CallFeedback(
@@ -770,7 +809,7 @@ async def get_call_feedback(
         strengths=row.strengths or "",
         growth_zone=row.growth_zone or "",
         training_recommendation=row.training_recommendation or "",
-        red_flags=_flags(row.red_flags),
+        red_flags=_visible_flags(row.red_flags, dismissed_flags),
         call_type=row.call_type,
         is_qualification_call=_is_qual(row),
         bitrix_url=crm_card_url(row.crm_entity_type, row.crm_entity_id),
@@ -866,8 +905,14 @@ def _appeal_view(
     started_at: datetime | None = None,
     original_percent: float | None = None,
     criteria_index: dict[int, Any] | None = None,
+    red_flags: list[str] | None = None,
 ) -> AppealView:
-    """Project an ``Appeal`` row into its DTO, with optional call context."""
+    """Project an ``Appeal`` row into its DTO, with optional call context.
+
+    ``red_flags`` is the appealed call's current flag list (so the head's review
+    screen can offer to clear each one); ``dismissed_flags`` carries those the
+    head already cleared on an accepted appeal.
+    """
     override = (
         float(appeal.override_percent)
         if appeal.override_percent is not None
@@ -881,6 +926,8 @@ def _appeal_view(
         department_id=appeal.department_bitrix_id,
         disputed_criteria=_disputed_views(appeal, criteria_index),
         confirmed_criteria=sorted({int(c) for c in (appeal.confirmed_criteria or [])}),
+        red_flags=red_flags or [],
+        dismissed_flags=_flags(appeal.dismissed_flags),
         reason=appeal.reason,
         status=appeal.status,
         override_percent=override,
@@ -1005,14 +1052,14 @@ async def _appeal_context(
     session: AsyncSession,
     call_ids: Sequence[int],
 ) -> dict[int, Any]:
-    """``call_id → row(manager_name, started_at, percent)`` for the review list."""
+    """``call_id → row(manager_name, started_at, percent, red_flags)`` for review."""
     ids = sorted(set(call_ids))
     if not ids:
         return {}
     rows = (
         await session.execute(
             text(
-                "SELECT call_id, manager_name, started_at, percent "
+                "SELECT call_id, manager_name, started_at, percent, red_flags "
                 "FROM call_scores_latest WHERE call_id = ANY(:ids)",
             ),
             {"ids": ids},
@@ -1037,6 +1084,7 @@ async def view_for_appeal(session: AsyncSession, appeal: Appeal) -> AppealView:
             else None
         ),
         criteria_index=criteria_index,
+        red_flags=_flags(getattr(ctx, "red_flags", None)),
     )
 
 
@@ -1078,6 +1126,7 @@ async def list_appeals(
                 else None
             ),
             criteria_index=criteria.get(a.call_id),
+            red_flags=_flags(getattr(context.get(a.call_id), "red_flags", None)),
         )
         for a in appeals
     ]
@@ -1093,6 +1142,7 @@ async def review_appeal(
     appeal: Appeal,
     *,
     confirmed_criteria: Sequence[int],
+    dismissed_flags: Sequence[str] = (),
     note: str | None,
     reviewed_by_bitrix_user_id: int | None,
 ) -> Appeal:
@@ -1100,8 +1150,10 @@ async def review_appeal(
 
     Each confirmed criterion is awarded full marks; the corrected total is
     derived from the call's stored per-criterion breakdown and persisted to
-    ``override_percent`` (which the read layer then prefers). Confirming nothing
-    is a rejection — the original LLM score stands.
+    ``override_percent`` (which the read layer then prefers). ``dismissed_flags``
+    are red flags the head cleared as resolved (only kept on acceptance, so they
+    never contradict a criterion now shown at full marks). Confirming nothing is
+    a rejection — the original LLM score and all its red flags stand.
     """
     confirmed = sorted({int(c) for c in confirmed_criteria})
     appeal.confirmed_criteria = confirmed
@@ -1116,8 +1168,10 @@ async def review_appeal(
             for cid, row in index.items()
         ]
         appeal.override_percent = recompute_percent(per_criterion, set(confirmed))
+        appeal.dismissed_flags = sorted({str(f) for f in dismissed_flags})
     else:
         appeal.override_percent = None
+        appeal.dismissed_flags = None
     appeal.head_note = note
     appeal.reviewed_by_bitrix_user_id = reviewed_by_bitrix_user_id
     appeal.reviewed_at = datetime.now(UTC)

@@ -118,7 +118,7 @@ score; reminders/vendor/internal/wrong-number calls are excluded.
 | POST | `/api/v1/users/{id}/revoke` | deactivate a key. Global head: manager + scoped-head keys (dept-NULL head rows are `403`, env/CLI-only); scoped head: own department's manager keys only |
 | POST | `/api/v1/calls/{call_id}/appeal` | file an appeal against specific criteria of a call's ОКК score (`{disputed_criteria?: [{criterion_id, reason?}], reason?}` — each `criterion_id` is a checklist criterion number from the call's per-criterion breakdown; `reason` is overall feedback). **Manager only**, and only on their own call; an unscored call → `404`, an unknown `criterion_id` for the call → `422`, a second appeal while one is still `pending` → `409`. Returns the `AppealView` |
 | GET | `/api/v1/appeals?status=&limit=` | appeals visible to the caller, newest first — a head sees their scope (global = all, office РОП = own department), a manager sees only their own. `?status=pending` is the head's review queue |
-| POST | `/api/v1/appeals/{appeal_id}/review` | head verdict (`{confirmed_criteria?: [criterion_id, ...], note?}`). **Head only** (a scoped head only their department's appeals). Each confirmed criterion (must be one the manager contested, else `422`) is awarded **full marks** and the call's percent **recalculates automatically**; confirming nothing rejects the appeal. The recomputed percent becomes the score the cabinet shows for that call |
+| POST | `/api/v1/appeals/{appeal_id}/review` | head verdict (`{confirmed_criteria?: [criterion_id, ...], dismissed_flags?: [str, ...], note?}`). **Head only** (a scoped head only their department's appeals). Each confirmed criterion (must be one the manager contested, else `422`) is awarded **full marks** and the call's percent **recalculates automatically**; `dismissed_flags` are red-flag strings the head clears as resolved, applied **only on an accepted appeal** (when ≥1 criterion is confirmed). Confirming nothing rejects the appeal and leaves the score and all its red flags unchanged. The recomputed percent becomes the score the cabinet shows for that call |
 
 **Appeals** (апелляции) let a manager contest **specific criteria** of a call's
 ОКК score for a head to re-check by listening to the recording. They write only
@@ -138,6 +138,18 @@ flipped that criterion to full marks. The `AppealView` enriches every contested
 criterion (`disputed_criteria`) with its `block_name`/`criterion_text`/
 `original_score`/`max`, and lists the head's `confirmed_criteria`, so the review
 queue renders in one round-trip.
+
+Red flags (`Score.flags`) are free-text strings the scorer emits, **not tied to
+any criterion** — so when an accepted appeal lifts a criterion to full marks, a
+red flag about that same area would otherwise still show above it. On review the
+head can therefore clear the flags the appeal resolves (`dismissed_flags`,
+stored on the accepted appeal); `_dismissed_flags`/`_visible_flags` hide them
+**everywhere the call's flags appear** in the read layer (per-call авто-разбор,
+the call feed, the CRM-card search). The `AppealView` carries the call's current
+`red_flags` (so the review queue can offer to clear each) and the
+`dismissed_flags` already cleared. Like the percent override, dismissal lives in
+the companion read layer only — the QA reports keep every flag. A flag string
+that no longer matches the call's flags after a re-score simply isn't hidden.
 
 `period` defaults to the current month in `report_timezone`; a malformed value
 returns `422`. Unknown manager/department/call returns `404`; a manager asking

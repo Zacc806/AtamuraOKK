@@ -29,7 +29,7 @@ async def test_seeds_one_active_rubric_per_source(dbsession: AsyncSession) -> No
     """Both production rubrics land, each its source's single active row."""
     await seed_active_rubrics(session=dbsession)
     assert await _active_by_source(dbsession) == {
-        "tm": "tm-call-v2",
+        "tm": "tm-call-v3",
         "op": "okk_meeting_v1",
     }
 
@@ -55,7 +55,7 @@ async def test_new_version_deactivates_old_within_source(
         definition={"id": "okk_meeting_v2", "criteria": []},
     )
     assert await _active_by_source(dbsession) == {
-        "tm": "tm-call-v2",
+        "tm": "tm-call-v3",
         "op": "okk_meeting_v2",
     }
 

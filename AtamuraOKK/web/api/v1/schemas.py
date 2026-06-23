@@ -296,6 +296,14 @@ class AppealView(BaseModel):
         default_factory=list,
         description="Criterion ids the head confirmed (awarded full marks)",
     )
+    red_flags: list[str] = Field(
+        default_factory=list,
+        description="The call's red flags, so the review screen can offer to clear",
+    )
+    dismissed_flags: list[str] = Field(
+        default_factory=list,
+        description="Red flags the head cleared when accepting this appeal",
+    )
     reason: str | None = None
     status: str = Field(description="pending | accepted | rejected")
     override_percent: float | None = Field(
@@ -348,6 +356,14 @@ class AppealReview(BaseModel):
     confirmed_criteria: list[int] = Field(
         default_factory=list,
         description="Criterion ids to confirm (full marks); empty = reject",
+        max_length=100,
+    )
+    dismissed_flags: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Red flag strings to clear from the call (only applied when the "
+            "appeal is accepted, i.e. at least one criterion is confirmed)"
+        ),
         max_length=100,
     )
     note: str | None = Field(default=None, max_length=2000)

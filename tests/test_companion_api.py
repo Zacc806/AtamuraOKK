@@ -1868,6 +1868,7 @@ async def _seed_call_with_criteria(
     bitrix_call_id: str,
     manager: Manager,
     scores: list[tuple[int, int, int]],
+    flags: list[str] | None = None,
 ) -> Call:
     """Seed a SCORED call whose per_criterion is ``[(id, score, max), ...]``.
 
@@ -1923,7 +1924,7 @@ async def _seed_call_with_criteria(
             },
             sentiment={"customer": "позитивный", "agent": "нейтральный"},
             summary="Тестовый звонок.",
-            flags=[],
+            flags=flags or [],
             model="fake/test",
         ),
     )
@@ -2122,6 +2123,105 @@ async def test_head_confirms_criterion_and_score_recalculates(
         )
     ).json()
     assert card["okk"]["percent"] == 80.0
+
+
+async def test_head_dismisses_red_flag_when_accepting_appeal(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+    head_auth: dict[str, str],
+) -> None:
+    """Accepting an appeal clears a related red flag the head ticks as resolved."""
+    mgr = await _manager_701(dbsession)
+    call = await _seed_call_with_criteria(
+        dbsession,
+        bitrix_call_id="ap-flag",
+        manager=mgr,
+        scores=[(1, 2, 5), (2, 4, 5)],
+        flags=["Не провёл презентацию ЖК", "Обещал скидку без согласования"],
+    )
+
+    filed = await client.post(
+        f"/api/v1/calls/{call.id}/appeal",
+        headers=manager_auth,
+        json={
+            "disputed_criteria": [{"criterion_id": 1, "reason": "презентацию провёл"}],
+            "reason": "СТТ не распознал презентацию",
+        },
+    )
+    appeal_id = filed.json()["id"]
+
+    # The head's queue surfaces the call's red flags so they can be cleared.
+    resp = await client.get("/api/v1/appeals?status=pending", headers=head_auth)
+    queue = resp.json()
+    assert set(queue[0]["red_flags"]) == {
+        "Не провёл презентацию ЖК",
+        "Обещал скидку без согласования",
+    }
+
+    # Confirm criterion 1 and clear the presentation flag — leave the other flag.
+    review = await client.post(
+        f"/api/v1/appeals/{appeal_id}/review",
+        headers=head_auth,
+        json={
+            "confirmed_criteria": [1],
+            "dismissed_flags": ["Не провёл презентацию ЖК"],
+            "note": "презентация была, флаг снимаю",
+        },
+    )
+    assert review.status_code == 200
+    assert review.json()["dismissed_flags"] == ["Не провёл презентацию ЖК"]
+
+    # The cleared flag is gone from the call detail; the unrelated one remains.
+    fb = (
+        await client.get(f"/api/v1/calls/{call.id}/feedback", headers=head_auth)
+    ).json()
+    assert fb["red_flags"] == ["Обещал скидку без согласования"]
+
+    # ...and from the manager's feed item for the same call.
+    feed = (
+        await client.get("/api/v1/managers/701/calls", headers=head_auth)
+    ).json()
+    item = next(c for c in feed if c["call_id"] == call.id)
+    assert item["red_flags"] == ["Обещал скидку без согласования"]
+
+
+async def test_rejected_appeal_keeps_red_flags(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    manager_auth: dict[str, str],
+    head_auth: dict[str, str],
+) -> None:
+    """Confirming no criteria rejects the appeal; ticked flags are not cleared."""
+    mgr = await _manager_701(dbsession)
+    call = await _seed_call_with_criteria(
+        dbsession,
+        bitrix_call_id="ap-flag-reject",
+        manager=mgr,
+        scores=[(1, 2, 5)],
+        flags=["Не провёл презентацию ЖК"],
+    )
+    filed = await client.post(
+        f"/api/v1/calls/{call.id}/appeal",
+        headers=manager_auth,
+        json={"disputed_criteria": [{"criterion_id": 1, "reason": "—"}]},
+    )
+    appeal_id = filed.json()["id"]
+
+    review = await client.post(
+        f"/api/v1/appeals/{appeal_id}/review",
+        headers=head_auth,
+        json={
+            "confirmed_criteria": [],
+            "dismissed_flags": ["Не провёл презентацию ЖК"],
+        },
+    )
+    assert review.json()["status"] == "rejected"
+
+    fb = (
+        await client.get(f"/api/v1/calls/{call.id}/feedback", headers=head_auth)
+    ).json()
+    assert fb["red_flags"] == ["Не провёл презентацию ЖК"]
 
 
 async def test_review_confirm_outside_disputed_422(

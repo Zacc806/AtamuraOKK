@@ -460,7 +460,10 @@ async def review_appeal(
     Global head reviews any appeal; an office РОП only their own department's.
     Each confirmed criterion is awarded full marks and the call's score
     recalculates automatically — that corrected percent is what the cabinet shows
-    for the call everywhere. Confirming nothing rejects the appeal.
+    for the call everywhere. The head may also clear red flags the appeal
+    resolves (``dismissed_flags``), so they don't contradict a criterion now at
+    full marks; flags clear only on an accepted appeal. Confirming nothing
+    rejects the appeal and leaves the score and all its red flags unchanged.
     """
     ensure_head(identity)
     appeal = await service.get_appeal(session, appeal_id)
@@ -487,6 +490,7 @@ async def review_appeal(
         session,
         appeal,
         confirmed_criteria=payload.confirmed_criteria,
+        dismissed_flags=payload.dismissed_flags,
         note=payload.note,
         reviewed_by_bitrix_user_id=identity.bitrix_user_id,
     )
