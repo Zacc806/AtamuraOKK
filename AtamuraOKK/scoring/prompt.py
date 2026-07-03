@@ -45,26 +45,32 @@ _SYSTEM = """\
 ведёт к встрече — он может быть на любой стороне. Определи его сам и оценивай \
 ТОЛЬКО его реплики (manager_identified=true). Если менеджера определить нельзя — \
 manager_identified=false и is_qualification_call=false.
+- Дополнительно укажи в manager_side, на какой СТОРОНЕ оказался менеджер: «A» — если \
+он на СТОРОНЕ A (аудиоканал 1), «B» — если на СТОРОНЕ B (аудиоканал 2). Если менеджер \
+не определён или запись в один канал (ЗАПИСЬ) — manager_side=«unknown».
 
-Оценка:
+Оценка (бинарная, по элементам):
 - Звонок может быть на русском или казахском; оценивай одинаково строго, цитаты \
 приводи на языке оригинала.
-- Каждый критерий оценивай ЦЕЛОСТНО (холистически) по всей его шкале \
-0..max, учитывая все аспекты из описания критерия, а НЕ по принципу «всё или \
-ничего». Ориентиры:
-  • max — выполнено полностью и качественно по всем аспектам критерия;
-  • ~75% от max — выполнено, но с заметными недочётами / часть аспектов слабее;
-  • ~50% от max — выполнено частично либо предпринята явная, но неполная попытка;
-  • ~25% от max — слабая, формальная или вскользь затронутая попытка;
-  • 0 — менеджер не сделал по критерию НИЧЕГО / критерий отсутствует в разговоре.
-- Округляй до целого балла. Ставь 0 только при полном отсутствии действия — любую \
-частичную работу засчитывай частичным баллом, а не нулём.
-- Если у клиента НЕ было возражений — поставь objections_present=false. В этом \
-случае критерий «Отработка возражений» НЕ оценивается и не влияет на итоговый балл \
-(балл по нему можешь не заполнять).
-- Для каждого критерия дай justification (краткое обоснование, рус.), evidence \
+- Каждый элемент чек-листа оценивай БИНАРНО: score=1 (ДА — элемент выполнен) или \
+score=0 (НЕТ — не выполнен). Промежуточных баллов нет. Ориентируйся на описания \
+«ДА когда» / «НЕТ когда» рядом с каждым элементом.
+- «Выяснил X» = менеджер получил ответ ЛИБО, если клиент ушёл от ответа, \
+переспросил / вернулся к вопросу (оцениваем работу менеджера, а не послушность \
+клиента).
+- Н.П. (неприменимо): для некоторых элементов в чек-листе указано условие «Н.П.». \
+Если оно выполняется — поставь applicable=false (элемент выпадает из подсчёта и \
+НЕ считается за 0). Для элементов БЕЗ условия Н.П. всегда ставь applicable=true и \
+оценивай 0/1.
+- Если у клиента НЕ было возражений — поставь objections_present=false. Тогда весь \
+блок «Отработка возражений» неприменим: по его элементам поставь applicable=false \
+(они выпадают из оценки целиком).
+- Итоговый балл считает система: ДА ÷ (число применимых элементов) × 100 по всем \
+элементам (каждый элемент весит одинаково; блоки только группируют элементы). Тебе \
+считать его не нужно — верни только оценки по элементам.
+- Для каждого элемента дай justification (краткое обоснование, рус.), evidence \
 (цитата из разговора на языке оригинала или пусто) и recommendation (конкретная \
-рекомендация менеджеру: что улучшить по этому критерию на следующем звонке, рус.).
+рекомендация менеджеру: что улучшить по этому элементу на следующем звонке, рус.).
 - Дополнительно: тональности, резюме, красные флаги, целевой статус, сильные \
 стороны, зона роста, рекомендация по обучению — на русском.
 
@@ -87,49 +93,24 @@ def present_transcript(transcript: str) -> str:
     return transcript
 
 
-# Human label for the client's lead category in the prompt.
-_CATEGORY_NAME = {
-    "A": "A (горячий)",
-    "B": "B (тёплый)",
-    "C": "C (холодный)",
-    "X": "X (неуспешный разговор)",
-}
-
-# Per-category guidance for the meeting-closing criterion «Закрытие на КЭВ».
-# A / None / X keep the default (hard meeting push). Only B and C differ.
-_CATEGORY_NOTE = {
-    "B": (
-        "Клиент категории B (тёплый) по регламенту квалификации: немедленная встреча "
-        "НЕ ожидается — менеджер продолжает работать с лидом. По критерию «Закрытие на "
-        "КЭВ» засчитывай как успех договорённость о следующем контакте / фоллоу-апе "
-        "(например, через 1–2 недели), а не жёсткий дожим на встречу прямо сейчас. "
-        "Оценивай этот критерий по сокращённой шкале (см. max в чек-листе)."
-    ),
-    "C": (
-        "Клиент категории C (холодный) по регламенту квалификации: встреча запрещена и "
-        "в план не засчитывается. Критерий «Закрытие на КЭВ» НЕ оценивается и исключён "
-        "из чек-листа — не выставляй по нему балл и не включай его в массив criteria."
-    ),
-}
-
-
-def _checklist(rubric: Rubric, category: str | None) -> str:
-    """Render the checklist, using per-category maxima.
-
-    A criterion whose category-max is 0 (e.g. «Закрытие на КЭВ» for category C) is
-    omitted entirely — the model is told not to score it and ``_assemble`` excludes
-    it too. Reduced maxima (category B) are shown so the model scores on that scale.
-    """
+def _checklist(rubric: Rubric) -> str:
+    """Render the binary checklist grouped by block, with ДА/НЕТ/Н.П. rules."""
     lines: list[str] = []
-    current_block = ""
-    for c in rubric.scored_criteria:
-        eff_max = rubric.max_for(c, category)
-        if eff_max is None:
-            continue
-        if c.block_name != current_block:
-            current_block = c.block_name
-            lines.append(f"\n## {c.block_name}")
-        lines.append(f"{c.id}. (max {eff_max}) {c.text}")
+    for block in rubric.block_list:
+        header = f"\n## {block.name}"
+        if block.na_if_no_objections:
+            header += " (весь блок — Н.П., если возражений не было)"
+        lines.append(header)
+        for c in block.criteria:
+            parts = [f"{c.id}. {c.text}"]
+            if c.yes_rule:
+                parts.append(f"ДА(1): {c.yes_rule}")
+            if c.no_rule:
+                parts.append(f"НЕТ(0): {c.no_rule}")
+            parts.append(
+                f"Н.П.: {c.na_rule}" if c.na_rule else "Н.П.: не применяется"
+            )
+            lines.append(" — ".join(parts))
     return "\n".join(lines)
 
 
@@ -139,29 +120,28 @@ def build_messages(
     direction: str,
     client_category: str | None = None,
 ) -> list[dict[str, str]]:
-    """Return chat messages for the scorer."""
-    checklist = _checklist(rubric, client_category)
+    """Return chat messages for the scorer.
+
+    ``client_category`` is accepted for interface compatibility but the v4 rubric
+    does not re-weight by lead category (the sheet handles edge cases via
+    per-element Н.П.), so it does not affect the checklist.
+    """
+    checklist = _checklist(rubric)
 
     direction_ru = {
         "outbound": "исходящий (компания звонит клиенту)",
         "inbound": "входящий (звонят в компанию)",
     }.get(direction, "направление неизвестно")
 
-    cat_label = _CATEGORY_NAME.get(client_category or "", "не указана")
-    cat_lines = f"Категория клиента: {cat_label}.\n"
-    note = _CATEGORY_NOTE.get(client_category or "")
-    if note:
-        cat_lines += f"{note}\n"
-
     user = (
-        f"Направление звонка: {direction_ru}.\n"
-        f"{cat_lines}\n"
-        f"ЧЕК-ЛИСТ (оцени каждый критерий по его id, 0..max):\n{checklist}\n\n"
+        f"Направление звонка: {direction_ru}.\n\n"
+        f"ЧЕК-ЛИСТ (по каждому элементу поставь score 0/1 и applicable):\n"
+        f"{checklist}\n\n"
         f"ТРАНСКРИПТ ЗВОНКА:\n{present_transcript(transcript)}\n\n"
         "Верни строго по схеме: call_type, is_qualification_call, "
-        "manager_identified, массив criteria "
-        "{id, score, justification, evidence, recommendation} "
-        "для КАЖДОГО критерия выше, objections_present, тональности, резюме, "
+        "manager_identified, manager_side, массив criteria "
+        "{id, score, applicable, justification, evidence, recommendation} "
+        "для КАЖДОГО элемента выше, objections_present, тональности, резюме, "
         "красные флаги, целевой статус, сильные стороны, зону роста, "
         "рекомендацию по обучению, payment_method, wants_to_visit, on_premises."
     )

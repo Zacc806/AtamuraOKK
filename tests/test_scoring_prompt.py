@@ -1,4 +1,4 @@
-"""Tests for category-aware scoring-prompt construction (no DB / no LLM)."""
+"""Tests for the binary scoring-prompt construction (no DB / no LLM)."""
 
 from __future__ import annotations
 
@@ -15,32 +15,35 @@ def _checklist(user: str) -> str:
     return user.split("ЧЕК-ЛИСТ", 1)[1].split("ТРАНСКРИПТ", 1)[0]
 
 
-def test_prompt_b_shows_reduced_closing_max() -> None:
-    """Category B presents «Закрытие на КЭВ» on the reduced (18) scale."""
+def test_prompt_lists_every_block_and_element() -> None:
+    """All 8 blocks and 34 elements are rendered with ДА/НЕТ rules."""
     rubric = load_rubric()
-    user = _user(build_messages("[AGENT] привет", rubric, "outbound", "B"))
+    checklist = _checklist(_user(build_messages("[AGENT] привет", rubric, "outbound")))
 
-    assert "Категория клиента: B" in user
-    checklist = _checklist(user)
-    assert "## Закрытие на КЭВ" in checklist
-    assert "max 18" in checklist
-    assert "max 37" not in checklist
+    for block in rubric.block_list:
+        assert f"## {block.name}" in checklist
+    for c in rubric.scored_criteria:
+        assert f"{c.id}. {c.text}" in checklist
+    assert "ДА(1):" in checklist
+    assert "НЕТ(0):" in checklist
 
 
-def test_prompt_c_excludes_closing_from_checklist() -> None:
-    """Category C drops the closing criterion from the checklist entirely."""
+def test_prompt_marks_na_rules() -> None:
+    """Elements with a Н.П. rule show it; others say it does not apply."""
     rubric = load_rubric()
-    user = _user(build_messages("[AGENT] привет", rubric, "outbound", "C"))
+    checklist = _checklist(_user(build_messages("[AGENT] привет", rubric, "outbound")))
 
-    assert "Категория клиента: C" in user
-    assert "НЕ оценивается" in user  # the C closing instruction is present
-    assert "## Закрытие на КЭВ" not in _checklist(user)
+    assert "Н.П.: Способ оплаты — не ипотека" in checklist  # item 17
+    assert "Н.П.: не применяется" in checklist  # a mandatory element
+    # The objections block carries its whole-block Н.П. note.
+    assert "весь блок — Н.П., если возражений не было" in checklist
 
 
-def test_prompt_default_full_closing() -> None:
-    """No category -> full closing weight, no special instruction."""
+def test_prompt_category_is_not_weighted() -> None:
+    """client_category no longer changes the checklist (v4 dropped weighting)."""
     rubric = load_rubric()
-    user = _user(build_messages("[AGENT] привет", rubric, "outbound", None))
+    with_cat = _checklist(_user(build_messages("[AGENT] x", rubric, "outbound", "B")))
+    no_cat = _checklist(_user(build_messages("[AGENT] x", rubric, "outbound", None)))
 
-    assert "Категория клиента: не указана" in user
-    assert "max 37" in _checklist(user)
+    assert with_cat == no_cat
+    assert "Категория клиента" not in with_cat

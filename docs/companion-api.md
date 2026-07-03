@@ -103,15 +103,19 @@ score; reminders/vendor/internal/wrong-number calls are excluded.
 |---|---|---|
 | GET | `/api/v1/me` | who am I — role + linked manager profile + `department` scope (manager's own dept, or the dept a scoped head is limited to; null for the global head). The cabinet boots from this |
 | GET | `/api/v1/managers/{manager_id}/scorecard?period=YYYY-MM` | ОКК scorecard (`okk` + `zone_distribution` + `meetings` + null `money`) |
-| GET | `/api/v1/managers/{manager_id}/calls?since=&limit=` | Звонки feed — scored calls, newest first; each carries `bitrix_url` (deep link to the call's CRM card, null when not derivable) |
+| GET | `/api/v1/managers/{manager_id}/calls?since=&limit=` | Звонки feed — scored calls, newest first; each carries `bitrix_url` (deep link to the call's CRM card, null when not derivable) plus `client_name`/`phone` — resolved from the linked Bitrix **contact** per load (batched, TTL-cached, best-effort; a deal/company/lead/bare-phone call or a Bitrix outage leaves them null). The cabinet titles each row `client_name → phone → целевой/нецелевой`. This is the one place client identity enters the otherwise-anonymized QA feed — safe because the feed is already role-scoped |
 | GET | `/api/v1/calls/{call_id}/feedback` | авто-разбор за 90 сек — summary/strengths/growth/criteria + `bitrix_url` (CRM-card deep link) + `transcript` (speaker-labeled blocks: `agent`/`customer`, coalesced; falls back to one `unknown` block from `full_text`) |
 | GET | `/api/v1/crm/{entity_type}/{entity_id}/calls` | scored calls attached to a Bitrix **CRM card**, newest first — same `CallFeedItem` shape as the manager feed. `entity_type`/`entity_id` are the card URL's path segments (`deal`/`contact`/`company`/`lead`); **opening a call from Bitrix lands on the contact card** (`…/crm/contact/details/429546/`) and calls link to the contact. The card is cross-resolved live through Bitrix (deal→its contacts/company; contact/company→their deals etc.) so the same calls surface whichever card is pasted; a Bitrix outage degrades to calls linked directly to the pasted entity. Scoped to the caller — a manager sees only their own calls, a scoped head only their department's — so an unrelated/out-of-scope card returns `[]`. Unknown `entity_type` → `404` |
 | GET | `/api/v1/deals/{deal_id}/calls` | alias of `/crm/deal/{deal_id}/calls` (kept for back-compat) |
 | GET | `/api/v1/managers/{manager_id}/meetings?since=&limit=` | Встречи feed — scored ОП meetings, newest first |
 | GET | `/api/v1/meetings/{meeting_id}/feedback` | авто-разбор for one meeting — score/tone/red flags/criteria |
 | GET | `/api/v1/managers/{manager_id}/feed?since=&limit=` | unified Звонки+Встречи feed — kind-tagged items, newest first |
+| GET | `/api/v1/managers/{manager_id}/analytics?period=YYYY-MM` | Моя Аналитика — four blocks (`funnel`/`tasks`/`meetings`/`calls`), each live from Bitrix with its own `status`. See **Analytics** below |
+| GET | `/api/v1/managers/{manager_id}/analytics/cr-trend?period=YYYY-MM` | the funnel's monthly CR trend (`[{period, cr_pct}]`), split off and **loaded lazily** — a heavy multi-month Bitrix pull kept off the main `/analytics` so it never delays the four blocks |
+| GET | `/api/v1/managers/{manager_id}/hygiene?period=YYYY-MM` | ОКК · Гигиена CRM — five discipline criteria (`statuses`/`anketa`/`tasks_set`/`tasks_on_time`/`notes`), each live from Bitrix with its own `status`, plus an `overall_pct` index. See **CRM hygiene** below |
 | GET | `/api/v1/rubrics` | active criteria set per `source` (`"tm"` calls / `"op"` meetings) |
 | GET | `/api/v1/teams/{department_id}/summary?period=YYYY-MM` | РОП-вид — per-manager roster + group rollup, calls **and** meetings (**head only**; a scoped head only their own department). For the **TM department** each roster card + the group carry `money.meetings` = conversions to «Фактический визит» (live from Bitrix stage history; null when Bitrix is unavailable / non-TM department) |
+| GET | `/api/v1/teams/{department_id}/overdue-tasks` | РОП «Просроченные задачи» — every incomplete activity of the department's team whose deadline has already passed (просроченные до сейчас), oldest-due first, each attributed to its responsible manager. Live from Bitrix `crm.activity.list`; capped (`companion_overdue_max_items`, `truncated` flag). Empty (not an error) when Bitrix is unavailable (**head only**; a scoped head only their own department) |
 | GET | `/api/v1/departments` | departments (`{bitrix_id, name}`, name-sorted) for the office-РОП assignment dropdown; names lazily backfilled from Bitrix `department.get` (**global head only**) |
 | GET | `/api/v1/users` | cabinet users — all for the global head; a scoped head sees only their own department's manager keys (**head only**) |
 | POST | `/api/v1/users` | issue a key; raw key returned once. Manager (`{bitrix_user_id, name?}`): any head — a scoped head's manager is tied to their department. Head (`{role: "head", department_id, name? \| bitrix_user_id?}`): **global head only** |
@@ -154,6 +158,106 @@ that no longer matches the call's flags after a re-score simply isn't hidden.
 `period` defaults to the current month in `report_timezone`; a malformed value
 returns `422`. Unknown manager/department/call returns `404`; a manager asking
 for anyone but themselves gets `403`.
+
+### Analytics (Моя Аналитика)
+
+`GET /managers/{id}/analytics?period=YYYY-MM` is a **live read-through to
+Bitrix** (like `/day` — see `companion-day.md`), not a Postgres read. It reuses
+`day`'s cache-backed stage-history helpers (so a period already pulled for `/day`
+isn't re-pulled) and returns four independently-resilient blocks; a failing
+sub-read degrades **that block** to `status:"not_available"` rather than failing
+the view, and any field that could not be read is `null` (the cabinet shows
+"—"), never a misleading zero. Scoped like every manager path (a manager sees
+only their own). Cached per `(manager, period)` for `companion_day_cache_ttl_seconds`.
+
+- **`funnel`** — `stages[]` (`leads → no_answer → qualified → meeting_set →
+  arrived → bought → closed_lost`, each `{key, label, count, breakdown?}`) + `overall_cr_pct`
+  (arrived ÷ leads — the leakage bars are **not** in the CR chain). Counts come
+  from `crm.stagehistory.list` entrants (qualified/meeting-set, by
+  `ASSIGNED_BY_ID`) and the WON «Фактический визит» attribution via «Сотрудник ТМ»
+  (`arrived`, shared with `/day`'s meeting counter). **`no_answer`** («Недозвон»)
+  = distinct deals that entered a Недозвон stage in the period
+  (`companion_no_answer_stage_ids`, list-valued so a lead passing Недозвон 1 then
+  2 counts once). **`closed_lost`** («Закрыто (отказ)») = deals closed with fail
+  semantics (`crm.deal.list`, `STAGE_SEMANTIC_ID='F'`, scoped by `CLOSEDATE`) —
+  lost deals rest in cat 24, so a snapshot count is correct. Its `breakdown[]`
+  (`{label, count, reason_id}`, largest-first) splits that count by **отказ-причина**
+  — the deal enum field `companion_closed_reason_field` (labels resolved live from
+  `crm.deal.fields`; deals with no reason fall into «Не указана»). Both are leakage
+  branches, not sequential steps; the UI shows them as a share of leads. **`bought`** («купили») follows the deal
+  into the **sales funnel**: after the visit the TM deal moves to cat 2 «Отдел
+  продаж» and is reassigned to the closer but keeps «Сотрудник ТМ», so a signed
+  booking (`C2:WON` «БРОНЬ ПОДПИСАН») is attributed back to the TM via stage
+  history — the same join as `arrived`, just a different category/stage
+  (`companion_sales_category_id` / `companion_sold_stage_id`). `funnel.trend` is
+  **always `[]` on this endpoint** — the monthly CR trend is served lazily by
+  `/analytics/cr-trend` (see the perf note below).
+- **`tasks`** — `total` / `closed` / `overdue` / `pending` from `crm.activity.list`
+  counts by `RESPONSIBLE_ID` and `DEADLINE` window (`COMPLETED=Y` → closed;
+  `COMPLETED=N` split by deadline vs now into overdue/pending). **`closed_on_time`
+  is `null`** — splitting on-time vs late closes needs a per-activity completion
+  timestamp the count API does not expose.
+- **`meetings`** — `meetings_set` / `arrived` / `rescheduled` / `no_show` /
+  `bought` from stage history. `rescheduled` counts deals that entered the
+  meeting-set stage **2+ times** in the period (a re-booking); `bought` is the
+  cat-2 signed-booking count attributed to the TM (see funnel).
+- **`calls`** — `talk_time_sec` / `completed` / `no_answer` / `incoming` from a
+  single `voximplant.statistic.get` pull (answered = `CALL_FAILED_CODE ==
+  ingest_success_code`; incoming = `CALL_TYPE == 2`).
+
+**Perf — a cold `/analytics` is a heavy fan-out.** Each block attributes
+**dept-wide** stage-history transitions back to managers by looking up every
+deal's assignee / «Сотрудник ТМ» (O(deals) Bitrix calls), so a cold pull for a
+high-volume manager/busy month is slow. Mitigations, in order of impact:
+1. **The CR trend is split off** into `/analytics/cr-trend`, loaded by the cabinet
+   **after** the four blocks (and degrading to empty on its own) so it can never
+   delay them; the trend itself uses **one combined `crm.stagehistory.list` pull**
+   over the whole window (`day.won_by_month_for_tm`, bucketing WON by
+   `CREATED_TIME`) instead of N monthly pulls.
+2. **`get_analytics` prefetches the shared heavy pulls concurrently** (the three
+   `stage_outcomes_by_assignee` + conducted-visit + sold + telephony in one
+   `asyncio.gather`) so the funnel/meetings then read warm caches — roughly halves
+   cold wall-time (the `BitrixClient` self-throttles on rate limits, so
+   concurrency is safe). Measured ~19s cold for a busy manager (vs ~40s serial).
+3. **Long cache** (`companion_analytics_cache_ttl_seconds`, default 600s vs
+   `/day`'s 60s), and the heavy pulls are **shared dept-wide** — so the first
+   manager/period load warms the caches for the whole team, and repeat views are
+   instant. The cabinet's nginx `/api/` `proxy_read_timeout` is **90s** to let a
+   cold pull finish (per-block "Загрузка…" shows meanwhile).
+
+A genuinely instant analytics screen would need these stats **precomputed into
+Postgres** by a periodic job (the live read-through is the v1). Stage ids / trend length are settings
+(`companion_qualified_stage_id`, `companion_no_show_stage_id`,
+`companion_meeting_set_stage_id`, `companion_meeting_stage_id`,
+`companion_no_answer_stage_ids`, `companion_analytics_trend_months`). Service:
+`web/api/v1/analytics.py`.
+
+### CRM hygiene
+
+`GET /managers/{id}/hygiene?period=...` is a **live read-through to Bitrix** (open
+deals + activities, same caching/role-scoping as `/analytics`) that measures the
+discipline of keeping the deal card in order *after* the call. It returns a
+`HygieneView` — `{manager, period, norm_pct, overall_pct, criteria:[…]}` — where
+`overall_pct` is the mean of the **live** criteria (None if none are live) and
+each `HygieneCriterion` carries `{key, status, pct, numerator, denominator, note}`.
+A criterion whose source is not wired returns `status:"not_available"` (cabinet
+badges it «нет данных») rather than a fake `0`. The five criteria:
+
+| key | «…» | computed from | denominator |
+|---|---|---|---|
+| `statuses` | Правильное вписывание статусов | open TM deals **not stale** (touched within `companion_hygiene_stale_days`, default 14) | open deals |
+| `anketa` | Правильное заполнение анкеты | open deals with **every** `companion_anketa_fields` UF field non-empty; **unconfigured → not_available** | open deals |
+| `tasks_set` | Постановка дел | open deals carrying ≥1 **open** activity (one `crm.activity.list` owner pull, intersected with the open-deal ids) | open deals |
+| `tasks_on_time` | Исполнение дел в сроки | of activities whose deadline already passed in the period, the share **not left overdue** (two count reads) | due-passed activities |
+| `notes` | Примечание по шаблону | completed call activities with a non-empty note (containing `companion_note_template_marker` when set) | completed calls in period |
+
+**Honest limits (documented in each criterion's `note`):** `statuses` is a *stale-
+card proxy* — the strict "stage matches the call outcome" check needs an ОКК
+transcript↔stage comparison on the scoring side (not wired). `tasks_on_time`
+counts a late-but-closed task as on-time (a count API exposes no per-activity
+completion timestamp). `anketa`/`notes` are config-gated: they go live the moment
+the PM supplies `ATAMURAOKK_COMPANION_ANKETA_FIELDS` / `…_NOTE_TEMPLATE_MARKER`.
+Cache: `companion_hygiene_cache_ttl_seconds` (600s). Service: `web/api/v1/hygiene.py`.
 
 Meetings come from the ОП meeting pipeline (`AtamuraOKK/scoring/meetings/`):
 scored recordings are mirrored into the Postgres `meetings` table by its

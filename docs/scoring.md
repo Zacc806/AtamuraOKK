@@ -4,30 +4,40 @@ Turns each Russian transcript into the ОКК's structured QA assessment.
 
 ```
 TRANSCRIBED call → load transcript → LLM scores vs active rubric (Structured Outputs)
-  → enforce rubric maxima + "full marks if no objections"
-  → derive raw points → percent (over 91) → zone
-  → persist Score (per-criterion + blocks + sentiment + summary + flags + target
-     + strengths/growth/training) → status SCORED
+  → each element ДА=1 / НЕТ=0 / Н.П. (excluded)
+  → call % = ДА ÷ applicable × 100 across all applicable elements (flat, each weighs 1)
+  → zone → persist Score (per-criterion + blocks + sentiment + summary + flags
+     + target + strengths/growth/training) → status SCORED
 ```
 
-## Rubric (`tm-call-v2` — 5 holistic criteria)
-`AtamuraOKK/scoring/rubrics/tm_call_v2.json` — the active rubric collapses the old
-20-line checklist into **5 big criteria**, each scored holistically over its own
-0..max scale, weights = the sum of that block's former line-items:
+## Rubric (`tm-call-v4` — binary checklist, flat percent)
+`AtamuraOKK/scoring/rubrics/tm_call_v4.json` — mirrors the ОКК instruction sheet
+(`docs/Рубрика_ОКК_инструкция_для_ИИ.xlsx`). Every element is scored **binary**
+(ДА=1 / НЕТ=0), or **Н.П.** (неприменимо) when the sheet's condition holds — a
+Н.П. element leaves the denominator entirely (not scored 0). **8 blocks** group
+the 34 elements (and carry the Н.П. rules) but do not weight the score:
 
-| # | Criterion (`block_id`) | Max |
-|---|------------------------|-----|
+| # | Block (`block_id`) | Elements |
+|---|--------------------|----------|
 | 1 | Приветствие (`greeting`) | 5 |
-| 2 | Выявление потребности (`needs`) | 17 |
-| 3 | Презентация (`presentation`) | 11 |
-| 4 | Закрытие на КЭВ (`closing`) — folds in the old «дожим» item | 37 |
-| 5 | Отработка возражений (`objections`) — full marks if no objection | 21 |
+| 2 | Программирование (`programming`) | 4 |
+| 3 | Выявление потребности (`needs`) | 5 |
+| 4 | Квалификация (`qualification`) — item 17 Н.П. if not ипотека | 3 |
+| 5 | Презентация (`presentation`) — item 21 Н.П. if no product questions | 4 |
+| 6 | Резюме + Закрытие на КЭВ (`closing`) — item 25 Н.П. if agreed at once | 6 |
+| 7 | Отработка возражений (`objections`) — **whole block Н.П.** if no objection | 4 |
+| 8 | Софт скилы (`soft_skills`) | 3 |
 
-Total **91**. The 3 CRM/WhatsApp items (WhatsApp send, CRM-card data, tasks/касания)
-are **not audio-scorable** and stay out of the rubric (the parked 9 pts to 100).
-Final metric = points / 91 × 100. Zones: **85+ strong / 80–84 normal / 75–79
-borderline / <75 risk**. The prior `tm_call_v1.json` (21-item) is kept for history;
-re-score calls (`make score` / re-run the score stage) to move them onto v2.
+**Call % = ДА ÷ applicable × 100** across all applicable elements — flat, every
+element weighs the same, so one НЕТ costs `100/applicable` points wherever it is.
+Н.П. elements (and a whole Н.П. block, e.g. objections when none occurred) simply
+drop out of the denominator. The per-block percentages are still computed and
+stored in the payload (`blocks[*].percent`) as a display-only breakdown, but they
+do not weight the total. Zones: **85+ strong / 80–84 normal / 75–79 borderline /
+<75 risk** (unchanged from v3; revisit once the new distribution is observed).
+Older versions (`tm_call_v1..v3.json`, weighted points ÷ 91) are kept for history —
+their scores stay on their own rubric version; re-score a window
+(`scoring run --all`) to move calls onto v4.
 
 ## Call-type classification (avoids polluting the metric)
 Not every answered+recorded "first call" is a qualification call — only a genuine
@@ -45,12 +55,13 @@ Speaker labels are presented to the model **by audio channel, not role** (the
 Atamura manager is often on either channel), and the prompt has it identify the
 manager from content — fixing a class of mislabeled-speaker mis-scores.
 
-> The objection block (21 of 91 pts) is awarded in full when no objection occurs,
-> so a call's score can swing ~23 pts on whether an objection was present — this is
-> inherent to the company checklist, not a bug.
+> When no objection occurs the whole objections block is Н.П. and its 4 elements
+> leave the denominator (the call is judged on 30 elements, not 34) — inherent to
+> the checklist, not a bug. Likewise a per-element Н.П. (e.g. no-mortgage item 17)
+> shrinks the denominator rather than scoring 0.
 
 ## What the scorer returns (per call)
-Per-criterion `{score, max, justification, evidence-quote, recommendation}` (the
+Per-criterion `{score (0/1), max (1), justification, evidence-quote, recommendation}` (the
 recommendation = Claude's concrete "improve this next call" feedback per criterion);
 block subtotals; total
 % + zone; **target/non-target**; customer & agent **sentiment**; 2–3 sentence

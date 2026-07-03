@@ -208,6 +208,14 @@ class CallFeedItem(BaseModel):
     zone: str | None
     okk_5: int | None
     target_status: str | None
+    client_name: str | None = Field(
+        default=None,
+        description="Client's name resolved from the linked Bitrix contact, when known",
+    )
+    phone: str | None = Field(
+        default=None,
+        description="Client's phone (fallback label when the contact has no name)",
+    )
     sentiment_customer: str | None
     red_flags: list[str] = Field(default_factory=list)
     call_type: str | None
@@ -384,6 +392,13 @@ class CallFeedback(BaseModel):
     target_status: str | None
     sentiment_customer: str | None
     sentiment_agent: str | None
+    client_category: str | None = Field(
+        default=None,
+        description=(
+            "Manager-assigned lead qualification grade (A/B/C/X) from the Bitrix "
+            "deal field «Квалификация клиента», when resolvable"
+        ),
+    )
     summary: str
     strengths: str
     growth_zone: str
@@ -532,6 +547,20 @@ class DayActionItem(BaseModel):
     stage_id: str
     reason: str = Field(description="Plain-language next action from the deal stage")
     heat: str = Field(description="hot | warm | cool — visual urgency")
+    queue: str | None = Field(
+        default=None,
+        description=(
+            "Which Мой день queue this deal falls in: no_answer | meetings | "
+            "cooling (same buckets as DayStats), or null for a neutral deal"
+        ),
+    )
+    no_task: bool = Field(
+        default=False,
+        description=(
+            "True when the deal has no open (incomplete) activity — a «брошенная» "
+            "card without a next task, orthogonal to ``queue``"
+        ),
+    )
     last_activity_at: datetime | None = None
     bitrix_url: str | None = Field(
         default=None,
@@ -539,12 +568,91 @@ class DayActionItem(BaseModel):
     )
 
 
+class DayTaskItem(BaseModel):
+    """One overdue-task example for the «Просроченные задачи» queue."""
+
+    activity_id: int
+    subject: str
+    deadline: datetime | None = None
+    bitrix_url: str | None = Field(
+        default=None,
+        description="Deep link to the task's CRM entity (deal/contact/lead)",
+    )
+
+
 class DayStats(BaseModel):
-    """The three Мой день counters (open-pipeline snapshot)."""
+    """The Мой день counters (open-pipeline snapshot)."""
 
     meetings: int = Field(description="Open deals at a booked/confirmed-visit stage")
     no_answer: int = Field(description="Open deals parked at a Недозвон stage")
     cooling: int = Field(description="Open deals going stale / no-show, need a nudge")
+    no_task: int | None = Field(
+        default=None,
+        description=(
+            "Open deals with no open (incomplete) activity — «брошенные» cards "
+            "without a next task; null when the activity read could not be made"
+        ),
+    )
+
+
+class DayToday(BaseModel):
+    """«Важные цифры дня» — today-scoped headline numbers for the Мой день card.
+
+    Each field is None when its source could not be read (the UI shows "—"),
+    never a misleading zero. Every count is for *today* in the report timezone.
+    """
+
+    planned_calls: int | None = Field(
+        default=None,
+        description="Записано на сегодня — open (not-done) call activities due today",
+    )
+    meetings_set: int | None = Field(
+        default=None,
+        description="Назначено сегодня — deals booked to the meeting stage today",
+    )
+    talk_time_sec: int | None = Field(
+        default=None,
+        description="Время на линии — total answered-call talk seconds today",
+    )
+    push_to_meeting: int | None = Field(
+        default=None,
+        description="Дожать до встречи — deals entering a hot stage today",
+    )
+    deals_closed: int | None = Field(
+        default=None,
+        description="Дел закрыто — conducted-visit (WON) deals attributed today",
+    )
+    overdue: int | None = Field(
+        default=None,
+        description="Просроченных — tasks due today that are already overdue",
+    )
+
+
+class AuditFailedItem(BaseModel):
+    """One closed-lost deal whose stated отказ-причина contradicted the actual call.
+
+    Populated from OKK's ``audit_verdicts`` (verdict = ``contradicted``) — a
+    self-fix nudge in «Займись сейчас»: the manager reviews the deal and corrects
+    the close reason. Only the manager's OWN deals appear (normal CRM use).
+    """
+
+    deal_id: int
+    client_name: str | None = None
+    close_reason: str | None = Field(
+        default=None,
+        description="The manager-stated close reason the call did not support",
+    )
+    justification: str | None = Field(
+        default=None,
+        description="Why the call contradicts the stated reason (LLM, in Russian)",
+    )
+    evidence_quote: str | None = None
+    confidence: float | None = None
+    audited_at: datetime | None = None
+    bitrix_url: str | None = Field(
+        default=None,
+        description="Deep link to the deal's CRM card in Bitrix24, when known",
+    )
 
 
 class DayView(BaseModel):
@@ -561,3 +669,250 @@ class DayView(BaseModel):
     actions: list[DayActionItem] = Field(default_factory=list)
     stats: DayStats
     money: MoneyAxis
+    today: DayToday = Field(default_factory=DayToday)
+    overdue_tasks: list[DayTaskItem] = Field(
+        default_factory=list,
+        description="A few example overdue tasks for the «Просроченные задачи» queue",
+    )
+    audit_failed: list[AuditFailedItem] = Field(
+        default_factory=list,
+        description="Closed-lost deals whose stated reason contradicted the call",
+    )
+
+
+class OverdueTaskItem(BaseModel):
+    """One overdue CRM task (incomplete activity past its deadline), team-wide.
+
+    Unlike :class:`DayTaskItem` this carries the responsible ``manager`` — the
+    РОП view lists tasks across the whole team, so each row must say whose it is.
+    """
+
+    activity_id: int
+    subject: str
+    deadline: datetime | None = None
+    manager: ManagerRef
+    bitrix_url: str | None = Field(
+        default=None,
+        description="Deep link to the task's CRM entity (deal/contact/lead)",
+    )
+
+
+class TeamOverdueTasks(BaseModel):
+    """РОП-вид: every overdue task of a department's team, oldest-due first.
+
+    All incomplete activities whose deadline has already passed (просроченные до
+    сегодня), across the team, ordered by deadline ascending. ``truncated`` is
+    True when more matched than the cap and the tail was dropped.
+    """
+
+    department: DepartmentRef
+    total: int = Field(description="Number of overdue tasks returned (after the cap)")
+    truncated: bool = Field(
+        default=False,
+        description="True when more overdue tasks matched than the returned cap",
+    )
+    tasks: list[OverdueTaskItem] = Field(default_factory=list)
+
+
+# --- Моя Аналитика (/analytics) ---------------------------------------------
+# Period analytics for one manager, live from Bitrix (stage history + activities
+# + telephony). Every block carries its own ``status`` so the cabinet can badge
+# each block live/empty independently; fields are None when their source could
+# not be read (UI shows "—"), never a misleading zero. See web/api/v1/analytics.py.
+
+
+class FunnelReason(BaseModel):
+    """One sub-reason of a funnel stage — e.g. why a deal was closed as «отказ».
+
+    ``label`` is the human reason (resolved from the Bitrix enum field), ``count``
+    its deals in the period, ``reason_id`` the Bitrix enum value id (None for the
+    «не указана» bucket / unresolved values).
+    """
+
+    label: str
+    count: int
+    reason_id: str | None = Field(
+        default=None,
+        description="Bitrix enum value id, when resolved",
+    )
+
+
+class FunnelStage(BaseModel):
+    """One stage of the conversion funnel with its period count."""
+
+    key: str = Field(
+        description="Stable key: leads|qualified|meeting_set|arrived|bought",
+    )
+    label: str
+    count: int | None = None
+    breakdown: list[FunnelReason] | None = Field(
+        default=None,
+        description=(
+            "Sub-breakdown of this stage's count, largest first. Set for "
+            "«closed_lost» (by отказ-причина) when the reason field is configured."
+        ),
+    )
+
+
+class AnalyticsTrendPoint(BaseModel):
+    """One month of the conversion-rate trend (arrived ÷ leads)."""
+
+    period: str = Field(description="YYYY-MM")
+    cr_pct: float | None = None
+
+
+class AnalyticsFunnel(BaseModel):
+    """Анализ воронки — stage counts + overall CR + monthly CR trend.
+
+    ``bought`` («купили») follows the deal into the sales funnel: after the visit
+    the TM deal moves to cat 2 and is reassigned to the closer but keeps «Сотрудник
+    ТМ», so a booking signed (C2:WON) is attributed back to the TM via stage
+    history — the same join as «Фактический визит» (``arrived``).
+    """
+
+    status: str = Field(
+        default="not_available",
+        description="'live' when the period has any leads/stage activity",
+    )
+    stages: list[FunnelStage] = Field(default_factory=list)
+    overall_cr_pct: float | None = Field(
+        default=None,
+        description="Итоговый CR — arrived (Фактический визит) ÷ leads, %",
+    )
+    trend: list[AnalyticsTrendPoint] = Field(
+        default_factory=list,
+        description="Trailing-N-months CR, oldest→newest",
+    )
+
+
+class AnalyticsTasks(BaseModel):
+    """Анализ задач — activity counts for the period (crm.activity, by deadline).
+
+    ``closed_on_time`` stays None for now: distinguishing on-time vs late closes
+    needs a per-activity completion timestamp the count API does not expose.
+    """
+
+    status: str = Field(default="not_available")
+    total: int | None = None
+    closed: int | None = None
+    closed_on_time: int | None = None
+    overdue: int | None = None
+    pending: int | None = Field(
+        default=None,
+        description="Открыто — open activities not yet past their deadline",
+    )
+
+
+class AnalyticsMeetings(BaseModel):
+    """Анализ встреч — назначено / дошли / переназначились / недошли / купили.
+
+    ``rescheduled`` counts deals that entered the meeting-set stage 2+ times in
+    the period (a re-booking). ``bought`` is the cat-2 booking-signed count
+    attributed to the TM (see AnalyticsFunnel).
+    """
+
+    status: str = Field(default="not_available")
+    meetings_set: int | None = None
+    arrived: int | None = None
+    rescheduled: int | None = None
+    no_show: int | None = None
+    bought: int | None = None
+
+
+class AnalyticsCalls(BaseModel):
+    """Анализ звонков — telephony stats for the period (voximplant.statistic.get)."""
+
+    status: str = Field(default="not_available")
+    talk_time_sec: int | None = None
+    completed: int | None = None
+    no_answer: int | None = None
+    incoming: int | None = None
+
+
+class AnalyticsView(BaseModel):
+    """Everything the Моя Аналитика screen needs for one manager in a period."""
+
+    manager: ManagerRef
+    period: str = Field(description="YYYY-MM")
+    funnel: AnalyticsFunnel = Field(default_factory=AnalyticsFunnel)
+    tasks: AnalyticsTasks = Field(default_factory=AnalyticsTasks)
+    meetings: AnalyticsMeetings = Field(default_factory=AnalyticsMeetings)
+    calls: AnalyticsCalls = Field(default_factory=AnalyticsCalls)
+
+
+class HygieneCriterion(BaseModel):
+    """One CRM-hygiene criterion for a manager in a period.
+
+    ``pct`` is ``numerator / denominator`` (share of cards/tasks in good standing);
+    the cabinet colours it against the norm. ``status`` is ``"live"`` when the
+    criterion could be computed from Bitrix and ``"not_available"`` when its data
+    source is not wired (e.g. the анкета field list is unconfigured) — the cabinet
+    badges it «нет данных» rather than showing a fake number. ``note`` carries a
+    short caveat or the reason it is unavailable.
+    """
+
+    key: str = Field(
+        description="statuses|anketa|tasks_set|tasks_on_time|notes",
+    )
+    status: str = Field(default="not_available", description="'live' | 'not_available'")
+    pct: float | None = None
+    numerator: int | None = Field(
+        default=None,
+        description="Cards/tasks in good standing (the share's top)",
+    )
+    denominator: int | None = Field(
+        default=None,
+        description="Cards/tasks considered (the share's base)",
+    )
+    note: str | None = None
+
+
+class HygieneView(BaseModel):
+    """ОКК · Гигиена CRM — five discipline criteria for one manager in a period.
+
+    ``overall_pct`` is the mean of the live criteria (None when none are live).
+    ``norm_pct`` is the per-criterion target the cabinet draws the threshold at.
+    """
+
+    manager: ManagerRef
+    period: str = Field(description="YYYY-MM")
+    norm_pct: int = 85
+    overall_pct: float | None = None
+    criteria: list[HygieneCriterion] = Field(default_factory=list)
+
+
+class CriterionAverage(BaseModel):
+    """Average score of one rubric criterion across a manager's calls in a period."""
+
+    criterion_id: int
+    block_name: str | None = None
+    criterion_text: str | None = None
+    avg_score: float | None = None
+    avg_pct_of_max: float | None = None
+    max: float | None = None
+    count: int = 0
+
+
+class CriteriaAveragesView(BaseModel):
+    """Балл ОКК: per-criterion averages over целевые qualification calls."""
+
+    manager: ManagerRef
+    period: str
+    calls_scored: int = 0
+    criteria: list[CriterionAverage] = Field(default_factory=list)
+
+
+class ScoreTrendPoint(BaseModel):
+    """Average ОКК percent for one time bucket (day / week / month)."""
+
+    bucket: str = Field(description="ISO date of the bucket start (local tz)")
+    avg_percent: float | None = None
+    calls: int = 0
+
+
+class ScoreTrendView(BaseModel):
+    """Динамика: average ОКК percent per bucket for the trailing window."""
+
+    manager: ManagerRef
+    bucket: str = Field(description="day | week | month")
+    points: list[ScoreTrendPoint] = Field(default_factory=list)

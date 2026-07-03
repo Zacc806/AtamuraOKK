@@ -52,10 +52,24 @@ for TMs). All three share similar stage names — distinguish by category id.
   (a Положение policy input, **not** in Bitrix). `crm_discipline_pct` = null until
   activity ingestion lands.
 
-The three `stats` counters (записаны-на-встречу / недозвоны / остывают) are
-computed over the manager's **whole** open pipeline (up to `companion_day_max_scan`),
-not just the shown action slice (`companion_day_max_actions`), so the headline
-numbers are accurate even when the action list is capped.
+The `stats` counters (записаны-на-встречу / недозвоны / остывают, plus `no_task`)
+are computed over the manager's **whole** open pipeline (up to
+`companion_day_max_scan`), not just the shown action slice
+(`companion_day_max_actions`), so the headline numbers are accurate even when the
+action list is capped.
+
+### «Без задачи» — брошенные карточки (`stats.no_task`)
+
+An open deal with **no open (incomplete) activity** is a «брошенная» card without
+a next step — the «Займись сейчас» queue *Без задачи*. `_deals_with_open_task()`
+makes one extra `crm.activity.list` pass over the open deal ids
+(`OWNER_TYPE_ID=2`, `COMPLETED='N'`, batched 50/call) and returns the set of
+deals that *have* a task; the complement is the queue. This is **orthogonal to the
+stage bucket**: a deal can be both `cooling` and `no_task`, so it is carried as a
+separate boolean `DayActionItem.no_task` (not a `queue` value) and counted in its
+own `DayStats.no_task`. `_select_action_deals` additionally surfaces *neutral-stage*
+no-task deals (normally dropped) so the queue has examples. If the activity read
+fails, `no_task` degrades to `null` (UI shows "—"), never a fake zero.
 
 ### Meeting attribution (solved 2026-06-12 — was misdiagnosed as a data gate)
 
@@ -82,6 +96,35 @@ earlier months cannot be attributed this way — irrelevant for live bonus perio
 the companion then shows an honest "данные готовятся" state instead of zeros.
 With this join in place, meetings=0 simply means no conducted visits in the
 period.
+
+## «Важные цифры дня» — the today block (`DayView.today`)
+
+The Мой день card shows six **day-scoped** headline numbers (`DayToday`,
+`_today_metrics` in `day.py`). The default day is today — `[midnight, midnight+1d)`
+in the report timezone (`_today_window`) — but the endpoint accepts an optional
+`?date=YYYY-MM-DD` so a manager can review a **past** day's results; `_day_window`
+resolves it (`"today"` label by default, else the date, validated to a single day
+via `okk.parse_period`). Only this block moves with `date`; the open-pipeline
+queues/actions and the monthly money axis (`?period=`) stay **current** — they are
+live pipeline state, not reconstructable per past day. The TTL cache key carries
+the day label (`(uid, period_label, day_label)`). Each tile is resilient: if its
+Bitrix read fails the field degrades to `null` (UI shows "—"), never a misleading
+zero.
+
+| Field | «Цифра» | Source (over the selected day) |
+|---|---|---|
+| `planned_calls` | записано на сегодня | `crm.activity.list` count: **open** (`COMPLETED=N`) call activities (`TYPE_ID=companion_call_activity_type_id`, default 2) with `DEADLINE` today, `RESPONSIBLE_ID=uid`. `COMPLETED=N` is essential — telephony auto-creates a *completed* call activity per real call, which would otherwise inflate the count to "planned + every call already made today" |
+| `meetings_set` | назначено сегодня | distinct deals that **entered** `companion_meeting_set_stage_id` (`C24:EXECUTING`, «Записан на встречу») today, per `ASSIGNED_BY_ID` — pre-meeting stages still rest with the TM, so assignee is correct attribution (`_stage_entrants_by_assignee`) |
+| `talk_time_sec` | время на линии | `voximplant.statistic.get` today, `PORTAL_USER_ID=uid`, summing `CALL_DURATION` over answered calls (`CALL_FAILED_CODE==ingest_success_code`) — full telephony, analyzed or not |
+| `push_to_meeting` | дожать до встречи | distinct deals that **entered** any **hot** pre-booking stage (`_HOT_STAGES` — просил перезвонить / квалифицирован / не дошёл) today, per `ASSIGNED_BY_ID` — same `_stage_entrants_by_assignee`, a list of stages |
+| `deals_closed` | дел закрыто | WON (`C24:WON`) transitions **today** attributed via «Сотрудник ТМ» — reuses `_meetings_by_tm` with the today window (same join as the money axis) |
+| `overdue` | просроченных | `crm.activity.list` count: incomplete activities (`COMPLETED=N`) with `DEADLINE` in `[day 00:00, min(day end, now))` — due that day but already past deadline (for today this is `now`; a future day short-circuits to 0) (`_overdue_tasks`) |
+
+Caching mirrors the money axis: `_stage_entrants_by_assignee` keeps its own
+date-keyed cache (`_entrants_cache`, keyed by the stage set + window, so the
+booking-stage and hot-stage pulls cache separately and each serves every
+manager), and the WON-today count shares `_meetings_cache` with the period axis
+(distinct cache key per date window). All honor `companion_day_cache_ttl_seconds`.
 
 ## Filter gotcha
 

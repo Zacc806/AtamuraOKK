@@ -17,6 +17,9 @@ from typing import Any
 
 from loguru import logger
 
+from AtamuraOKK.audit.service import run_audit
+from AtamuraOKK.bitrix import BitrixClient
+from AtamuraOKK.db.session import session_scope
 from AtamuraOKK.dispatch.claim import (
     STAGES,
     auto_since,
@@ -112,6 +115,22 @@ async def report_morning(ctx: dict[str, Any]) -> None:
 async def report_afternoon(ctx: dict[str, Any]) -> None:
     """Generate the second-half (afternoon) QA report."""
     await _report("afternoon")
+
+
+async def audit_closed_deals(ctx: dict[str, Any]) -> None:
+    """LLM-audit freshly closed-lost deals; persist a verdict per deal.
+
+    Its own cron (not part of the tick): one LLM call per newly closed deal makes
+    this pass minutes-long, so it needs a timeout far above the arq default. Gated
+    by ``audit_enabled`` so it stays dormant until Anthropic credits are available.
+    """
+    if not settings.audit_enabled:
+        return
+    try:
+        async with session_scope() as session, BitrixClient() as bx:
+            await run_audit(session, bx)
+    except Exception:
+        logger.exception("dispatch: audit pass failed")
 
 
 async def daily_summary(ctx: dict[str, Any]) -> None:

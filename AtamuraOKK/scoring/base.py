@@ -36,10 +36,20 @@ CallType = Literal[
 
 
 class CriterionScore(BaseModel):
-    """Score for one rubric criterion."""
+    """Binary verdict for one rubric element (ДА=1 / НЕТ=0 / Н.П.)."""
 
-    id: int = Field(description="Номер критерия из чек-листа")
-    score: int = Field(description="Баллы за критерий (0..max)")
+    id: int = Field(description="Номер элемента из чек-листа")
+    score: int = Field(
+        description="1 = ДА (элемент выполнен), 0 = НЕТ (не выполнен). "
+        "При applicable=false значение игнорируется."
+    )
+    applicable: bool = Field(
+        default=True,
+        description="true = элемент применим и оценивается; false = Н.П. "
+        "(неприменим к этому звонку) — элемент исключается из подсчёта. "
+        "Ставь false ТОЛЬКО когда в чек-листе для этого элемента указано условие "
+        "Н.П. и оно выполняется.",
+    )
     justification: str = Field(description="Краткое обоснование оценки на русском")
     evidence: str = Field(
         description="Цитата из разговора на языке оригинала (или пусто)"
@@ -61,6 +71,16 @@ class CallScore(BaseModel):
     )
     manager_identified: bool = Field(
         description="Удалось ли однозначно определить менеджера Atamura в разговоре",
+    )
+    # Which audio side the manager turned out to be on. Lets the pipeline reconcile
+    # the stored transcript labels with the content-identified manager (the stereo
+    # channel->role guess is sometimes inverted). "A" = СТОРОНА A (канал 1, метка
+    # [AGENT]); "B" = СТОРОНА B (канал 2, метка [CUSTOMER]) -> labels were inverted.
+    manager_side: Literal["A", "B", "unknown"] = Field(
+        default="unknown",
+        description="На какой СТОРОНЕ оказался менеджер Atamura: «A» — СТОРОНА A "
+        "(аудиоканал 1), «B» — СТОРОНА B (аудиоканал 2); «unknown», если менеджер "
+        "не определён (manager_identified=false) или запись в один канал",
     )
     criteria: list[CriterionScore]
     objections_present: bool = Field(description="Были ли у клиента возражения")

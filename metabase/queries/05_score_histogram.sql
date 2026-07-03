@@ -7,6 +7,7 @@ SELECT
 FROM call_scores_latest
 WHERE percent IS NOT NULL
   AND is_qualification_call IS NOT FALSE
+  AND target_status = 'целевой'
   [[AND department_name = {{department_name}}]]
 GROUP BY 1, 2
 ORDER BY 1;

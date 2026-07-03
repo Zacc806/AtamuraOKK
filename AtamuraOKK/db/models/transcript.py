@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, false, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -27,6 +27,15 @@ class Transcript(Base):
     full_text: Mapped[str] = mapped_column(Text, default="")
     # Ordered speech segments, each with speaker, start, end, and text.
     segments: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
+    # Whether the scorer's content-identified manager has been reconciled onto the
+    # speaker labels (speaker=="agent" is the manager). Guards against double-flips
+    # when a call is re-scored. See scoring.worker._reconcile_transcript_labels.
+    manager_side_applied: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=false(),
+        default=False,
+    )
     # Provider/model, e.g. "openai/gpt-4o-transcribe" or "faster-whisper/large-v3".
     model: Mapped[str | None] = mapped_column(String(length=128))
     created_at: Mapped[datetime] = mapped_column(

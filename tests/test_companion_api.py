@@ -12,7 +12,7 @@ that department), and not-found / bad-period handling.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Self
 from zoneinfo import ZoneInfo
 
@@ -87,7 +87,9 @@ async def head_auth(dbsession: AsyncSession, _token: None) -> dict[str, str]:
     return _headers(_HEAD_KEY)
 
 
-def _criteria_payload(percent: float, *, is_qual: bool = True) -> dict[str, Any]:
+def _criteria_payload(
+    percent: float, *, is_qual: bool = True, target_status: str = "целевой"
+) -> dict[str, Any]:
     return {
         "per_criterion": [
             {
@@ -110,7 +112,7 @@ def _criteria_payload(percent: float, *, is_qual: bool = True) -> dict[str, Any]
         "is_qualification_call": is_qual,
         "manager_identified": True,
         "objections_present": True,
-        "target_status": "целевой",
+        "target_status": target_status,
         "strengths": "Хороший контакт",
         "growth_zone": "Работа с возражениями",
         "training_recommendation": "Тренинг по СПИН",
@@ -125,6 +127,8 @@ async def _seed_scored_call(
     percent: float,
     day: int = 15,
     is_qual: bool = True,
+    target_status: str = "целевой",
+    started_at: datetime | None = None,
     crm_entity_type: str | None = None,
     crm_entity_id: int | None = None,
 ) -> Call:
@@ -133,7 +137,7 @@ async def _seed_scored_call(
         portal_user_id=manager.bitrix_user_id,
         manager_id=manager.id,
         direction=CallDirection.OUTBOUND,
-        started_at=datetime(2026, 3, day, 12, 0, tzinfo=_TZ),
+        started_at=started_at or datetime(2026, 3, day, 12, 0, tzinfo=_TZ),
         duration_sec=120,
         status=CallStatus.SCORED,
         crm_entity_type=crm_entity_type,
@@ -146,7 +150,9 @@ async def _seed_scored_call(
             call_id=call.id,
             rubric_version="okk-1",
             total_score=percent,
-            criteria=_criteria_payload(percent, is_qual=is_qual),
+            criteria=_criteria_payload(
+                percent, is_qual=is_qual, target_status=target_status
+            ),
             sentiment={"customer": "позитивный", "agent": "нейтральный"},
             summary="Клиент заинтересован, записан на встречу.",
             flags=[],
@@ -249,6 +255,159 @@ async def test_scorecard_excludes_non_qualification(
     assert body["calls_scored"] == 1  # reminder excluded
     assert body["okk"]["percent"] == 80.0
     assert body["okk"]["score_5"] == 3
+
+
+async def test_scorecard_excludes_non_target(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """Non-target calls (нецелевой/неясно) don't count toward the ОКК score."""
+    mgr = await _seed_manager(dbsession, bitrix_user_id=505)
+    await _seed_scored_call(dbsession, bitrix_call_id="t1", manager=mgr, percent=80.0)
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="n1",
+        manager=mgr,
+        percent=10.0,
+        target_status="нецелевой",
+    )
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="u1",
+        manager=mgr,
+        percent=20.0,
+        target_status="неясно",
+    )
+
+    resp = await client.get(
+        f"/api/v1/managers/505/scorecard?period={_PERIOD}",
+        headers=head_auth,
+    )
+    body = resp.json()
+    assert body["calls_scored"] == 1  # only the целевой call counts
+    assert body["okk"]["percent"] == 80.0
+
+
+async def test_criteria_averages(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """Балл ОКК averages each criterion over целевые qual calls, skips others."""
+    mgr = await _seed_manager(dbsession, bitrix_user_id=520)
+    # criterion 1 scores 4/5 on both → avg 4, 80%; non-target/reminder ignored.
+    await _seed_scored_call(dbsession, bitrix_call_id="a", manager=mgr, percent=80.0)
+    await _seed_scored_call(dbsession, bitrix_call_id="b", manager=mgr, percent=80.0)
+    await _seed_scored_call(
+        dbsession, bitrix_call_id="c", manager=mgr, percent=10.0,
+        target_status="нецелевой",
+    )
+    await _seed_scored_call(
+        dbsession, bitrix_call_id="d", manager=mgr, percent=10.0, is_qual=False,
+    )
+
+    resp = await client.get(
+        f"/api/v1/managers/520/criteria?period={_PERIOD}",
+        headers=head_auth,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["calls_scored"] == 2
+    crit = {c["criterion_id"]: c for c in body["criteria"]}
+    assert crit[1]["count"] == 2
+    assert crit[1]["avg_score"] == 4.0
+    assert crit[1]["avg_pct_of_max"] == 80.0
+    assert crit[1]["max"] == 5.0
+
+
+async def test_score_trend_buckets_recent_calls(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """Динамика buckets целевые calls by day over the trailing window."""
+    mgr = await _seed_manager(dbsession, bitrix_user_id=521)
+    today = datetime.now(tz=_TZ).replace(hour=12, minute=0, second=0, microsecond=0)
+    await _seed_scored_call(
+        dbsession, bitrix_call_id="t1", manager=mgr, percent=80.0, started_at=today,
+    )
+    await _seed_scored_call(
+        dbsession, bitrix_call_id="t2", manager=mgr, percent=60.0, started_at=today,
+    )
+    await _seed_scored_call(
+        dbsession, bitrix_call_id="t3", manager=mgr, percent=10.0,
+        target_status="нецелевой", started_at=today,
+    )
+
+    resp = await client.get(
+        "/api/v1/managers/521/score-trend?bucket=day",
+        headers=head_auth,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bucket"] == "day"
+    point = {p["bucket"]: p for p in body["points"]}[today.date().isoformat()]
+    assert point["calls"] == 2  # non-target excluded
+    assert point["avg_percent"] == 70.0  # (80 + 60) / 2
+
+
+async def test_score_trend_anchor_scrolls_window(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """?anchor= ends the trailing window on a past day, surfacing older calls."""
+    mgr = await _seed_manager(dbsession, bitrix_user_id=523)
+    old = datetime.now(tz=_TZ).replace(
+        hour=12, minute=0, second=0, microsecond=0,
+    ) - timedelta(days=40)
+    await _seed_scored_call(
+        dbsession, bitrix_call_id="old1", manager=mgr, percent=90.0, started_at=old,
+    )
+    key = old.date().isoformat()
+
+    # Default (today) window is the last 14 days — the 40-day-old call is absent.
+    now_resp = await client.get(
+        "/api/v1/managers/523/score-trend?bucket=day", headers=head_auth,
+    )
+    assert key not in {p["bucket"] for p in now_resp.json()["points"]}
+
+    # Anchored on the old day, it falls inside the window.
+    resp = await client.get(
+        f"/api/v1/managers/523/score-trend?bucket=day&anchor={key}", headers=head_auth,
+    )
+    assert resp.status_code == 200
+    point = {p["bucket"]: p for p in resp.json()["points"]}[key]
+    assert point["calls"] == 1
+    assert point["avg_percent"] == 90.0
+
+
+async def test_score_trend_bad_anchor_422(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """A non-day anchor (month/range/garbage) is a 422."""
+    await _seed_manager(dbsession, bitrix_user_id=524)
+    resp = await client.get(
+        "/api/v1/managers/524/score-trend?bucket=day&anchor=2026-06", headers=head_auth,
+    )
+    assert resp.status_code == 422
+
+
+async def test_score_trend_bad_bucket_422(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """An unknown bucket granularity returns 422."""
+    await _seed_manager(dbsession, bitrix_user_id=522)
+    resp = await client.get(
+        "/api/v1/managers/522/score-trend?bucket=hour",
+        headers=head_auth,
+    )
+    assert resp.status_code == 422
 
 
 async def test_scorecard_unknown_manager_404(
@@ -965,6 +1124,104 @@ async def test_unified_feed_merges_calls_and_meetings(
         headers=head_auth,
     )
     assert [i["kind"] for i in truncated.json()] == ["call", "meeting"]
+
+
+class _FakeContactBitrix:
+    """Replays crm.contact.list for the feed's client-name resolution."""
+
+    def __init__(self, rows: list[dict[str, Any]]) -> None:
+        self._rows = rows
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+    async def list(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        *,
+        max_items: int | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        assert method == "crm.contact.list"
+        for row in self._rows:
+            yield row
+
+
+async def test_feed_labels_call_with_client_name(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A contact-linked call is titled by the client's Bitrix name (not «целевой»)."""
+    mgr = await _seed_manager(dbsession, bitrix_user_id=707)
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="c1",
+        manager=mgr,
+        percent=80.0,
+        crm_entity_type="CONTACT",
+        crm_entity_id=4242,
+    )
+    fake = _FakeContactBitrix(
+        [
+            {
+                "ID": "4242",
+                "NAME": "Айгуль",
+                "LAST_NAME": "Сатпаева",
+                "PHONE": [{"VALUE": "+77011234567"}],
+            },
+        ],
+    )
+    monkeypatch.setattr(service, "BitrixClient", lambda *a, **k: fake)
+
+    resp = await client.get("/api/v1/managers/707/feed", headers=head_auth)
+    assert resp.status_code == 200
+    call = next(i["call"] for i in resp.json() if i["kind"] == "call")
+    assert call["client_name"] == "Айгуль Сатпаева"
+    assert call["phone"] == "+77011234567"
+
+
+async def test_feed_falls_back_to_phone_then_none(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No contact name → phone; a non-contact call → neither (UI uses the label)."""
+    mgr = await _seed_manager(dbsession, bitrix_user_id=708)
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="c-phone",
+        manager=mgr,
+        percent=75.0,
+        day=10,
+        crm_entity_type="CONTACT",
+        crm_entity_id=4243,
+    )
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="c-deal",
+        manager=mgr,
+        percent=65.0,
+        day=20,
+        crm_entity_type="DEAL",
+        crm_entity_id=999,
+    )
+    fake = _FakeContactBitrix(
+        [{"ID": "4243", "PHONE": [{"VALUE": "+77015550000"}]}],  # no name
+    )
+    monkeypatch.setattr(service, "BitrixClient", lambda *a, **k: fake)
+
+    resp = await client.get("/api/v1/managers/708/feed", headers=head_auth)
+    calls = {i["call"]["bitrix_call_id"]: i["call"] for i in resp.json()}
+    assert calls["c-phone"]["client_name"] is None
+    assert calls["c-phone"]["phone"] == "+77015550000"
+    assert calls["c-deal"]["client_name"] is None  # DEAL isn't name-resolved
+    assert calls["c-deal"]["phone"] is None
 
 
 async def test_unified_feed_is_scoped(

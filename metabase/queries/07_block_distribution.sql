@@ -7,6 +7,7 @@ SELECT
 FROM call_criteria_latest cl
 JOIN call_scores_latest cs
     ON cs.call_id = cl.call_id AND cs.is_qualification_call IS NOT FALSE
+       AND cs.target_status = 'целевой'
 [[WHERE cl.department_name = {{department_name}}]]
 GROUP BY cl.block_name
 ORDER BY avg_pct_of_max ASC;

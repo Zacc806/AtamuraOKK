@@ -4,10 +4,9 @@ SELECT
     COUNT(DISTINCT manager_id)                                            AS managers,
     COUNT(*)                                                              AS calls_scored,
     ROUND(AVG(percent), 1)                                               AS avg_percent,
-    ROUND(100.0 * COUNT(*) FILTER (WHERE zone = 'risk') / COUNT(*), 1)   AS pct_risk,
-    ROUND(100.0 * COUNT(*) FILTER (WHERE target_status = 'нецелевой')
-          / NULLIF(COUNT(*), 0), 1)                                      AS pct_non_target
+    ROUND(100.0 * COUNT(*) FILTER (WHERE zone = 'risk') / COUNT(*), 1)   AS pct_risk
 FROM call_scores_latest
 WHERE is_qualification_call IS NOT FALSE   -- exclude non-qualification calls
+  AND target_status = 'целевой'            -- score only целевые clients
 GROUP BY 1
 ORDER BY avg_percent DESC;

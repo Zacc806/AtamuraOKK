@@ -10,10 +10,12 @@ to the head's department); everything else is read-only.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 from sqlalchemy import select, text
@@ -40,6 +42,8 @@ from AtamuraOKK.web.api.v1.schemas import (
     AppealView,
     CallFeedback,
     CallFeedItem,
+    CriteriaAveragesView,
+    CriterionAverage,
     CriterionFeedback,
     DepartmentRef,
     FeedItem,
@@ -53,7 +57,10 @@ from AtamuraOKK.web.api.v1.schemas import (
     OkkScore,
     RubricCriterionView,
     RubricView,
+    ScoreTrendPoint,
+    ScoreTrendView,
     TeamGroupStats,
+    TeamOverdueTasks,
     TeamSummary,
     TranscriptBlock,
 )
@@ -74,6 +81,16 @@ def _flags(value: Any) -> list[str]:
 def _is_qual(row: Any) -> bool:
     """A row counts toward the score unless explicitly flagged non-qualification."""
     return getattr(row, "is_qualification_call", None) is not False
+
+
+def _counts_in_score(row: Any) -> bool:
+    """Whether a call counts toward the ОКК score / aggregation.
+
+    On top of being a qualification call, the client must have been judged
+    «целевой»: non-target calls (нецелевой / неясно / unknown) are still returned
+    in the feed but excluded from the score, zone distribution and counts.
+    """
+    return _is_qual(row) and getattr(row, "target_status", None) == "целевой"
 
 
 def _transcript_blocks(
@@ -110,17 +127,20 @@ def _transcript_blocks(
 
 
 def _okk_from_rows(rows: Sequence[Any]) -> tuple[OkkScore, dict[str, int], int]:
-    """Aggregate qualification-call rows into (OkkScore, zone_distribution, n)."""
-    qual = [r for r in rows if _is_qual(r)]
+    """Aggregate scored rows into (OkkScore, zone_distribution, n).
+
+    Only целевые qualification calls count (see ``_counts_in_score``).
+    """
+    counted = [r for r in rows if _counts_in_score(r)]
     zone_dist = dict.fromkeys(_ZONES, 0)
-    for r in qual:
+    for r in counted:
         zone = r.zone or "risk"
         zone_dist[zone] = zone_dist.get(zone, 0) + 1
 
-    percents = [float(r.percent) for r in qual if r.percent is not None]
+    percents = [float(r.percent) for r in counted if r.percent is not None]
     avg = round(sum(percents) / len(percents), 1) if percents else None
     score = OkkScore(score_5=okk.okk_5(avg), percent=avg, zone=okk.zone_for(avg))
-    return score, zone_dist, len(qual)
+    return score, zone_dist, len(counted)
 
 
 async def _score_overrides(
@@ -259,8 +279,8 @@ async def _scored_rows_for_manager(
         (
             await session.execute(
                 text(
-                    "SELECT call_id, percent, zone, is_qualification_call "
-                    "FROM call_scores_latest "
+                    "SELECT call_id, percent, zone, is_qualification_call, "
+                    "target_status FROM call_scores_latest "
                     "WHERE manager_bitrix_user_id = :uid "
                     "AND started_at >= :start AND started_at < :end",
                 ),
@@ -487,6 +507,250 @@ async def get_scorecard(
     )
 
 
+async def get_criteria_averages(
+    session: AsyncSession,
+    bitrix_user_id: int,
+    period: str | None,
+) -> CriteriaAveragesView:
+    """Балл ОКК: average score per rubric criterion over целевые qual calls."""
+    start, end, label = okk.parse_period(period)
+    manager = await day.manager_ref(session, bitrix_user_id)
+    win = {"uid": bitrix_user_id, "start": start, "end": end}
+    rows = (
+        await session.execute(
+            text(
+                "SELECT cl.criterion_id, cl.block_name, cl.criterion_text, "
+                "ROUND(AVG(cl.score), 2) AS avg_score, "
+                "ROUND(AVG(cl.percent_of_max), 1) AS avg_pct, "
+                "MAX(cl.max) AS max_pts, COUNT(*) AS cnt "
+                "FROM call_criteria_latest cl "
+                "JOIN call_scores_latest cs ON cs.call_id = cl.call_id "
+                "WHERE cs.manager_bitrix_user_id = :uid "
+                "AND cs.started_at >= :start AND cs.started_at < :end "
+                "AND cs.is_qualification_call IS NOT FALSE "
+                "AND cs.target_status = 'целевой' "
+                "GROUP BY cl.criterion_id, cl.block_name, cl.criterion_text "
+                "ORDER BY cl.criterion_id",
+            ),
+            win,
+        )
+    ).all()
+    calls_scored = await session.scalar(
+        text(
+            "SELECT COUNT(*) FROM call_scores_latest "
+            "WHERE manager_bitrix_user_id = :uid "
+            "AND started_at >= :start AND started_at < :end "
+            "AND is_qualification_call IS NOT FALSE "
+            "AND target_status = 'целевой'",
+        ),
+        win,
+    )
+    criteria = [
+        CriterionAverage(
+            criterion_id=r.criterion_id,
+            block_name=r.block_name,
+            criterion_text=r.criterion_text,
+            avg_score=float(r.avg_score) if r.avg_score is not None else None,
+            avg_pct_of_max=float(r.avg_pct) if r.avg_pct is not None else None,
+            max=float(r.max_pts) if r.max_pts is not None else None,
+            count=r.cnt,
+        )
+        for r in rows
+    ]
+    return CriteriaAveragesView(
+        manager=manager,
+        period=label,
+        calls_scored=int(calls_scored or 0),
+        criteria=criteria,
+    )
+
+
+# Trailing windows for the Динамика chart: how many buckets back to show.
+_TREND_BUCKETS = {"day": 14, "week": 12, "month": 12}
+
+
+def _shift_month(dt: datetime, n: int) -> datetime:
+    """``dt`` moved ``n`` whole months, snapped to the 1st."""
+    m = dt.month - 1 + n
+    return dt.replace(year=dt.year + m // 12, month=m % 12 + 1, day=1)
+
+
+def _trend_window(bucket: str, now: datetime) -> tuple[datetime, datetime]:
+    """[start, end) trailing window covering the last N full buckets up to today."""
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if bucket == "day":
+        end = midnight + timedelta(days=1)
+        return end - timedelta(days=_TREND_BUCKETS["day"]), end
+    if bucket == "week":
+        monday = midnight - timedelta(days=midnight.weekday())
+        end = monday + timedelta(days=7)
+        return end - timedelta(weeks=_TREND_BUCKETS["week"]), end
+    first = midnight.replace(day=1)
+    end = _shift_month(first, 1)
+    return _shift_month(end, -_TREND_BUCKETS["month"]), end
+
+
+def _trend_anchor(anchor: str | None, tz: ZoneInfo) -> datetime:
+    """Reference date the trailing window ends at — today by default, or a day.
+
+    ``anchor`` must be a single ``YYYY-MM-DD`` day so the Динамика charts can be
+    scrolled back in time; anything else is a 422 (a month/range is meaningless
+    for an end-anchor).
+    """
+    if anchor is None:
+        return datetime.now(tz=tz)
+    if ".." in anchor or anchor.count("-") != 2:
+        raise okk.PeriodError(
+            f"anchor must be a single YYYY-MM-DD day (got {anchor!r})",
+        )
+    start, _end, _label = okk.parse_period(anchor)
+    return start
+
+
+async def get_score_trend(
+    session: AsyncSession,
+    bitrix_user_id: int,
+    bucket: str,
+    anchor: str | None = None,
+) -> ScoreTrendView:
+    """Динамика: average ОКК percent per day/week/month over a trailing window.
+
+    The window ends at ``anchor`` (a ``YYYY-MM-DD`` day, default today), so the
+    manager can scroll the dynamics back to earlier periods.
+    """
+    if bucket not in _TREND_BUCKETS:
+        raise okk.PeriodError(f"bucket must be day|week|month (got {bucket!r})")
+    tz = ZoneInfo(settings.report_timezone)
+    start, end = _trend_window(bucket, _trend_anchor(anchor, tz))
+    manager = await day.manager_ref(session, bitrix_user_id)
+    rows = (
+        await session.execute(
+            text(
+                "SELECT date_trunc(:gran, cs.started_at AT TIME ZONE :tz) AS b, "
+                "ROUND(AVG(cs.percent), 1) AS avg_pct, COUNT(*) AS cnt "
+                "FROM call_scores_latest cs "
+                "WHERE cs.manager_bitrix_user_id = :uid "
+                "AND cs.started_at >= :start AND cs.started_at < :end "
+                "AND cs.is_qualification_call IS NOT FALSE "
+                "AND cs.target_status = 'целевой' "
+                "GROUP BY 1 ORDER BY 1",
+            ),
+            {
+                "gran": bucket,
+                "tz": settings.report_timezone,
+                "uid": bitrix_user_id,
+                "start": start,
+                "end": end,
+            },
+        )
+    ).all()
+    points = [
+        ScoreTrendPoint(
+            bucket=r.b.date().isoformat(),
+            avg_percent=float(r.avg_pct) if r.avg_pct is not None else None,
+            calls=r.cnt,
+        )
+        for r in rows
+    ]
+    return ScoreTrendView(manager=manager, bucket=bucket, points=points)
+
+
+def _contact_full_name(contact: dict[str, Any]) -> str | None:
+    parts = [contact.get(k) for k in ("NAME", "LAST_NAME") if contact.get(k)]
+    return " ".join(str(p) for p in parts).strip() or None
+
+
+def _contact_phone(contact: dict[str, Any]) -> str | None:
+    for p in contact.get("PHONE") or []:
+        if p.get("VALUE"):
+            return str(p["VALUE"])
+    return None
+
+
+# contact_id -> (monotonic expiry, (name, phone)). The scored-call feed stores no
+# client identity (it is otherwise anonymized); the Расшифровка list resolves the
+# linked contact's name/phone from Bitrix on demand and caches it briefly — names
+# change rarely and the feed reloads often, so this keeps Bitrix load low.
+_client_identity_cache: dict[int, tuple[float, tuple[str | None, str | None]]] = {}
+
+
+async def _client_identities(
+    contact_ids: set[int],
+) -> dict[int, tuple[str | None, str | None]]:
+    """Resolve CONTACT ids to ``(name, phone)`` via Bitrix, TTL-cached, best-effort.
+
+    Only contact-linked calls resolve here; a deal/company/lead/bare-phone call
+    keeps no identity (the UI falls back to the phone, then the целевой/нецелевой
+    label). A Bitrix failure degrades to whatever is cached, never an error.
+    """
+    now = time.monotonic()
+    out: dict[int, tuple[str | None, str | None]] = {}
+    missing: list[int] = []
+    for cid in contact_ids:
+        hit = _client_identity_cache.get(cid)
+        if hit and hit[0] > now:
+            out[cid] = hit[1]
+        else:
+            missing.append(cid)
+    if not missing:
+        return out
+    try:
+        async with BitrixClient() as bx:
+            for i in range(0, len(missing), 50):
+                async for c in bx.list(
+                    "crm.contact.list",
+                    {
+                        "filter": {"ID": sorted(missing[i : i + 50])},
+                        "select": ["ID", "NAME", "LAST_NAME", "PHONE"],
+                    },
+                ):
+                    out[int(c["ID"])] = (_contact_full_name(c), _contact_phone(c))
+    except BitrixError as exc:
+        logger.warning("Client identity resolution failed: {e}", e=exc)
+        return out
+    expiry = now + settings.companion_analytics_cache_ttl_seconds
+    for cid in missing:
+        _client_identity_cache[cid] = (expiry, out.get(cid, (None, None)))
+    return out
+
+
+def _contact_ids_of(rows: Sequence[Any]) -> set[int]:
+    """CONTACT ids linked to the feed rows (the only calls with a resolvable name)."""
+    return {
+        int(r.crm_entity_id)
+        for r in rows
+        if r.crm_entity_type == "CONTACT" and r.crm_entity_id
+    }
+
+
+def _call_feed_item(
+    r: Any,
+    dismissed: dict[int, set[str]],
+    identities: dict[int, tuple[str | None, str | None]],
+) -> CallFeedItem:
+    """Build a feed item, attaching the linked contact's name/phone when known."""
+    name = phone = None
+    if r.crm_entity_type == "CONTACT" and r.crm_entity_id:
+        name, phone = identities.get(int(r.crm_entity_id), (None, None))
+    return CallFeedItem(
+        call_id=r.call_id,
+        bitrix_call_id=r.bitrix_call_id,
+        started_at=r.started_at,
+        percent=float(r.percent) if r.percent is not None else None,
+        zone=r.zone,
+        okk_5=okk.okk_5(float(r.percent) if r.percent is not None else None),
+        target_status=r.target_status,
+        client_name=name,
+        phone=phone,
+        sentiment_customer=r.sentiment_customer,
+        red_flags=_visible_flags(r.red_flags, dismissed.get(r.call_id, set())),
+        call_type=r.call_type,
+        is_qualification_call=_is_qual(r),
+        summary=r.summary or "",
+        bitrix_url=crm_card_url(r.crm_entity_type, r.crm_entity_id),
+    )
+
+
 async def get_calls_feed(
     session: AsyncSession,
     bitrix_user_id: int,
@@ -513,24 +777,8 @@ async def get_calls_feed(
     ).all()
     rows = await _apply_score_overrides(session, rows)
     dismissed = await _dismissed_flags(session, [r.call_id for r in rows])
-    return [
-        CallFeedItem(
-            call_id=r.call_id,
-            bitrix_call_id=r.bitrix_call_id,
-            started_at=r.started_at,
-            percent=float(r.percent) if r.percent is not None else None,
-            zone=r.zone,
-            okk_5=okk.okk_5(float(r.percent) if r.percent is not None else None),
-            target_status=r.target_status,
-            sentiment_customer=r.sentiment_customer,
-            red_flags=_visible_flags(r.red_flags, dismissed.get(r.call_id, set())),
-            call_type=r.call_type,
-            is_qualification_call=_is_qual(r),
-            summary=r.summary or "",
-            bitrix_url=crm_card_url(r.crm_entity_type, r.crm_entity_id),
-        )
-        for r in rows
-    ]
+    identities = await _client_identities(_contact_ids_of(rows))
+    return [_call_feed_item(r, dismissed, identities) for r in rows]
 
 
 def _as_int(value: Any) -> int | None:
@@ -693,23 +941,8 @@ async def get_crm_entity_calls(
         )
     ).all()
     rows = await _apply_score_overrides(session, rows)
-    dismissed = await _dismissed_flags(session, [r.call_id for r in rows])
-    return [
-        CallFeedItem(
-            call_id=r.call_id,
-            bitrix_call_id=r.bitrix_call_id,
-            started_at=r.started_at,
-            percent=float(r.percent) if r.percent is not None else None,
-            zone=r.zone,
-            okk_5=okk.okk_5(float(r.percent) if r.percent is not None else None),
-            target_status=r.target_status,
-            sentiment_customer=r.sentiment_customer,
-            red_flags=_visible_flags(r.red_flags, dismissed.get(r.call_id, set())),
-            call_type=r.call_type,
-            is_qualification_call=_is_qual(r),
-            summary=r.summary or "",
-            bitrix_url=crm_card_url(r.crm_entity_type, r.crm_entity_id),
-        )
+    visible = [
+        r
         for r in rows
         if _can_view_call_row(
             identity,
@@ -717,6 +950,9 @@ async def get_crm_entity_calls(
             r.department_bitrix_id,
         )
     ]
+    dismissed = await _dismissed_flags(session, [r.call_id for r in visible])
+    identities = await _client_identities(_contact_ids_of(visible))
+    return [_call_feed_item(r, dismissed, identities) for r in visible]
 
 
 async def get_call_feedback(
@@ -805,6 +1041,7 @@ async def get_call_feedback(
         target_status=row.target_status,
         sentiment_customer=row.sentiment_customer,
         sentiment_agent=row.sentiment_agent,
+        client_category=row.client_category,
         summary=row.summary or "",
         strengths=row.strengths or "",
         growth_zone=row.growth_zone or "",
@@ -1004,8 +1241,9 @@ async def _criteria_rows(
     rows = (
         await session.execute(
             text(
-                "SELECT call_id, criterion_id, block_name, criterion_text, "
-                "score, max FROM call_criteria_latest WHERE call_id = ANY(:ids)",
+                "SELECT call_id, criterion_id, block_id, block_name, "
+                "criterion_text, score, max FROM call_criteria_latest "
+                "WHERE call_id = ANY(:ids)",
             ),
             {"ids": ids},
         )
@@ -1164,7 +1402,12 @@ async def review_appeal(
             {},
         )
         per_criterion = [
-            {"id": cid, "score": row.score, "max": row.max}
+            {
+                "id": cid,
+                "score": row.score,
+                "max": row.max,
+                "block_id": row.block_id,
+            }
             for cid, row in index.items()
         ]
         appeal.override_percent = recompute_percent(per_criterion, set(confirmed))
@@ -1343,7 +1586,7 @@ async def get_team_summary(
         await session.execute(
             text(
                 "SELECT call_id, manager_bitrix_user_id, manager_name, percent, "
-                "zone, is_qualification_call FROM call_scores_latest "
+                "zone, is_qualification_call, target_status FROM call_scores_latest "
                 "WHERE department_id = :dept "
                 "AND started_at >= :start AND started_at < :end",
             ),
@@ -1452,6 +1695,69 @@ async def get_team_summary(
     )
 
 
+async def get_team_overdue_tasks(
+    session: AsyncSession,
+    department_bitrix_id: int,
+    limit: int | None = None,
+) -> TeamOverdueTasks | None:
+    """РОП «Просроченные задачи»: every past-deadline task of the team, oldest first.
+
+    Live read-through to Bitrix ``crm.activity.list`` over the department's
+    roster (managers mapped to this Bitrix department). Returns ``None`` when the
+    department is unknown, or an empty list (not an error) when Bitrix is
+    unreadable — the queue is a live convenience, not a system of record.
+    """
+    department = await session.scalar(
+        select(Department).where(Department.bitrix_id == department_bitrix_id),
+    )
+    if department is None:
+        return None
+
+    cap = limit or settings.companion_overdue_max_items
+    rows = (
+        await session.execute(
+            select(Manager.bitrix_user_id, Manager.name, Manager.last_name).where(
+                Manager.department_id == department.id,
+                Manager.bitrix_user_id.is_not(None),
+            ),
+        )
+    ).all()
+    names: dict[int, str | None] = {
+        r.bitrix_user_id: " ".join(p for p in (r.name, r.last_name) if p) or None
+        for r in rows
+    }
+
+    now = datetime.now(tz=ZoneInfo(settings.report_timezone))
+    tasks: list[Any] = []
+    truncated = False
+    try:
+        async with BitrixClient() as bx:
+            tasks, truncated = await day.team_overdue_tasks(
+                bx,
+                names,
+                department_bitrix_id,
+                department.name,
+                now,
+                cap,
+            )
+    except BitrixError as exc:
+        logger.warning(
+            "Team overdue-tasks Bitrix read failed for dept {d}: {e}",
+            d=department_bitrix_id,
+            e=exc,
+        )
+
+    return TeamOverdueTasks(
+        department=DepartmentRef(
+            bitrix_id=department_bitrix_id,
+            name=department.name,
+        ),
+        total=len(tasks),
+        truncated=truncated,
+        tasks=tasks,
+    )
+
+
 def _rubric_view(rv: RubricVersion) -> RubricView:
     """Normalize an active rubric row into the cabinet projection.
 
@@ -1477,7 +1783,9 @@ def _rubric_view(rv: RubricVersion) -> RubricView:
                         criterion_id=int(c["id"]),
                         block=block.get("name"),
                         name=str(c.get("text") or ""),
-                        max=float(c.get("max") or 0),
+                        # v4 is binary (max 1, field omitted); v3 carries explicit
+                        # per-criterion weights.
+                        max=float(c.get("max") or 1),
                     ),
                 )
         max_total = sum(c.max for c in criteria)

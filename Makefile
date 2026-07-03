@@ -1,4 +1,4 @@
-.PHONY: help install install-spike lint fmt typecheck test up down migrate \
+.PHONY: help install install-spike lint fmt typecheck test up down migrate dev \
         worker worker-up worker-logs \
         spike-fetch spike-download spike-transcribe spike-wer glossary-sample
 
@@ -29,6 +29,10 @@ up: ## Start Postgres (+ app) via docker compose
 
 down: ## Stop docker compose stack
 	docker compose down
+
+dev: ## Dev mode: start the stack and rebuild/restart containers on code change
+	docker compose up -d
+	docker compose watch
 
 migrate: ## Apply DB migrations
 	uv run alembic upgrade head

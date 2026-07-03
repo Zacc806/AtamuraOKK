@@ -28,7 +28,7 @@ from AtamuraOKK.db.models.companion_user import CompanionUser
 from AtamuraOKK.db.models.department import Department
 from AtamuraOKK.db.models.enums import CompanionRole
 from AtamuraOKK.db.models.manager import Manager
-from AtamuraOKK.web.api.v1 import day, service
+from AtamuraOKK.web.api.v1 import analytics, day, hygiene, service
 from AtamuraOKK.web.api.v1.auth import (
     CompanionIdentity,
     ensure_access_admin,
@@ -42,6 +42,8 @@ from AtamuraOKK.web.api.v1.auth import (
 )
 from AtamuraOKK.web.api.v1.okk import PeriodError
 from AtamuraOKK.web.api.v1.schemas import (
+    AnalyticsTrendPoint,
+    AnalyticsView,
     AppealCreate,
     AppealReview,
     AppealView,
@@ -50,14 +52,18 @@ from AtamuraOKK.web.api.v1.schemas import (
     CompanionUserCreate,
     CompanionUserCreated,
     CompanionUserView,
+    CriteriaAveragesView,
     DayView,
     DepartmentRef,
     FeedItem,
+    HygieneView,
     ManagerScorecard,
     MeetingFeedback,
     MeetingFeedItem,
     MeView,
     RubricView,
+    ScoreTrendView,
+    TeamOverdueTasks,
     TeamSummary,
 )
 
@@ -323,6 +329,29 @@ async def team_summary(
 
 
 @router.get(
+    "/teams/{department_id}/overdue-tasks",
+    response_model=TeamOverdueTasks,
+    tags=["companion"],
+)
+async def team_overdue_tasks(
+    department_id: int,
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> TeamOverdueTasks:
+    """РОП «Просроченные задачи»: all past-deadline team tasks, oldest-due first.
+
+    Live from Bitrix over the department's roster (incomplete activities whose
+    deadline is already in the past). Head-scoped like the team summary: global
+    head, or the department's own РОП.
+    """
+    ensure_head(identity, department_id)
+    tasks = await service.get_team_overdue_tasks(session, department_id)
+    if tasks is None:
+        raise HTTPException(status_code=404, detail="Department not found.")
+    return tasks
+
+
+@router.get(
     "/managers/{manager_id}/day",
     response_model=DayView,
     tags=["companion"],
@@ -333,17 +362,159 @@ async def manager_day(
         default=None,
         description="YYYY-MM; default current month (money axis only)",
     ),
+    date: str | None = Query(
+        default=None,
+        description=(
+            "YYYY-MM-DD; default today. Scopes «Важные цифры дня» to a past day "
+            "so a manager can review earlier days' results."
+        ),
+    ),
     identity: CompanionIdentity = Depends(get_companion_identity),
     session: AsyncSession = Depends(get_db_session),
 ) -> DayView:
     """Мой день: live "кому звонить" + meeting/no-answer/cooling stats + money.
 
     Reads straight through to the Bitrix TM funnel (cat-0 deals owned by this
-    manager). ``data_ready=False`` when there's no live pipeline yet.
+    manager). ``data_ready=False`` when there's no live pipeline yet. ``date``
+    reruns the «Важные цифры дня» tiles for a past day; the queues stay current.
     """
     await ensure_can_view_manager(session, identity, manager_id)
     try:
-        return await day.get_day(session, manager_id, period)
+        return await day.get_day(session, manager_id, period, date)
+    except PeriodError as exc:
+        raise _bad_period(exc) from exc
+
+
+@router.get(
+    "/managers/{manager_id}/analytics",
+    response_model=AnalyticsView,
+    tags=["companion"],
+)
+async def manager_analytics(
+    manager_id: int,
+    period: str | None = Query(
+        default=None,
+        description=(
+            "YYYY-MM (month), YYYY-MM-DD (day) or "
+            "YYYY-MM-DD..YYYY-MM-DD (inclusive range, e.g. a week); "
+            "default current month"
+        ),
+    ),
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> AnalyticsView:
+    """Моя Аналитика: funnel/CR + tasks + meetings + calls for a manager in a period.
+
+    Live read-through to the Bitrix TM funnel (stage history), activities and
+    telephony. Each block carries its own ``status`` so the cabinet badges them
+    independently; fields are null (UI "—") when their source could not be read.
+    """
+    await ensure_can_view_manager(session, identity, manager_id)
+    try:
+        return await analytics.get_analytics(session, manager_id, period)
+    except PeriodError as exc:
+        raise _bad_period(exc) from exc
+
+
+@router.get(
+    "/managers/{manager_id}/analytics/cr-trend",
+    response_model=list[AnalyticsTrendPoint],
+    tags=["companion"],
+)
+async def manager_cr_trend(
+    manager_id: int,
+    period: str | None = Query(default=None, description="YYYY-MM; default current"),
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[AnalyticsTrendPoint]:
+    """Lazy CR trend (trailing months) for the analytics funnel — loaded separately.
+
+    Split from `/analytics` because the per-month conducted-meeting attribution is
+    a heavy Bitrix fan-out; isolating it keeps the four main blocks fast while the
+    trend fills in (or degrades to empty) on its own.
+    """
+    await ensure_can_view_manager(session, identity, manager_id)
+    try:
+        return await analytics.get_cr_trend(manager_id, period)
+    except PeriodError as exc:
+        raise _bad_period(exc) from exc
+
+
+@router.get(
+    "/managers/{manager_id}/hygiene",
+    response_model=HygieneView,
+    tags=["companion"],
+)
+async def manager_hygiene(
+    manager_id: int,
+    period: str | None = Query(
+        default=None,
+        description=(
+            "YYYY-MM (month), YYYY-MM-DD (day) or "
+            "YYYY-MM-DD..YYYY-MM-DD (inclusive range, e.g. a week); "
+            "default current month"
+        ),
+    ),
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> HygieneView:
+    """ОКК · Гигиена CRM: five discipline criteria for a manager in a period.
+
+    Live read-through to Bitrix (open deals, activities). Each criterion carries
+    its own ``status`` so the cabinet badges it independently; ``pct`` is null
+    (UI «нет данных») when its source is unconfigured or could not be read.
+    """
+    await ensure_can_view_manager(session, identity, manager_id)
+    try:
+        return await hygiene.get_hygiene(session, manager_id, period)
+    except PeriodError as exc:
+        raise _bad_period(exc) from exc
+
+
+@router.get(
+    "/managers/{manager_id}/criteria",
+    response_model=CriteriaAveragesView,
+    tags=["companion"],
+)
+async def manager_criteria(
+    manager_id: int,
+    period: str | None = Query(
+        default=None,
+        description=(
+            "YYYY-MM (month), YYYY-MM-DD (day) or "
+            "YYYY-MM-DD..YYYY-MM-DD (range); default current month"
+        ),
+    ),
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> CriteriaAveragesView:
+    """Балл ОКК: average score per rubric criterion over целевые qual calls."""
+    await ensure_can_view_manager(session, identity, manager_id)
+    try:
+        return await service.get_criteria_averages(session, manager_id, period)
+    except PeriodError as exc:
+        raise _bad_period(exc) from exc
+
+
+@router.get(
+    "/managers/{manager_id}/score-trend",
+    response_model=ScoreTrendView,
+    tags=["companion"],
+)
+async def manager_score_trend(
+    manager_id: int,
+    bucket: str = Query(default="day", description="day | week | month"),
+    anchor: str | None = Query(
+        default=None,
+        description="YYYY-MM-DD; end of the trailing window (default today)",
+    ),
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> ScoreTrendView:
+    """Динамика: average ОКК percent per day/week/month over a trailing window."""
+    await ensure_can_view_manager(session, identity, manager_id)
+    try:
+        return await service.get_score_trend(session, manager_id, bucket, anchor)
     except PeriodError as exc:
         raise _bad_period(exc) from exc
 

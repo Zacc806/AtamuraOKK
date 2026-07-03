@@ -1,8 +1,11 @@
 """Load the versioned QA rubric and expose scoring helpers.
 
 The rubric is a JSON file in the repo (``rubrics/<version>.json``) so the ОКК can
-tune criteria/weights without code changes. Only ``source == "call"`` criteria are
-scored in the conversational version; the final percent is over their max (91).
+tune criteria without code changes. The active version (``tm-call-v4``) is a
+**binary** checklist: every element is ДА=1 / НЕТ=0 / Н.П. (excluded). The call
+score is flat — ДА ÷ applicable × 100 across all applicable elements (each element
+weighs the same; blocks only group elements and handle the Н.П. rules) — see
+``worker._assemble``.
 """
 
 from __future__ import annotations
@@ -14,12 +17,12 @@ from pathlib import Path
 from typing import Any
 
 _RUBRIC_DIR = Path(__file__).parent / "rubrics"
-DEFAULT_VERSION = "tm-call-v3"
+DEFAULT_VERSION = "tm-call-v4"
 
 
 @dataclass(frozen=True)
 class Criterion:
-    """One checklist item."""
+    """One checklist item (binary: ДА=1 / НЕТ=0 / Н.П.)."""
 
     id: int
     text: str
@@ -27,6 +30,27 @@ class Criterion:
     source: str  # "call" (scored from transcript) | "crm" (excluded for now)
     block_id: str
     block_name: str
+    # Prompt-rendering hints from the rubric sheet.
+    yes_rule: str = ""  # when to score ДА
+    no_rule: str = ""  # when to score НЕТ
+    na_rule: str | None = None  # when the element is Н.П. (None -> never)
+    where: str = ""  # where in the call to look
+
+    @property
+    def na_allowed(self) -> bool:
+        """Whether Н.П. is a legitimate verdict for this element."""
+        return bool(self.na_rule)
+
+
+@dataclass(frozen=True)
+class Block:
+    """A rubric block (scored as one equal-weight percentage)."""
+
+    id: str
+    name: str
+    criteria: list[Criterion]
+    # The objections block is Н.П. as a whole when no objection occurred.
+    na_if_no_objections: bool = False
 
 
 @dataclass
@@ -39,31 +63,49 @@ class Rubric:
     raw: dict[str, Any]
 
     @property
-    def criteria(self) -> list[Criterion]:
-        """All criteria across all blocks."""
-        out: list[Criterion] = []
+    def block_list(self) -> list[Block]:
+        """Blocks in sheet order, each carrying its scored criteria."""
+        out: list[Block] = []
         for block in self.raw["blocks"]:
-            for c in block["criteria"]:
-                out.append(
-                    Criterion(
-                        id=int(c["id"]),
-                        text=c["text"],
-                        max=int(c["max"]),
-                        source=c.get("source", "call"),
-                        block_id=block["id"],
-                        block_name=block["name"],
-                    ),
+            crits = [
+                Criterion(
+                    id=int(c["id"]),
+                    text=c["text"],
+                    max=int(c.get("max", 1)),
+                    source=c.get("source", "call"),
+                    block_id=block["id"],
+                    block_name=block["name"],
+                    yes_rule=c.get("yes", ""),
+                    no_rule=c.get("no", ""),
+                    na_rule=c.get("na") or None,
+                    where=c.get("where", ""),
                 )
+                for c in block["criteria"]
+                if c.get("source", "call") == "call"
+            ]
+            out.append(
+                Block(
+                    id=block["id"],
+                    name=block["name"],
+                    criteria=crits,
+                    na_if_no_objections=bool(block.get("na_if_no_objections")),
+                ),
+            )
         return out
 
     @property
+    def criteria(self) -> list[Criterion]:
+        """All criteria across all blocks."""
+        return [c for b in self.block_list for c in b.criteria]
+
+    @property
     def scored_criteria(self) -> list[Criterion]:
-        """Criteria scored from the transcript (conversational subset)."""
-        return [c for c in self.criteria if c.source == "call"]
+        """Criteria scored from the transcript (all, in the binary model)."""
+        return self.criteria
 
     @property
     def max_conversational(self) -> int:
-        """Total points available from transcript-scored criteria (91)."""
+        """Total per-element points (element count in the binary model)."""
         return sum(c.max for c in self.scored_criteria)
 
     def block_name(self, block_id: str) -> str:
@@ -72,28 +114,6 @@ class Rubric:
             (b["name"] for b in self.raw["blocks"] if b["id"] == block_id),
             block_id,
         )
-
-    def max_for(self, criterion: Criterion, category: str | None) -> int | None:
-        """Effective max for a criterion given the client's lead category.
-
-        A block may carry ``max_by_category`` (A/B/C/X -> points) so the
-        meeting-closing criterion can be down-weighted for clients not expected to
-        agree to a meeting. Returns the per-category max, ``None`` when that max is
-        0 (exclude the criterion entirely from numerator *and* denominator, like
-        the no-objections rule), or ``criterion.max`` when no override applies
-        (A / None / unmapped letter).
-        """
-        if category is None:
-            return criterion.max
-        block = next(
-            (b for b in self.raw["blocks"] if b["id"] == criterion.block_id),
-            None,
-        )
-        by_cat = (block or {}).get("max_by_category")
-        if not by_cat or category not in by_cat:
-            return criterion.max
-        eff = int(by_cat[category])
-        return None if eff <= 0 else eff
 
     def zone_for(self, percent: float) -> str:
         """Map a 0-100 percent to a manager zone."""

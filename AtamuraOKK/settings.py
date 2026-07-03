@@ -160,6 +160,14 @@ class Settings(BaseSettings):
     # run --all`. Set to False to auto-score the full backlog again.
     score_auto_today_only: bool = True
 
+    # --- Close-reason audit (freshly closed-lost deals vs the actual call) ---
+    # When True, the dispatcher periodically LLM-judges deals that just closed-lost,
+    # comparing the manager's stated отказ-причина against the call transcript, and
+    # persists a verdict per deal (surfaced on «Мой день» as «Отказы не по делу»).
+    # Off by default — enable only once Anthropic credits are available, else every
+    # pass records `error` verdicts. Reuses `anthropic_scoring_model`/max_tokens.
+    audit_enabled: bool = False
+
     # --- Glossary correction (post-STT LLM repair of ЖК names & addresses) ---
     # Yandex v3 has no vocabulary API, so a cheap Claude pass fixes complex names
     # and Kazakh toponyms after transcription. Off by default — enable only once a
@@ -182,7 +190,8 @@ class Settings(BaseSettings):
     # transaction that overruns the arq job timeout and rolls back — leaving the
     # cursor unadvanced and re-scanning from scratch forever. Each chunk upserts
     # its calls and advances the cursor, so the next tick resumes after it.
-    # None = unbounded (the pre-fix behaviour). Override via ATAMURAOKK_INGEST_BATCH_SIZE.
+    # None = unbounded (the pre-fix behaviour). Override via
+    # ATAMURAOKK_INGEST_BATCH_SIZE.
     ingest_batch_size: int | None = 300
 
     # --- Analysis-scope filter (every recorded call until qualification) ---
@@ -321,6 +330,72 @@ class Settings(BaseSettings):
     companion_day_max_actions: int = 50
     companion_day_max_scan: int = 500
     companion_day_cache_ttl_seconds: int = 60
+    # «Отказы не по делу» — cap on failed-audit deals shown in «Займись сейчас».
+    companion_day_audit_max_items: int = 20
+    # РОП «Просроченные задачи» — cap on the team-wide overdue-task list so a
+    # long-neglected team can't return an unbounded page (oldest-due first).
+    companion_overdue_max_items: int = 200
+    # "Важные цифры дня" (today block on /day). The Zvandau stage a deal enters
+    # when the manager books a meeting ("Записан на встречу в ОП") — counted via
+    # stage history for "назначено сегодня". Call-activity TYPE_ID (Bitrix: 2 =
+    # call) for the "записано на сегодня" planned-calls count.
+    companion_meeting_set_stage_id: str = "C24:EXECUTING"
+    companion_call_activity_type_id: int = 2
+
+    # --- Analytics screen (/analytics) --------------------------------------
+    # The Zvandau stage a deal enters when the client is qualified (the funnel's
+    # qualification step). The no-show stage feeds the meetings block's no-show
+    # count. Both are counted via stage history (entrants), attributed by
+    # ASSIGNED_BY_ID (the TM still owns the deal pre-WON, unlike the conducted-
+    # visit stage). The CR trend is the trailing N months of conversion (arrived
+    # / leads); each month is a separate stage-history pull, so keep this modest.
+    companion_qualified_stage_id: str = "C24:PREPAYMENT_INVOIC"
+    companion_no_show_stage_id: str = "C24:UC_9OBT14"
+    # The Недозвон stages (couldn't reach the client). The funnel's «Недозвон» bar
+    # counts distinct deals that entered EITHER of these in the period (stage
+    # history, by assignee) — a lead can pass Недозвон 1 then 2 but counts once.
+    companion_no_answer_stage_ids: list[str] = Field(
+        default_factory=lambda: ["C24:UC_VL3EHH", "C24:UC_LS7DKY"],
+    )
+    companion_analytics_trend_months: int = 6
+    # Deal enumeration UF field holding the «Причина закрытия/отказа» — why a lost
+    # deal was closed (значения: «Хронический недозвон», «Дубль…», «Нет одобрения
+    # по ипотеке», …). The funnel's «Закрыто (отказ)» bar breaks its count down by
+    # this field; labels are resolved live from crm.deal.fields. Empty → no
+    # breakdown (just the total). Mirror of companion_tm_employee_field's shape.
+    companion_closed_reason_field: str = "UF_CRM_1751600682"
+    # "Bought" — after the visit the TM deal moves to the sales funnel (cat 2)
+    # and is reassigned to the closer, but it keeps the TM-employee field, so a
+    # signed booking (C2:WON) is attributable back to the TM via stage history,
+    # the same join used for the conducted visit. Deals don't rest at C2:WON
+    # either, so it must be read from stage history, not a snapshot.
+    companion_sales_category_id: int = 2
+    companion_sold_stage_id: str = "C2:WON"
+    # Analytics data (funnel/tasks/meetings/calls + CR trend) changes slowly, so
+    # cache it longer than /day's live 60s — a cold pull fans out to many Bitrix
+    # reads (the CR trend especially), so a warm cache keeps the screen instant.
+    companion_analytics_cache_ttl_seconds: int = 600
+
+    # --- CRM hygiene screen (/hygiene) --------------------------------------
+    # "OKK / CRM hygiene" — discipline of keeping the deal card in order after a
+    # call, scored live (read-only) from Bitrix. Five criteria, each independently
+    # resilient. Computed straight through to Bitrix and cached like /analytics.
+    companion_hygiene_cache_ttl_seconds: int = 600
+    # Norm (target) per criterion, %, shown on the cards and used to colour them.
+    companion_hygiene_norm_pct: int = 85
+    # Status criterion: an open TM deal with no activity for longer than this many
+    # days is treated as a card whose status is not maintained (stuck stage). The
+    # strict "stage matches the call outcome" version needs an OKK transcript-vs-
+    # stage check on the scoring side (not wired).
+    companion_hygiene_stale_days: int = 14
+    # Questionnaire ("anketa") criterion: deal fields (UF_CRM_*) that make up the
+    # client questionnaire; a deal counts as filled only when ALL are non-empty.
+    # Empty (default) -> the criterion reports "not_available" until the PM supplies
+    # the real field list (ATAMURAOKK_COMPANION_ANKETA_FIELDS='UF_CRM_a,UF_CRM_b').
+    companion_anketa_fields: list[str] = Field(default_factory=list)
+    # Note criterion: a completed call activity counts as a proper note only when
+    # its text contains this marker. Empty -> any non-empty note counts.
+    companion_note_template_marker: str = ""
 
     # --- Phase 0 spike ---
     # Where the transcription-eval spike writes calls metadata, audio, and

@@ -89,6 +89,25 @@ windows we fall back to one undifferentiated `unknown` segment, so a mono call n
 regresses below the old behaviour. (Live-verify this path on a real mono call after
 deploy — it is exercised only by genuinely single-channel audio.)
 
+**4. Role reconciliation (channel→role inversion fix).** The channel→role mapping
+(`stereo_agent_channel`) is a fixed guess and is **inverted on some calls** — the
+manager lands on the channel we labeled `customer`, so the stored transcript shows
+«Менеджер»/«Клиент» backwards (scores are unaffected — scoring already identifies the
+manager by content). The scorer therefore reports `CallScore.manager_side` (`A` = side
+labeled agent, `B` = labeled customer, `unknown` = not determined / mono). After
+scoring, `scoring.worker._reconcile_transcript_labels` swaps the segment `speaker`
+fields and the `[AGENT]`/`[CUSTOMER]` headers in `full_text` when the manager is on
+side `B`, so that **`speaker=="agent"` is always the manager**. It swaps in place
+(headers only) rather than rebuilding `full_text` from segments, because entity
+correction edits `full_text` alone — a rebuild would drop those fixes. It is guarded
+by `transcripts.manager_side_applied` so a re-score never double-flips. **Backfill the
+existing backlog** (re-score only, no re-download/re-transcribe) with:
+`python -m AtamuraOKK.scoring requeue-relabel` (stereo only by default) then
+`python -m AtamuraOKK.scoring run --all`. If a future diagnosis shows the inversion is
+cleanly predicted by call direction, `stereo_agent_channel` could be made
+direction-conditional to also fix labeling at transcription time (future transcripts
+only — history is still fixed by the re-score above).
+
 **Observability.** `transcribe_one` now writes `calls.is_stereo` (true probed
 channel count ≥ 2) on every transcript. Query it by day to confirm the mono→stereo
 cutover took effect and to catch regressions:

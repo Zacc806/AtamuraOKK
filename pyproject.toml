@@ -166,6 +166,8 @@ line-length = 88
 "AtamuraOKK/spike/glossary_sample.py" = ["RUF001", "RUF002", "RUF003"]
 # Scoring prompts/rubric/schema are intentionally in Russian.
 "AtamuraOKK/scoring/*" = ["RUF001", "RUF002", "RUF003"]
+# Close-reason audit: LLM judge prompt + verdict labels are intentionally in Russian.
+"AtamuraOKK/audit/*" = ["RUF001", "RUF002", "RUF003"]
 # Report narrative/render are intentionally in Russian.
 "AtamuraOKK/reporting/*" = ["RUF001", "RUF002", "RUF003"]
 # Companion API DTOs/docs carry Russian business terms (ОКК, Звонки, авто-разбор).
@@ -173,6 +175,16 @@ line-length = 88
 "tests/test_companion_api.py" = ["RUF001", "RUF002", "RUF003", "S105"]
 # White-box tests of the /day money helpers (_money, _meetings_by_tm).
 "tests/test_companion_day.py" = ["SLF001"]
+# White-box test of day._audit_failed_items + the audit service.
+"tests/test_audit_service.py" = ["SLF001"]
+# White-box tests of the /analytics block helpers (_funnel, _tasks, …) plus
+# Russian business terms (ОКК, переназначились) and a test token literal.
+"tests/test_companion_analytics.py" = ["SLF001", "RUF001", "RUF002", "RUF003", "S105"]
+# White-box tests of the /hygiene criterion helpers (_statuses, _anketa, …) plus
+# Russian business terms and a test token literal.
+"tests/test_companion_hygiene.py" = ["SLF001", "RUF001", "RUF002", "RUF003", "S105"]
+# White-box tests of day.team_overdue_tasks plus Russian manager-name fixtures.
+"tests/test_companion_overdue.py" = ["SLF001", "RUF001", "RUF002", "RUF003"]
 # Ops scripts print to the operator's console by design.
 "metabase/*" = ["T201"]
 

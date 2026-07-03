@@ -6,5 +6,6 @@ SELECT
 FROM call_scores_latest
 WHERE zone IS NOT NULL
   AND is_qualification_call IS NOT FALSE
+  AND target_status = 'целевой'
 GROUP BY zone
 ORDER BY ARRAY_POSITION(ARRAY['strong', 'normal', 'borderline', 'risk'], zone);

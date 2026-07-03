@@ -35,6 +35,19 @@ x-worker-base: &worker_base
   volumes:
     # Persist generated reports (.md/.docx) to the host.
     - ./reports:/app/src/reports
+  # Dev mode (`docker compose watch`, Compose v2.22+): the stage workers bake the
+  # source into the image and don't auto-reload, so on a code change sync the new
+  # files into the container and restart the process. A dependency change needs a
+  # full image rebuild. Ignored by a plain `docker compose up`, so prod is untouched.
+  develop:
+    watch:
+      - action: sync+restart
+        path: ./AtamuraOKK
+        target: /app/src/AtamuraOKK
+      - action: rebuild
+        path: ./pyproject.toml
+      - action: rebuild
+        path: ./uv.lock
 
 services:
   api: &main_app
@@ -136,14 +149,18 @@ services:
 
   # CPU-bound: ffmpeg channel split + local whisper. Keep ~1 replica (the model
   # saturates the CPU); tune throughput via ATAMURAOKK_TRANSCRIBE_CONCURRENCY.
+  # Off by default: opt in with `docker compose --profile transcribe up`.
   transcribe:
     <<: *worker_base
     command: python -m AtamuraOKK.dispatch transcribe
+    profiles: ["transcribe"]
 
   # IO-bound: LLM scoring. Safe to scale out (ceiling = the LLM rate limit).
+  # Off by default: opt in with `docker compose --profile score up`.
   score:
     <<: *worker_base
     command: python -m AtamuraOKK.dispatch score
+    profiles: ["score"]
 
   # Legacy all-in-one APScheduler worker, superseded by the dispatcher + stage
   # workers above. Kept as a single-process fallback (e.g. local dev without
@@ -190,6 +207,16 @@ services:
         condition: service_completed_successfully
     volumes:
       - meetings-state:/data/meetings
+    # See x-worker-base: same dev-mode sync+restart on code change.
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./AtamuraOKK
+          target: /app/src/AtamuraOKK
+        - action: rebuild
+          path: ./pyproject.toml
+        - action: rebuild
+          path: ./uv.lock
 
   # BI dashboard over Postgres (per-manager / per-department QA scorecards).
   metabase:

@@ -1,8 +1,9 @@
 """Scoring worker: TRANSCRIBED -> SCORED.
 
 Scores each analyzable transcribed call against the active rubric, derives the
-numeric total / percent / zone, and persists a Score row. The conversational
-percent (over the 91 audio-derivable points) is the headline metric.
+numeric percent / zone, and persists a Score row. Under ``tm-call-v4`` the
+headline percent is the equal-weight average of the applicable blocks' binary
+pass rates (see :func:`_assemble`).
 """
 
 from __future__ import annotations
@@ -44,76 +45,94 @@ def _assemble(
     rubric: Rubric,
     category: str | None = None,
 ) -> dict[str, Any]:
-    """Apply rubric maxima + objection/category rules; build the score payload.
+    """Build the score payload from binary element verdicts (flat model).
 
-    ``category`` is the client's lead category (A/B/C/X) — it re-weights the
-    meeting-closing criterion: A/None/X keep the full max, B uses a reduced max,
-    C drops it from numerator and denominator entirely (clients not expected to
-    agree to a meeting). See ``Rubric.max_for``.
+    Each element is ДА=1 / НЕТ=0 / Н.П. (excluded). The call percent is
+    ``ДА ÷ applicable × 100`` across **all** applicable elements — every element
+    weighs the same; blocks only group elements (for the breakdown and the
+    Н.П. rules) and do not weight the total. A Н.П. element is dropped from the
+    denominator (not scored 0); when a whole block is Н.П. — the objections block
+    with no objection, or a block of only conditional items that all fell away —
+    its elements simply contribute nothing to numerator or denominator.
+
+    ``category`` (the client's A/B/C/X lead category) is accepted for interface
+    compatibility but not used: the v4 sheet replaced category weighting with
+    per-element Н.П. It is still recorded on the payload for reporting.
     """
     by_id = {c.id: c for c in result.criteria}
     per_criterion: list[dict[str, Any]] = []
     blocks: dict[str, dict[str, Any]] = {}
     missing: list[int] = []
-    total = 0
-    max_points = 0
 
-    for crit in rubric.scored_criteria:
-        # No objection occurred -> the objection block wasn't testable; exclude it
-        # from the score entirely (not in numerator nor denominator) so the percent
-        # reflects only what the call actually exercised.
-        if crit.block_id == "objections" and not result.objections_present:
+    for block in rubric.block_list:
+        # No objection occurred -> the whole objections block is Н.П.; it drops out
+        # of the average so the percent reflects only what the call exercised.
+        if block.na_if_no_objections and not result.objections_present:
             continue
-        # Per-category weight: a 0-weight category (C on the closing block) excludes
-        # the criterion entirely, exactly like the no-objections rule; B carries a
-        # reduced max. Checked before the missing-criterion guard so an excluded
-        # criterion the model legitimately omits doesn't fail the call.
-        eff_max = rubric.max_for(crit, category)
-        if eff_max is None:
+        block_yes = 0
+        applicable = 0
+        block_entries: list[dict[str, Any]] = []
+        for crit in block.criteria:
+            cs = by_id.get(crit.id)
+            if cs is None:
+                # A mandatory element the model didn't return would be silently
+                # scored 0, deflating the result -> fail the call so it retries.
+                # A conditionally-Н.П. element (na_allowed) may be legitimately
+                # omitted; treat the omission as Н.П. rather than a failure.
+                if not crit.na_allowed:
+                    missing.append(crit.id)
+                continue
+            # Н.П. only where the sheet allows it; anywhere else the element is
+            # always scored so it can't be dropped to inflate the block percent.
+            if crit.na_allowed and not cs.applicable:
+                continue
+            score = 1 if int(cs.score) >= 1 else 0
+            block_yes += score
+            applicable += 1
+            block_entries.append(
+                {
+                    "id": crit.id,
+                    "block_id": crit.block_id,
+                    "block_name": crit.block_name,
+                    "text": crit.text,
+                    "score": score,
+                    "max": 1,
+                    "justification": cs.justification,
+                    "evidence": cs.evidence,
+                    "recommendation": cs.recommendation,
+                },
+            )
+        if applicable == 0:
+            # Every element in the block was Н.П. -> block drops from the average.
             continue
-        cs = by_id.get(crit.id)
-        if cs is None:
-            # A criterion the model didn't return would be silently scored 0,
-            # deflating the result; fail the call instead so it retries.
-            missing.append(crit.id)
-            continue
-        score = max(0, min(int(cs.score), eff_max))
-        total += score
-        max_points += eff_max
-        per_criterion.append(
-            {
-                "id": crit.id,
-                "block_id": crit.block_id,
-                "block_name": crit.block_name,
-                "text": crit.text,
-                "score": score,
-                "max": eff_max,
-                "justification": cs.justification,
-                "evidence": cs.evidence,
-                "recommendation": cs.recommendation,
-            },
-        )
-        b = blocks.setdefault(
-            crit.block_id,
-            {"name": crit.block_name, "score": 0, "max": 0},
-        )
-        b["score"] += score
-        b["max"] += eff_max
+        per_criterion.extend(block_entries)
+        blocks[block.id] = {
+            "name": block.name,
+            "score": block_yes,
+            "max": applicable,
+            "percent": round(100.0 * block_yes / applicable, 2),
+        }
 
     if missing:
-        raise ValueError(f"scorer omitted criteria: {missing}")
+        raise ValueError(f"scorer omitted criteria: {sorted(missing)}")
 
-    percent = round(100.0 * total / max_points, 2) if max_points else 0.0
+    # Flat model: the call percent is ДА ÷ applicable across ALL applicable
+    # elements (each element weighs the same; blocks do not weight the total).
+    # blocks[*]["percent"] is kept as a per-block breakdown for display only.
+    raw_points = sum(b["score"] for b in blocks.values())
+    max_points = sum(b["max"] for b in blocks.values())
+    percent = round(100.0 * raw_points / max_points, 2) if max_points else 0.0
     return {
         "per_criterion": per_criterion,
         "blocks": blocks,
-        "raw_points": total,
+        "raw_points": raw_points,
         "max_points": max_points,
         "percent": percent,
         "zone": rubric.zone_for(percent),
         "call_type": result.call_type,
         "is_qualification_call": result.is_qualification_call,
         "manager_identified": result.manager_identified,
+        "manager_side": result.manager_side,
         "objections_present": result.objections_present,
         "client_category": category,
         "target_status": result.target_status,
@@ -124,6 +143,54 @@ def _assemble(
         "wants_to_visit": result.wants_to_visit,
         "on_premises": result.on_premises,
     }
+
+
+def _swap_speaker_labels(
+    segments: list[dict[str, Any]] | None,
+    full_text: str | None,
+) -> tuple[list[dict[str, Any]] | None, str]:
+    """Swap the agent/customer labels in segments and full_text, body preserved.
+
+    The stereo channel->role guess is inverted on some calls, so the manager is
+    stored as the customer (and vice versa). This swaps only the role labels — the
+    ``speaker`` field of each segment and the ``[AGENT]``/``[CUSTOMER]`` block
+    headers in ``full_text`` — without touching the spoken text. Rebuilding
+    ``full_text`` from segments is deliberately avoided: entity correction edits
+    ``full_text`` only (not the raw segments), so a rebuild would drop those fixes.
+    """
+    swap = {"agent": "customer", "customer": "agent"}
+    new_segments: list[dict[str, Any]] | None = segments
+    if segments:
+        new_segments = [
+            {**s, "speaker": swap.get(spk := str(s.get("speaker", "")), spk)}
+            for s in segments
+        ]
+    sentinel = "\x00"
+    new_full = (
+        (full_text or "")
+        .replace("[AGENT]", sentinel)
+        .replace("[CUSTOMER]", "[AGENT]")
+        .replace(sentinel, "[CUSTOMER]")
+    )
+    return new_segments, new_full
+
+
+def _reconcile_transcript_labels(transcript: Transcript, result: CallScore) -> None:
+    """Make speaker=="agent" the content-identified manager, idempotently.
+
+    The scorer reports ``manager_side`` ("A" = the side currently labeled agent,
+    "B" = labeled customer). When the manager is on side "B" the stereo channel
+    mapping was inverted for this call, so swap the labels. Marks the transcript
+    ``manager_side_applied`` once a definite side ("A"/"B") is determined so a
+    re-score never double-flips; "unknown" leaves it unreconciled for a later pass.
+    """
+    if result.manager_side == "unknown" or transcript.manager_side_applied:
+        return
+    if result.manager_side == "B":
+        transcript.segments, transcript.full_text = _swap_speaker_labels(
+            transcript.segments, transcript.full_text
+        )
+    transcript.manager_side_applied = True
 
 
 async def _persist_score(
@@ -276,6 +343,7 @@ async def _score_one(
         client_category=call.client_category,
     )
     await _persist_score(session, call, result, rubric, scorer.model_label)
+    _reconcile_transcript_labels(transcript, result)
     call.status = CallStatus.SCORED
     call.error = None
     await maybe_notify_cash_buyer(
@@ -337,6 +405,11 @@ async def score_one(
         if result is not None:
             try:
                 await _persist_score(session, call, result, rubric, scorer.model_label)
+                transcript = await session.scalar(
+                    select(Transcript).where(Transcript.call_id == call_id),
+                )
+                if transcript is not None:
+                    _reconcile_transcript_labels(transcript, result)
                 call.status = CallStatus.SCORED
                 call.error = None
                 await maybe_notify_cash_buyer(session, call, result, rubric, notifier)
@@ -398,3 +471,36 @@ async def score_pending(
         f=stats.failed,
     )
     return stats
+
+
+async def requeue_scored_for_relabel(
+    *, limit: int | None = None, stereo_only: bool = True
+) -> int:
+    """Revert SCORED calls to TRANSCRIBED so the next scoring pass relabels them.
+
+    One-time backfill for the inverted-roles fix: re-scoring reconciles each
+    transcript's speaker labels with the content-identified manager (only
+    transcripts with ``manager_side_applied=false`` are touched, so this is safe to
+    run, but re-scoring costs one LLM call per call — keep it scoped). Defaults to
+    stereo calls only, the only ones the channel->role mapping can invert. Returns
+    the count requeued.
+    """
+    from sqlalchemy import update  # noqa: PLC0415
+
+    async with session_scope() as session:
+        stmt = select(Call.id).where(Call.status == CallStatus.SCORED)
+        if stereo_only:
+            stmt = stmt.where(Call.is_stereo.is_(True))
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        ids = list((await session.execute(stmt)).scalars().all())
+        if not ids:
+            logger.info("No SCORED calls to requeue for relabel.")
+            return 0
+        await session.execute(
+            update(Call)
+            .where(Call.id.in_(ids))
+            .values(status=CallStatus.TRANSCRIBED, error=None, claimed_at=None),
+        )
+    logger.info("Requeued {n} SCORED call(s) -> TRANSCRIBED for relabel", n=len(ids))
+    return len(ids)

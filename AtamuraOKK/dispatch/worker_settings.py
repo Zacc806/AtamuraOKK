@@ -18,6 +18,7 @@ from arq.connections import RedisSettings
 from loguru import logger
 
 from AtamuraOKK.dispatch.dispatcher import (
+    audit_closed_deals,
     daily_summary,
     dispatch_tick,
     report_afternoon,
@@ -67,6 +68,9 @@ class DispatcherSettings:
         # needs a timeout far above the 300s arq default.
         cron(requalify_job, minute={10, 40}, timeout=3600, run_at_startup=True),
         cron(retry_job, minute={0}),
+        # LLM-judges each freshly closed-lost deal, so it needs a long timeout like
+        # requalification. Gated internally by settings.audit_enabled.
+        cron(audit_closed_deals, minute={25, 55}, timeout=3600),
         cron(report_morning, hour={settings.report_lunch_hour}, minute={0}),
         cron(report_afternoon, hour={settings.report_evening_hour}, minute={0}),
         cron(daily_summary, hour={settings.report_day_end_hour}, minute={30}),
