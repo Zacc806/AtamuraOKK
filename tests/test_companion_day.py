@@ -448,6 +448,23 @@ async def test_today_metrics_resilient_to_partial_failure() -> None:
     assert today.talk_time_sec == 60  # telephony unaffected
     assert today.push_to_meeting == 1  # entered a hot stage today
     assert today.meetings_set == 1  # entered the booking stage today
+    assert today.in_qual == 0  # no open deals passed -> nobody «в квале»
+
+
+async def test_in_qual_counts_open_deals_at_qualified_stage() -> None:
+    """«Дожать до встречи» = open deals resting at the qualified stage right now."""
+    qual = settings.companion_qualified_stage_id
+    deals = [
+        {"ID": "1", "STAGE_ID": qual},
+        {"ID": "2", "STAGE_ID": qual},
+        {"ID": "3", "STAGE_ID": "C24:EXECUTING"},  # already booked -> not in qual
+        {"ID": "4", "STAGE_ID": None},
+    ]
+    bx = FakeTodayBitrix()
+    today = await day._today_metrics(  # type: ignore[arg-type]
+        bx, 5, *day._today_window(), deals
+    )
+    assert today.in_qual == 2
 
 
 def test_day_window_defaults_to_today() -> None:

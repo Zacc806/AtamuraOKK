@@ -823,14 +823,22 @@ async def _today_metrics(
     uid: int,
     start: datetime,
     end: datetime,
+    deals: list[dict[str, Any]] | None = None,
 ) -> DayToday:
-    """«Важные цифры дня» — six day-scoped headline numbers.
+    """«Важные цифры дня» — headline numbers for the Мой день card.
 
     Resilient: a failing Bitrix read for any tile degrades that field to None
-    (UI shows "—") rather than failing the whole day view. The window is a single
-    day in the report timezone — today by default, or a past day when the caller
-    passes ``date``.
+    (UI shows "—") rather than failing the whole day view. Most tiles are a
+    single day in the report timezone (today by default, or a past day when the
+    caller passes ``date``); ``in_qual`` is the exception — it is a *current*
+    snapshot of the manager's open pipeline (deals resting at the qualified
+    stage = clients «в квале»), computed from the already-fetched ``deals`` list
+    (no extra Bitrix call), so it stays "на сейчас" like the queues.
     """
+    qual_stage = settings.companion_qualified_stage_id
+    in_qual = sum(
+        1 for d in (deals or []) if str(d.get("STAGE_ID") or "") == qual_stage
+    )
     try:
         planned = await _planned_calls_today(bx, uid, start, end)
     except BitrixError:
@@ -869,6 +877,7 @@ async def _today_metrics(
         meetings_set=meetings_set,
         talk_time_sec=talk,
         push_to_meeting=push,
+        in_qual=in_qual,
         deals_closed=closed,
         overdue=overdue,
     )
@@ -1110,7 +1119,9 @@ async def get_day(
             }
             contacts = await _contacts(bx, contact_ids)
             money = await _money(bx, bitrix_user_id, start, end)
-            today = await _today_metrics(bx, bitrix_user_id, day_start, day_end)
+            today = await _today_metrics(
+                bx, bitrix_user_id, day_start, day_end, deals
+            )
             overdue_tasks = await _overdue_task_items(
                 bx,
                 bitrix_user_id,

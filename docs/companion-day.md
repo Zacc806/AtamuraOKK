@@ -99,8 +99,10 @@ period.
 
 ## «Важные цифры дня» — the today block (`DayView.today`)
 
-The Мой день card shows six **day-scoped** headline numbers (`DayToday`,
-`_today_metrics` in `day.py`). The default day is today — `[midnight, midnight+1d)`
+The Мой день card shows six headline numbers (`DayToday`, `_today_metrics` in
+`day.py`) — five **day-scoped** plus `in_qual`, a *current-pipeline* snapshot
+(see its row). The cabinet renders them as факт/план (day norms hardcoded in
+`mockups/web.html`). The default day is today — `[midnight, midnight+1d)`
 in the report timezone (`_today_window`) — but the endpoint accepts an optional
 `?date=YYYY-MM-DD` so a manager can review a **past** day's results; `_day_window`
 resolves it (`"today"` label by default, else the date, validated to a single day
@@ -116,7 +118,8 @@ zero.
 | `planned_calls` | записано на сегодня | `crm.activity.list` count: **open** (`COMPLETED=N`) call activities (`TYPE_ID=companion_call_activity_type_id`, default 2) with `DEADLINE` today, `RESPONSIBLE_ID=uid`. `COMPLETED=N` is essential — telephony auto-creates a *completed* call activity per real call, which would otherwise inflate the count to "planned + every call already made today" |
 | `meetings_set` | назначено сегодня | distinct deals that **entered** `companion_meeting_set_stage_id` (`C24:EXECUTING`, «Записан на встречу») today, per `ASSIGNED_BY_ID` — pre-meeting stages still rest with the TM, so assignee is correct attribution (`_stage_entrants_by_assignee`) |
 | `talk_time_sec` | время на линии | `voximplant.statistic.get` today, `PORTAL_USER_ID=uid`, summing `CALL_DURATION` over answered calls (`CALL_FAILED_CODE==ingest_success_code`) — full telephony, analyzed or not |
-| `push_to_meeting` | дожать до встречи | distinct deals that **entered** any **hot** pre-booking stage (`_HOT_STAGES` — просил перезвонить / квалифицирован / не дошёл) today, per `ASSIGNED_BY_ID` — same `_stage_entrants_by_assignee`, a list of stages |
+| `push_to_meeting` | (не показывается в кабинете) | distinct deals that **entered** any **hot** pre-booking stage (`_HOT_STAGES` — просил перезвонить / квалифицирован / не дошёл) today, per `ASSIGNED_BY_ID` — same `_stage_entrants_by_assignee`, a list of stages. Still in the schema; the cabinet «дожать до встречи» tile now reads `in_qual` instead |
+| `in_qual` | дожать до встречи | **not day-scoped** — a *current* snapshot: open deals (`CLOSED=N`) resting **right now** at `companion_qualified_stage_id` (`C24:PREPAYMENT_INVOIC`, «Квалифицирован — записать на встречу») = clients «в квале», `ASSIGNED_BY_ID=uid`. Counted in `_today_metrics` from the already-fetched open-deals list (no extra Bitrix call), so it moves with the live pipeline, not with `?date=` |
 | `deals_closed` | дел закрыто | WON (`C24:WON`) transitions **today** attributed via «Сотрудник ТМ» — reuses `_meetings_by_tm` with the today window (same join as the money axis) |
 | `overdue` | просроченных | `crm.activity.list` count: incomplete activities (`COMPLETED=N`) with `DEADLINE` in `[day 00:00, min(day end, now))` — due that day but already past deadline (for today this is `now`; a future day short-circuits to 0) (`_overdue_tasks`) |
 

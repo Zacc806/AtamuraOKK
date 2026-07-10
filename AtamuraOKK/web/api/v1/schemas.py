@@ -618,6 +618,13 @@ class DayToday(BaseModel):
         default=None,
         description="Дожать до встречи — deals entering a hot stage today",
     )
+    in_qual: int | None = Field(
+        default=None,
+        description=(
+            "Дожать до встречи — open deals sitting at the qualified stage now "
+            "(clients «в квале»), a current-pipeline snapshot, not a today count"
+        ),
+    )
     deals_closed: int | None = Field(
         default=None,
         description="Дел закрыто — conducted-visit (WON) deals attributed today",
