@@ -170,17 +170,33 @@ def test_anketa_counts_fully_filled_deals(monkeypatch: pytest.MonkeyPatch) -> No
 # --- tasks_set (open deals carrying an open activity) ------------------------
 
 
-def test_tasks_set_intersects_deals_with_open_activity() -> None:
-    """Only open deals that carry an open activity count as «дело поставлено»."""
-    deals = [{"ID": "1"}, {"ID": "2"}, {"ID": "3"}]
+def test_tasks_set_counts_only_task_requiring_stages() -> None:
+    """Base = deals on task-requiring stages; «нет задач» stages are excluded."""
+    deals = [
+        {"ID": "1", "STAGE_ID": "C24:UC_OPEENZ"},  # Попросил перезвонить — has task
+        {"ID": "2", "STAGE_ID": "C24:PREPAYMENT_INVOIC"},  # Квалифицирован — no task
+        {"ID": "3", "STAGE_ID": "C24:FINAL_INVOICE"},  # Подтверждён визит — has task
+        {"ID": "4", "STAGE_ID": "C24:NEW"},  # Новая заявка — нет задач → excluded
+        {"ID": "5", "STAGE_ID": "C24:UC_VL3EHH"},  # Недозвон 1 — нет задач → excluded
+    ]
     crit = hygiene._tasks_set(deals, {1, 3, 99})  # 99 isn't an open deal
     assert crit.status == "live"
-    assert (crit.numerator, crit.denominator) == (2, 3)
+    assert (crit.numerator, crit.denominator) == (2, 3)  # deals 4 & 5 out of base
+
+
+def test_tasks_set_no_task_requiring_stage_is_not_available() -> None:
+    """Open deals only on «нет задач» stages → nothing to measure."""
+    deals = [
+        {"ID": "1", "STAGE_ID": "C24:NEW"},
+        {"ID": "2", "STAGE_ID": "C24:UC_LS7DKY"},  # Недозвон 2
+    ]
+    assert hygiene._tasks_set(deals, {1, 2}).status == "not_available"
 
 
 def test_tasks_set_bitrix_down_is_not_available() -> None:
     """A missing owners pull degrades the criterion to «нет данных»."""
-    assert hygiene._tasks_set([{"ID": "1"}], None).status == "not_available"
+    down = hygiene._tasks_set([{"ID": "1", "STAGE_ID": "C24:UC_OPEENZ"}], None)
+    assert down.status == "not_available"
 
 
 # --- tasks_on_time (due-but-not-overdue) ------------------------------------
@@ -260,8 +276,16 @@ async def test_get_hygiene_overall_is_mean_of_live_criteria(
     monkeypatch.setattr(settings, "companion_anketa_fields", [])
     fake = FakeBitrix(
         deals=[
-            {"ID": "1", "LAST_ACTIVITY_TIME": _iso_days_ago(1)},
-            {"ID": "2", "LAST_ACTIVITY_TIME": _iso_days_ago(99)},
+            {
+                "ID": "1",
+                "STAGE_ID": "C24:UC_OPEENZ",
+                "LAST_ACTIVITY_TIME": _iso_days_ago(1),
+            },
+            {
+                "ID": "2",
+                "STAGE_ID": "C24:PREPAYMENT_INVOIC",
+                "LAST_ACTIVITY_TIME": _iso_days_ago(99),
+            },
         ],
         task_owners=[1, 2],  # both deals have an open task → tasks_set 100%
         notes=[{"ID": "1", "DESCRIPTION": "ok"}],  # 1/1 → notes 100%

@@ -16,8 +16,11 @@ criterion to ``status="not_available"`` rather than failing the whole view):
 * **anketa**       — «Правильное заполнение анкеты». Share of open deals with
   every configured questionnaire field (``companion_anketa_fields``) filled.
   Unconfigured → not_available (we never invent a field list).
-* **tasks_set**    — «Постановка дел». Share of open deals that carry at least one
-  open (incomplete) activity — i.e. a planned next step, no "abandoned" cards.
+* **tasks_set**    — «Постановка дел». Of the open deals whose current stage
+  *requires* a task per the регламент (``_TASK_STAGES``), the share carrying at
+  least one open (incomplete) activity. No-task stages (Новая заявка, Недозвон, …)
+  are excluded from the base, so a card parked where no task is due never counts
+  against it.
 * **tasks_on_time**— «Исполнение дел в сроки». Of activities whose deadline has
   already passed in the period, the share that are not left hanging overdue.
 * **notes**        — «Примечание по шаблону». Share of completed call activities in
@@ -30,7 +33,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -43,6 +46,58 @@ from AtamuraOKK.web.api.v1.schemas import HygieneCriterion, HygieneView
 
 # Bitrix CRM owner type id for a deal (crm.activity OWNER_TYPE_ID).
 _DEAL_OWNER_TYPE = 2
+
+
+class _StageTaskRule(NamedTuple):
+    """Per-stage task регламент: is a task required, and its deadline window."""
+
+    task_required: bool
+    min_deadline: timedelta | None
+    max_deadline: timedelta | None
+
+
+# Zvandau (cat 24) per-stage task регламент. For each open-deal stage: does the
+# регламент require the manager to hold a follow-up task, and the [min, max]
+# window the task's deadline should fall in after the deal enters the stage
+# (measured from stage entry). STATUS_IDs are the stable portal stage ids (mirror
+# of day._STAGE_SIGNALS). Only ``task_required`` is consumed today — it scopes the
+# tasks_set denominator; the min/max bounds are recorded for the planned per-stage
+# window criterion (which needs a per-deal crm.stagehistory pull) and are unused
+# for now. Stages absent here — or present with task_required=False — expect no
+# task and are excluded from the tasks_set base, so a deal parked in «Новая
+# заявка» or «Недозвон» never counts against «Постановка дел».
+_TASK_STAGES: dict[str, _StageTaskRule] = {
+    "C24:NEW": _StageTaskRule(False, None, None),  # Новая заявка — нет задач
+    "C24:PREPARATION": _StageTaskRule(False, None, None),  # Взято в работу — нет задач
+    "C24:UC_OPEENZ": _StageTaskRule(  # Попросил перезвонить
+        True, timedelta(minutes=10), timedelta(hours=24)
+    ),
+    "C24:UC_VL3EHH": _StageTaskRule(  # Недозвон 1 — авто-перенос, не ручная задача
+        False, timedelta(hours=24), timedelta(hours=48)
+    ),
+    "C24:UC_LS7DKY": _StageTaskRule(  # Недозвон 2 — нет задач
+        False, timedelta(hours=24), timedelta(hours=48)
+    ),
+    "C24:PREPAYMENT_INVOIC": _StageTaskRule(  # Лид квалифицирован
+        True, timedelta(hours=24), timedelta(hours=48)
+    ),
+    "C24:EXECUTING": _StageTaskRule(  # Записан на встречу ОП
+        True, timedelta(hours=12), timedelta(hours=48)
+    ),
+    "C24:FINAL_INVOICE": _StageTaskRule(  # Подтверждён визит
+        True, timedelta(hours=1), timedelta(hours=12)
+    ),
+    "C24:UC_9OBT14": _StageTaskRule(  # Не дошёл до встречи
+        True, timedelta(hours=12), timedelta(hours=48)
+    ),
+}
+
+
+def _requires_task(stage_id: str) -> bool:
+    """Whether the регламент demands a follow-up task at the deal's current stage."""
+    rule = _TASK_STAGES.get(stage_id)
+    return rule.task_required if rule else False
+
 
 # (uid, period_label) -> (monotonic expiry, HygieneView).
 _cache: dict[tuple[int, str], tuple[float, HygieneView]] = {}
@@ -173,13 +228,26 @@ def _tasks_set(
     deals: list[dict[str, Any]] | None,
     deal_ids_with_task: set[int] | None,
 ) -> HygieneCriterion:
-    """Share of open deals that have at least one open activity planned."""
+    """Share of task-requiring open deals that carry an open activity planned.
+
+    Only deals whose current stage requires a task per the регламент
+    (``_TASK_STAGES``) enter the base; stages marked «нет задач» (Новая заявка,
+    Взято в работу, Недозвон 1/2) are excluded, so a card parked where no task is
+    due neither helps nor hurts «Постановка дел».
+    """
     if deals is None or deal_ids_with_task is None:
         return _unavailable("tasks_set", "Bitrix недоступен")
-    if not deals:
-        return _unavailable("tasks_set", "Нет открытых сделок в работе")
-    with_task = sum(1 for d in deals if int(d["ID"]) in deal_ids_with_task)
-    return _scored("tasks_set", with_task, len(deals))
+    required = [d for d in deals if _requires_task(str(d.get("STAGE_ID") or ""))]
+    if not required:
+        return _unavailable(
+            "tasks_set", "Нет открытых сделок на этапах, где нужна задача"
+        )
+    with_task = sum(1 for d in required if int(d["ID"]) in deal_ids_with_task)
+    note = (
+        "База — только сделки на этапах, где регламент требует задачу; этапы "
+        "«нет задач» (Новая заявка, Взято в работу, Недозвон 1/2) исключены."
+    )
+    return _scored("tasks_set", with_task, len(required), note)
 
 
 async def _tasks_on_time(
