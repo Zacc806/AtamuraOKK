@@ -249,14 +249,20 @@ badges it «нет данных») rather than a fake `0`. The five criteria:
 | `anketa` | Правильное заполнение анкеты | open deals with **every** `companion_anketa_fields` UF field non-empty; **unconfigured → not_available** | open deals |
 | `tasks_set` | Постановка дел | open deals carrying ≥1 **open** activity (one `crm.activity.list` owner pull, intersected with the open-deal ids) | open deals |
 | `tasks_on_time` | Исполнение дел в сроки | of activities whose deadline already passed in the period, the share **not left overdue** (two count reads) | due-passed activities |
-| `notes` | Примечание по шаблону | completed call activities with a non-empty note (containing `companion_note_template_marker` when set) | completed calls in period |
+| `notes` | Примечание по шаблону | of the **deals the manager called**, those carrying a timeline comment **they wrote** in the period (containing `companion_note_template_marker` when set; BB-code markup, image/link-only autoposts and other authors don't count) | distinct deals called in period (capped at `companion_hygiene_notes_max_deals`) |
 
 **Honest limits (documented in each criterion's `note`):** `statuses` is a *stale-
 card proxy* — the strict "stage matches the call outcome" check needs an ОКК
 transcript↔stage comparison on the scoring side (not wired). `tasks_on_time`
 counts a late-but-closed task as on-time (a count API exposes no per-activity
-completion timestamp). `anketa`/`notes` are config-gated: they go live the moment
-the PM supplies `ATAMURAOKK_COMPANION_ANKETA_FIELDS` / `…_NOTE_TEMPLATE_MARKER`.
+completion timestamp). `anketa` is config-gated: it goes live the moment the PM
+supplies `ATAMURAOKK_COMPANION_ANKETA_FIELDS`. `notes` is live out of the box and
+counts *any* note the manager wrote (however terse — «НДЗ» passes); tighten it
+with `…_NOTE_TEMPLATE_MARKER` (require a template marker) or
+`…_NOTE_MIN_CHARS` (require substance) once the регламент's template is fixed.
+The note is read from the deal's timeline — **not** from the call activity's
+`DESCRIPTION`, which Bitrix telephony leaves empty on every call (reading it was
+the pre-2026-07-13 bug that pinned every manager at 0%).
 Cache: `companion_hygiene_cache_ttl_seconds` (600s). Service: `web/api/v1/hygiene.py`.
 
 Meetings come from the ОП meeting pipeline (`AtamuraOKK/scoring/meetings/`):

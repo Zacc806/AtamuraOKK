@@ -23,14 +23,19 @@ criterion to ``status="not_available"`` rather than failing the whole view):
   against it.
 * **tasks_on_time**— «Исполнение дел в сроки». Of activities whose deadline has
   already passed in the period, the share that are not left hanging overdue.
-* **notes**        — «Примечание по шаблону». Share of completed call activities in
-  the period that carry a note (matching ``companion_note_template_marker`` when
-  set, else any non-empty note).
+* **notes**        — «Примечание по шаблону». Of the **deals** the manager called in
+  the period, the share carrying a note *they* wrote on the card (a
+  ``crm.timeline.comment``, matching ``companion_note_template_marker`` when set).
+  Deliberately per-deal, not per-call: three Недозвон attempts on one lead are one
+  card owing one note. It is *not* read from the call activity's ``DESCRIPTION`` —
+  Bitrix telephony leaves that field empty on every call, so the field can only
+  ever score 0.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from datetime import datetime, timedelta
 from typing import Any, NamedTuple
@@ -40,12 +45,25 @@ from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from AtamuraOKK.bitrix import BitrixClient, BitrixError
+from AtamuraOKK.bitrix.client import PAGE_SIZE
 from AtamuraOKK.settings import settings
 from AtamuraOKK.web.api.v1 import day, okk
 from AtamuraOKK.web.api.v1.schemas import HygieneCriterion, HygieneView
 
 # Bitrix CRM owner type id for a deal (crm.activity OWNER_TYPE_ID).
 _DEAL_OWNER_TYPE = 2
+
+# Timeline comments are BB-code. A comment that is only an image (the WhatsApp
+# integration posts [img]…[/img]) or only a link (a manager pasting a card URL)
+# carries no note, so those blocks go with their contents before the remaining tags
+# are stripped — otherwise the bare URL would read as text and score as a note.
+_BB_MEDIA = re.compile(r"\[(img|url)[^\]]*\].*?\[/\1\]", re.IGNORECASE | re.DOTALL)
+_BB_TAG = re.compile(r"\[/?[^\]]{1,80}\]")
+_BARE_URL = re.compile(r"https?://\S+")
+
+# Comment batches in flight at once. A busy month is ~15 batches; the client has no
+# pacer of its own (only throttle-retry), so keep the fan-out polite.
+_NOTES_BATCH_CONCURRENCY = 4
 
 
 class _StageTaskRule(NamedTuple):
@@ -118,6 +136,15 @@ def _filled(value: Any) -> bool:
     if isinstance(value, (list, tuple, dict)):
         return len(value) > 0
     return str(value).strip() != ""
+
+
+def _in_period(created: str, start: datetime, end: datetime) -> bool:
+    """Whether a Bitrix timestamp falls in the view's period."""
+    try:
+        moment = datetime.fromisoformat(created)
+    except ValueError:
+        return False
+    return start <= moment < end
 
 
 def _unavailable(key: str, note: str) -> HygieneCriterion:
@@ -292,44 +319,134 @@ async def _tasks_on_time(
     return _scored("tasks_on_time", due - overdue, due, note)
 
 
+async def _called_deals(
+    bx: BitrixClient,
+    uid: int,
+    start: datetime,
+    end: datetime,
+) -> tuple[list[int], bool]:
+    """Deals the manager called in the period, most recently called first.
+
+    The unit is the **deal card, not the call**: a lead worked through three
+    Недозвон attempts is one card owing one note, so calls are collapsed to their
+    ``OWNER_ID``. Returns the deal ids (capped at ``companion_hygiene_notes_max_deals``)
+    and whether that cap truncated them.
+    """
+    deal_ids: list[int] = []
+    seen: set[int] = set()
+    cap = settings.companion_hygiene_notes_max_deals
+    async for row in bx.list(
+        "crm.activity.list",
+        {
+            "filter": {
+                "RESPONSIBLE_ID": uid,
+                "COMPLETED": "Y",
+                "TYPE_ID": settings.companion_call_activity_type_id,
+                "OWNER_TYPE_ID": _DEAL_OWNER_TYPE,
+                ">=CREATED": start.isoformat(),
+                "<CREATED": end.isoformat(),
+            },
+            "select": ["ID", "OWNER_ID"],
+            "order": {"ID": "DESC"},
+        },
+        max_items=settings.companion_hygiene_notes_max_calls,
+    ):
+        deal_id = int(row.get("OWNER_ID") or 0)
+        if not deal_id or deal_id in seen:
+            continue
+        seen.add(deal_id)
+        deal_ids.append(deal_id)
+        if len(deal_ids) >= cap:
+            return deal_ids, True
+    return deal_ids, False
+
+
+def _is_note(text: str, marker: str) -> bool:
+    """Whether a timeline comment counts as a proper post-call note.
+
+    Bitrix stores comments as BB-code, and the Wazzup/WhatsApp integration posts
+    image-only comments (``[img]…[/img]``) — those are machine traffic, not a note
+    the manager wrote, so strip markup (and media/link blocks whole) before judging
+    emptiness.
+    """
+    text = _BB_MEDIA.sub("", text)
+    text = _BB_TAG.sub("", text)
+    stripped = _BARE_URL.sub("", text).replace("&nbsp;", " ").strip()
+    if len(stripped) < settings.companion_note_min_chars:
+        return False
+    return bool(stripped) and (not marker or marker in stripped.lower())
+
+
 async def _notes(
     bx: BitrixClient,
     uid: int,
     start: datetime,
     end: datetime,
 ) -> HygieneCriterion:
-    """Share of completed call activities in the period carrying a note."""
+    """Share of the deals the manager called that carry a note they wrote.
+
+    The note lives on the **deal timeline**, not on the call activity: Bitrix
+    telephony writes the call activity itself, and its ``DESCRIPTION`` is always
+    empty (nothing in the UI ever fills it), so the old per-call reading of that
+    field could only ever return 0. A manager's note is a ``crm.timeline.comment``
+    on the deal card — the one the ОКК регламент means by «примечание по шаблону».
+    """
     marker = settings.companion_note_template_marker.strip().lower()
-    total = with_note = 0
-    try:
-        async for row in bx.list(
-            "crm.activity.list",
-            {
-                "filter": {
-                    "RESPONSIBLE_ID": uid,
-                    "COMPLETED": "Y",
-                    "TYPE_ID": settings.companion_call_activity_type_id,
-                    ">=CREATED": start.isoformat(),
-                    "<CREATED": end.isoformat(),
+    gate = asyncio.Semaphore(_NOTES_BATCH_CONCURRENCY)
+
+    async def noted_in(deal_ids: list[int]) -> int:
+        """How many of these (≤ PAGE_SIZE) deals carry a note by the manager."""
+        async with gate:
+            comments = await bx.batch(
+                {
+                    str(deal_id): (
+                        "crm.timeline.comment.list",
+                        {
+                            "filter[ENTITY_ID]": deal_id,
+                            "filter[ENTITY_TYPE]": "deal",
+                            "select[]": ["ID", "COMMENT", "AUTHOR_ID", "CREATED"],
+                        },
+                    )
+                    for deal_id in deal_ids
                 },
-                "select": ["ID", "DESCRIPTION"],
-            },
-            max_items=settings.companion_day_max_scan,
-        ):
-            total += 1
-            text = str(row.get("DESCRIPTION") or "").strip()
-            if text and (not marker or marker in text.lower()):
-                with_note += 1
+            )
+        return sum(
+            any(
+                int(r.get("AUTHOR_ID") or 0) == uid
+                and _in_period(str(r.get("CREATED") or ""), start, end)
+                and _is_note(str(r.get("COMMENT") or ""), marker)
+                for r in comments.get(str(deal_id)) or []
+            )
+            for deal_id in deal_ids
+        )
+
+    try:
+        deal_ids, truncated = await _called_deals(bx, uid, start, end)
+        if not deal_ids:
+            return _unavailable("notes", "Нет звонков по сделкам за период")
+        # Comments are per-entity in Bitrix (no cross-deal filter), so a month of
+        # calls means hundreds of reads: pack them PAGE_SIZE to a batch and run a
+        # few batches at a time (the client retries throttling, it doesn't pace).
+        chunks = [
+            deal_ids[i : i + PAGE_SIZE] for i in range(0, len(deal_ids), PAGE_SIZE)
+        ]
+        with_note = sum(await asyncio.gather(*(noted_in(c) for c in chunks)))
     except BitrixError:
         return _unavailable("notes", "Bitrix недоступен")
-    if not total:
-        return _unavailable("notes", "Нет завершённых звонков за период")
-    note = (
-        f"Примечание засчитывается при наличии шаблонной метки «{marker}»."
-        if marker
-        else "Засчитывается любое непустое примечание к звонку."
+
+    base = (
+        f"База — последние {len(deal_ids)} сделок, по которым были звонки "
+        "(лимит периода)."
+        if truncated
+        else f"База — {len(deal_ids)} сделок, по которым были звонки в периоде."
     )
-    return _scored("notes", with_note, total, note)
+    rule = (
+        f" Засчитывается примечание менеджера в карточке с меткой «{marker}»."
+        if marker
+        else " Засчитывается любое содержательное примечание менеджера в карточке "
+        "сделки (комментарий в таймлайне); автосообщения интеграций не в счёт."
+    )
+    return _scored("notes", with_note, len(deal_ids), base + rule)
 
 
 async def get_hygiene(

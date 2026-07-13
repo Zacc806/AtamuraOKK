@@ -52,8 +52,11 @@ class FakeBitrix:
 
     ``deals`` are the open-deal rows (``list`` crm.deal.list). ``task_owners`` are
     the deal ids that have an open activity (``list`` crm.activity.list,
-    COMPLETED=N). ``notes`` are completed call-activity rows (COMPLETED=Y). ``due``
-    / ``overdue`` are the envelope totals returned for the two on-time counts.
+    COMPLETED=N). ``calls`` are completed call-activity rows (COMPLETED=Y), each
+    pointing at the deal it was made on (``OWNER_ID``); ``comments`` maps a deal id
+    to its timeline comments (``batch`` crm.timeline.comment.list) — together they
+    drive the notes criterion. ``due`` / ``overdue`` are the envelope totals
+    returned for the two on-time counts.
     """
 
     def __init__(
@@ -61,13 +64,15 @@ class FakeBitrix:
         *,
         deals: list[dict[str, Any]] | None = None,
         task_owners: list[int] | None = None,
-        notes: list[dict[str, Any]] | None = None,
+        calls: list[dict[str, Any]] | None = None,
+        comments: dict[int, list[dict[str, Any]]] | None = None,
         due: int = 0,
         overdue: int = 0,
     ) -> None:
         self._deals = deals or []
         self._task_owners = task_owners or []
-        self._notes = notes or []
+        self._calls = calls or []
+        self._comments = comments or {}
         self.due = due
         self.overdue = overdue
         self.seen: list[str] = []
@@ -92,7 +97,7 @@ class FakeBitrix:
         *,
         max_items: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Open deals, open-task owners and completed call-activity note rows."""
+        """Open deals, open-task owners and the completed calls behind the notes."""
         self.seen.append(method)
         flt = (params or {}).get("filter") or {}
         if method == "crm.deal.list":
@@ -104,10 +109,23 @@ class FakeBitrix:
                 for owner in self._task_owners:
                     yield {"ID": "1", "OWNER_ID": owner}
                 return
-            for row in self._notes:  # completed call activities (notes)
+            for row in self._calls:  # completed calls, each on its deal
                 yield row
             return
         raise AssertionError(f"unexpected list {method}")
+
+    async def batch(
+        self,
+        commands: dict[str, tuple[str, dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """Timeline comments, one command per deal id (keyed by that id)."""
+        self.seen.append("batch")
+        out: dict[str, Any] = {}
+        for key, (method, _params) in commands.items():
+            if method != "crm.timeline.comment.list":
+                raise AssertionError(f"unexpected batch command {method}")
+            out[key] = self._comments.get(int(key), [])
+        return out
 
 
 # --- statuses (stale-card proxy) --------------------------------------------
@@ -221,22 +239,64 @@ async def test_tasks_on_time_future_period_has_nothing_due() -> None:
 # --- notes (примечание по шаблону) ------------------------------------------
 
 
-async def test_notes_counts_any_nonempty_without_marker(
+def _call(deal_id: int, ident: int) -> dict[str, Any]:
+    return {"ID": str(ident), "OWNER_ID": str(deal_id)}
+
+
+def _comment(
+    author: int,
+    text: str,
+    when: str = "2020-01-15T10:00:00+05:00",
+) -> dict[str, Any]:
+    return {"ID": "1", "AUTHOR_ID": str(author), "COMMENT": text, "CREATED": when}
+
+
+async def test_notes_counts_manager_note_on_the_called_deal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With no marker, any non-empty call note counts toward the criterion."""
+    """A called deal counts as noted when the manager wrote a comment on the card."""
     monkeypatch.setattr(settings, "companion_note_template_marker", "")
     bx = FakeBitrix(
-        notes=[
-            {"ID": "1", "DESCRIPTION": "Договорились о встрече"},
-            {"ID": "2", "DESCRIPTION": "   "},  # blank → no note
-            {"ID": "3", "DESCRIPTION": "перезвонить"},
-            {"ID": "4"},  # missing → no note
-        ],
+        calls=[_call(1, 10), _call(2, 11), _call(3, 12), _call(4, 13)],
+        comments={
+            1: [_comment(5, "Договорились о встрече")],  # the manager's own note
+            2: [],  # card left bare
+            3: [_comment(9, "Автосообщение WhatsApp")],  # not his — integration
+            4: [_comment(5, "Перезвонить", when="2019-12-01T10:00:00+05:00")],  # old
+        },
     )
     crit = await hygiene._notes(bx, 5, _PAST_START, _PAST_END)  # type: ignore[arg-type]
     assert crit.status == "live"
-    assert (crit.numerator, crit.denominator) == (2, 4)
+    assert (crit.numerator, crit.denominator) == (1, 4)
+
+
+async def test_notes_collapses_repeat_calls_to_one_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Three Недозвон attempts on one lead are one card owing one note, not three."""
+    monkeypatch.setattr(settings, "companion_note_template_marker", "")
+    bx = FakeBitrix(
+        calls=[_call(1, 10), _call(1, 11), _call(1, 12), _call(2, 13)],
+        comments={1: [_comment(5, "Не берёт трубку, пишу в WhatsApp")], 2: []},
+    )
+    crit = await hygiene._notes(bx, 5, _PAST_START, _PAST_END)  # type: ignore[arg-type]
+    assert (crit.numerator, crit.denominator) == (1, 2)
+
+
+async def test_notes_ignores_markup_only_comments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An image-only BB-code comment is integration traffic, not a written note."""
+    monkeypatch.setattr(settings, "companion_note_template_marker", "")
+    bx = FakeBitrix(
+        calls=[_call(1, 10), _call(2, 11)],
+        comments={
+            1: [_comment(5, "[img]https://static.wazzup24.com/w.png[/img]&nbsp; ")],
+            2: [_comment(5, "[b]Клиент[/b] думает до пятницы")],
+        },
+    )
+    crit = await hygiene._notes(bx, 5, _PAST_START, _PAST_END)  # type: ignore[arg-type]
+    assert (crit.numerator, crit.denominator) == (1, 2)
 
 
 async def test_notes_requires_marker_when_configured(
@@ -245,13 +305,36 @@ async def test_notes_requires_marker_when_configured(
     """With a marker set, only notes containing it count as «по шаблону»."""
     monkeypatch.setattr(settings, "companion_note_template_marker", "Итог")
     bx = FakeBitrix(
-        notes=[
-            {"ID": "1", "DESCRIPTION": "Итог: клиент думает"},  # has marker
-            {"ID": "2", "DESCRIPTION": "перезвонить"},  # no marker
-        ],
+        calls=[_call(1, 10), _call(2, 11)],
+        comments={
+            1: [_comment(5, "Итог: клиент думает")],  # has marker
+            2: [_comment(5, "перезвонить")],  # no marker
+        },
     )
     crit = await hygiene._notes(bx, 5, _PAST_START, _PAST_END)  # type: ignore[arg-type]
     assert (crit.numerator, crit.denominator) == (1, 2)
+
+
+async def test_notes_unavailable_without_calls() -> None:
+    """No calls on deals in the period → «нет данных», not a fake 0%."""
+    crit = await hygiene._notes(FakeBitrix(), 5, _PAST_START, _PAST_END)  # type: ignore[arg-type]
+    assert crit.status == "not_available"
+    assert crit.pct is None
+
+
+async def test_notes_caps_the_base_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A manager who called more deals than the cap is measured on the latest ones."""
+    monkeypatch.setattr(settings, "companion_note_template_marker", "")
+    monkeypatch.setattr(settings, "companion_hygiene_notes_max_deals", 2)
+    bx = FakeBitrix(
+        calls=[_call(1, 10), _call(2, 11), _call(3, 12)],
+        comments={1: [_comment(5, "есть")], 2: [], 3: [_comment(5, "есть")]},
+    )
+    crit = await hygiene._notes(bx, 5, _PAST_START, _PAST_END)  # type: ignore[arg-type]
+    assert crit.denominator == 2  # deal 3 was never read
+    assert crit.note is not None and "последние" in crit.note
 
 
 # --- get_hygiene aggregation -------------------------------------------------
@@ -288,7 +371,8 @@ async def test_get_hygiene_overall_is_mean_of_live_criteria(
             },
         ],
         task_owners=[1, 2],  # both deals have an open task → tasks_set 100%
-        notes=[{"ID": "1", "DESCRIPTION": "ok"}],  # 1/1 → notes 100%
+        calls=[{"ID": "1", "OWNER_ID": "1"}],  # one called deal…
+        comments={1: [_comment(5, "Договорились")]},  # …with the note → notes 100%
         due=4,
         overdue=1,  # tasks_on_time 75%
     )

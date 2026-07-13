@@ -393,9 +393,24 @@ class Settings(BaseSettings):
     # Empty (default) -> the criterion reports "not_available" until the PM supplies
     # the real field list (ATAMURAOKK_COMPANION_ANKETA_FIELDS='UF_CRM_a,UF_CRM_b').
     companion_anketa_fields: list[str] = Field(default_factory=list)
-    # Note criterion: a completed call activity counts as a proper note only when
-    # its text contains this marker. Empty -> any non-empty note counts.
+    # Note criterion («примечание по шаблону»): the note is the manager's own
+    # timeline comment on the deal card they called — Bitrix telephony never fills
+    # the call activity's DESCRIPTION, so that field is not a source. The base is
+    # the deals called in the period (collapsed from their calls), bounded by
+    # max_deals; max_calls bounds the activity scan that discovers them.
+    # 800 covers a full month for the busiest caller (~760 distinct deals); a
+    # tighter cap would silently measure only the most recently called cards, which
+    # reads several points better than the real month.
+    companion_hygiene_notes_max_deals: int = 800
+    companion_hygiene_notes_max_calls: int = 4000
+    # A comment counts as a proper note only when it contains this marker. Empty ->
+    # any note the manager wrote counts (BB-code markup and integration autoposts
+    # are stripped/ignored either way).
     companion_note_template_marker: str = ""
+    # Minimum length (chars, markup stripped) for a comment to count as a note.
+    # 0 -> any non-empty note counts, however terse («НДЗ»). Raise it once the PM
+    # decides what «содержательное примечание» means.
+    companion_note_min_chars: int = 0
 
     # --- Phase 0 spike ---
     # Where the transcription-eval spike writes calls metadata, audio, and

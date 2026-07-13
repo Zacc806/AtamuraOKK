@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from typing import Any, Self
+from urllib.parse import urlencode
 
 import httpx
 from loguru import logger
@@ -165,6 +166,39 @@ class BitrixClient:
     ) -> dict[str, Any]:
         """Call a list method and return the full envelope (with ``next``/``total``)."""
         return await self._invoke(method, params)
+
+    async def batch(
+        self,
+        commands: dict[str, tuple[str, dict[str, Any]]],
+    ) -> dict[str, Any]:
+        """Run up to ``PAGE_SIZE`` reads in one HTTP round-trip, keyed by name.
+
+        ``commands`` maps a caller-chosen key to ``(method, params)``; the return
+        maps the same keys to each command's ``result``. Bitrix's ``batch`` takes
+        its commands as query strings, so params are urlencoded here. A command
+        that errors is reported in ``result_error`` and comes back **absent** from
+        the returned dict rather than raising — a batch is a fan-out of
+        independent reads, and one failing entity should not void the other 49.
+        """
+        if len(commands) > PAGE_SIZE:
+            raise ValueError(f"batch takes at most {PAGE_SIZE} commands")
+        if not commands:
+            return {}
+        cmd = {
+            key: f"{method}?{urlencode(params, doseq=True)}"
+            for key, (method, params) in commands.items()
+        }
+        envelope = await self.call("batch", {"halt": 0, "cmd": cmd})
+        errors = (envelope or {}).get("result_error") or {}
+        if errors:
+            logger.warning(
+                "Bitrix batch: {n}/{total} commands failed (e.g. {sample})",
+                n=len(errors),
+                total=len(commands),
+                sample=next(iter(errors.values())),
+            )
+        result: dict[str, Any] = (envelope or {}).get("result") or {}
+        return {key: value for key, value in result.items() if key not in errors}
 
     async def list(
         self,
