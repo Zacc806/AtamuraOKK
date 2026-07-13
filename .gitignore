@@ -163,3 +163,7 @@ exports/
 yandex-sa-key*.json
 *.sa-key.json
 authorized_key*.json
+docker-compose.override.yml
+*.bak.*
+.env.bak*
+*.bak-*
