@@ -13,9 +13,11 @@ criterion to ``status="not_available"`` rather than failing the whole view):
   ``companion_hygiene_stale_days``). The strict "stage matches the call outcome"
   check needs an ОКК transcript↔stage comparison on the scoring side (not wired);
   a stuck, untouched card is the computable signal that the status is not kept.
-* **anketa**       — «Правильное заполнение анкеты». Share of open deals with
-  every configured questionnaire field (``companion_anketa_fields``) filled.
-  Unconfigured → not_available (we never invent a field list).
+* **anketa**       — «Правильное заполнение анкеты». Of the open deals that reached
+  a stage where the questionnaire is owed (``_ANKETA_STAGES``), the share with every
+  configured field (``companion_anketa_fields``) filled. Leads still in dialling owe
+  no анкета and stay out of the base. Unconfigured → not_available (we never invent
+  a field list).
 * **tasks_set**    — «Постановка дел». Of the open deals whose current stage
   *requires* a task per the регламент (``_TASK_STAGES``), the share carrying at
   least one open (incomplete) activity. No-task stages (Новая заявка, Недозвон, …)
@@ -115,6 +117,27 @@ def _requires_task(stage_id: str) -> bool:
     """Whether the регламент demands a follow-up task at the deal's current stage."""
     rule = _TASK_STAGES.get(stage_id)
     return rule.task_required if rule else False
+
+
+# Stages at which the questionnaire is already owed. The анкета is what the manager
+# fills *while qualifying* the lead, so a card still sitting in «Новая заявка»,
+# «Взято в работу», «Недозвон» or «Попросил перезвонить» owes nothing yet — Bitrix
+# measures 0–8% filled there against 100% from «Лид квалифицирован» on. Counting
+# those stages in the base would cap even a perfect manager near 20%, so they are
+# excluded, exactly as «нет задач» stages are excluded from tasks_set.
+_ANKETA_STAGES = frozenset(
+    {
+        "C24:PREPAYMENT_INVOIC",  # Лид квалифицирован
+        "C24:EXECUTING",  # Записан на встречу в ОП
+        "C24:FINAL_INVOICE",  # Подтверждён визит
+        "C24:UC_9OBT14",  # Не дошёл до встречи
+    }
+)
+
+
+def _anketa_due(stage_id: str) -> bool:
+    """Whether the deal has reached a stage at which the анкета must be filled."""
+    return stage_id in _ANKETA_STAGES
 
 
 # (uid, period_label) -> (monotonic expiry, HygieneView).
@@ -236,7 +259,12 @@ def _statuses(deals: list[dict[str, Any]] | None) -> HygieneCriterion:
 
 
 def _anketa(deals: list[dict[str, Any]] | None) -> HygieneCriterion:
-    """Share of open deals with every configured questionnaire field filled."""
+    """Share of qualified open deals with every configured questionnaire field filled.
+
+    Only deals that reached a stage where the анкета is owed (``_ANKETA_STAGES``)
+    enter the base; a lead still being dialled has no questionnaire due and so
+    neither helps nor hurts the criterion.
+    """
     fields = settings.companion_anketa_fields
     if not fields:
         return _unavailable(
@@ -245,10 +273,16 @@ def _anketa(deals: list[dict[str, Any]] | None) -> HygieneCriterion:
         )
     if deals is None:
         return _unavailable("anketa", "Bitrix недоступен")
-    if not deals:
-        return _unavailable("anketa", "Нет открытых сделок в работе")
-    complete = sum(1 for d in deals if all(_filled(d.get(f)) for f in fields))
-    return _scored("anketa", complete, len(deals))
+    due = [d for d in deals if _anketa_due(str(d.get("STAGE_ID") or ""))]
+    if not due:
+        return _unavailable("anketa", "Нет сделок на этапах, где анкета уже нужна")
+    complete = sum(1 for d in due if all(_filled(d.get(f)) for f in fields))
+    note = (
+        "База — сделки, дошедшие до квалификации («Лид квалифицирован» и далее); "
+        "лиды в дозвоне анкеты ещё не должны. Засчитывается карточка, где "
+        "заполнены все поля анкеты."
+    )
+    return _scored("anketa", complete, len(due), note)
 
 
 def _tasks_set(

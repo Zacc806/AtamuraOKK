@@ -389,9 +389,13 @@ class Settings(BaseSettings):
     # stage check on the scoring side (not wired).
     companion_hygiene_stale_days: int = 14
     # Questionnaire ("anketa") criterion: deal fields (UF_CRM_*) that make up the
-    # client questionnaire; a deal counts as filled only when ALL are non-empty.
-    # Empty (default) -> the criterion reports "not_available" until the PM supplies
-    # the real field list (ATAMURAOKK_COMPANION_ANKETA_FIELDS='UF_CRM_a,UF_CRM_b').
+    # client questionnaire; a deal counts as filled only when ALL are non-empty, and
+    # only deals past qualification are scored (hygiene._ANKETA_STAGES). Empty
+    # (default) -> the criterion reports "not_available" until the PM supplies the
+    # real field list. The env value is a JSON array — pydantic parses list fields as
+    # JSON, so a bare comma-separated string raises SettingsError at import and
+    # crash-loops every container:
+    # ATAMURAOKK_COMPANION_ANKETA_FIELDS=["UF_CRM_a","UF_CRM_b"]
     companion_anketa_fields: list[str] = Field(default_factory=list)
     # Note criterion («примечание по шаблону»): the note is the manager's own
     # timeline comment on the deal card they called — Bitrix telephony never fills

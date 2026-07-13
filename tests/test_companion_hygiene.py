@@ -165,7 +165,7 @@ def test_anketa_unconfigured_is_not_available(
 ) -> None:
     """With no field list configured the criterion stays «нет данных», not 0%."""
     monkeypatch.setattr(settings, "companion_anketa_fields", [])
-    crit = hygiene._anketa([{"ID": "1"}])
+    crit = hygiene._anketa([{"ID": "1", "STAGE_ID": "C24:PREPAYMENT_INVOIC"}])
     assert crit.status == "not_available"
     assert crit.note is not None
 
@@ -173,16 +173,48 @@ def test_anketa_unconfigured_is_not_available(
 def test_anketa_counts_fully_filled_deals(monkeypatch: pytest.MonkeyPatch) -> None:
     """A deal is «filled» only when ALL configured fields are non-empty."""
     monkeypatch.setattr(settings, "companion_anketa_fields", ["UF_A", "UF_B"])
+    qual = "C24:PREPAYMENT_INVOIC"
     deals = [
-        {"ID": "1", "UF_A": "Алматы", "UF_B": "3 комн."},  # both → filled
-        {"ID": "2", "UF_A": "Астана", "UF_B": ""},  # one empty → not
-        {"ID": "3", "UF_A": "0", "UF_B": ["x"]},  # "0" and list count as filled
-        {"ID": "4", "UF_A": None, "UF_B": "x"},  # None → not
+        {"ID": "1", "STAGE_ID": qual, "UF_A": "Алматы", "UF_B": "3 комн."},  # filled
+        {"ID": "2", "STAGE_ID": qual, "UF_A": "Астана", "UF_B": ""},  # one empty → not
+        {"ID": "3", "STAGE_ID": qual, "UF_A": "0", "UF_B": ["x"]},  # "0"/list → filled
+        {"ID": "4", "STAGE_ID": qual, "UF_A": None, "UF_B": "x"},  # None → not
     ]
     crit = hygiene._anketa(deals)
     assert crit.status == "live"
     assert (crit.numerator, crit.denominator) == (2, 4)
     assert crit.pct == 50.0
+
+
+def test_anketa_counts_only_qualified_stages(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Base = deals that reached qualification; leads still in dialling owe no анкета.
+
+    Without this gate the pre-qualification cards (the bulk of an open pipeline, where
+    Bitrix measures the анкета 0–8% filled) sit in the denominator and cap even a
+    perfect manager near 20%.
+    """
+    monkeypatch.setattr(settings, "companion_anketa_fields", ["UF_A"])
+    deals = [
+        {"ID": "1", "STAGE_ID": "C24:PREPAYMENT_INVOIC", "UF_A": "x"},  # квал → filled
+        {"ID": "2", "STAGE_ID": "C24:EXECUTING", "UF_A": ""},  # записан → empty
+        {"ID": "3", "STAGE_ID": "C24:UC_9OBT14", "UF_A": "x"},  # не дошёл → filled
+        {"ID": "4", "STAGE_ID": "C24:NEW", "UF_A": ""},  # новая заявка → excluded
+        {"ID": "5", "STAGE_ID": "C24:UC_VL3EHH", "UF_A": ""},  # недозвон 1 → excluded
+        {"ID": "6", "STAGE_ID": "C24:PREPARATION", "UF_A": ""},  # в работе → excluded
+    ]
+    crit = hygiene._anketa(deals)
+    assert crit.status == "live"
+    assert (crit.numerator, crit.denominator) == (2, 3)  # deals 4–6 out of the base
+
+
+def test_anketa_without_qualified_deals_is_not_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pipeline of nothing but fresh leads reports «нет данных», not a fake 0%."""
+    monkeypatch.setattr(settings, "companion_anketa_fields", ["UF_A"])
+    crit = hygiene._anketa([{"ID": "1", "STAGE_ID": "C24:NEW", "UF_A": ""}])
+    assert crit.status == "not_available"
+    assert crit.pct is None
 
 
 # --- tasks_set (open deals carrying an open activity) ------------------------
