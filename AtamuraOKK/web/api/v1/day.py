@@ -18,12 +18,13 @@ shows "данные готовятся", never fake numbers.
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from AtamuraOKK.bitrix import BitrixClient, BitrixError, crm_card_url
@@ -41,6 +42,7 @@ from AtamuraOKK.web.api.v1.schemas import (
     DayView,
     ManagerRef,
     MoneyAxis,
+    NoMeetingItem,
     OverdueTaskItem,
 )
 
@@ -74,6 +76,22 @@ _DEADLINE_FLOOR = "2000-01-01T00:00:00"
 # meeting ("дожать до встречи"). Derived from the signal map so it stays in sync.
 _HOT_STAGES = [stage for stage, sig in _STAGE_SIGNALS.items() if sig[1] == "hot"]
 
+# Closing-block («6. Резюме + Закрытие на КЭВ») criterion ids, per rubric version.
+# The numeric ids are version-specific; only the block_id ("closing") is stable.
+# ``booked`` is the element that asserts a concrete date+time was fixed — its НЕТ
+# is what puts a call in the callback queue; the others merely explain the miss.
+# A rubric absent from this map yields no rows rather than a guessed verdict:
+# tm-call-v2 lumped the whole close into one weighted element, so it cannot say
+# whether a meeting was actually booked.
+_CLOSING_CRITERIA: dict[str, dict[str, int]] = {
+    "tm-call-v4": {
+        "booked": 26,  # Зафиксировал дату + время записи в ОП
+        "time": 24,  # Предложил конкретное время с выбором
+        "retry": 25,  # При отказе — повторная попытка закрыть
+        "value": 23,  # Презентовал ценность встречи
+    },
+}
+
 # (uid, period_label, day_label) -> (monotonic expiry, DayView). Tiny in-process
 # TTL cache so rapid re-opens / tab switches don't hammer Bitrix. ``day_label`` is
 # the «Важные цифры дня» window ("today" or a YYYY-MM-DD past day).
@@ -82,6 +100,17 @@ _cache: dict[tuple[int, str, str], tuple[float, DayView]] = {}
 # (distinct deals entering a stage per assignee, deals re-entering it 2+ times per
 # assignee) — what stage_outcomes_by_assignee returns.
 _StageOutcomes = tuple[dict[int, int], dict[int, int]]
+
+
+def stage_label(stage_id: str) -> str | None:
+    """Human funnel label for a Zvandau (cat 24) stage id, if known."""
+    sig = _STAGE_SIGNALS.get(stage_id)
+    return sig[0] if sig else None
+
+
+def activity_owner_entity(owner_type_id: int) -> str | None:
+    """CRM entity name (DEAL/CONTACT/LEAD/COMPANY) for an activity OWNER_TYPE_ID."""
+    return _ACTIVITY_OWNER_ENTITY.get(owner_type_id)
 
 
 def _phone_of(contact: dict[str, Any]) -> str | None:
@@ -137,17 +166,21 @@ async def _audit_failed_items(
     read, so the «Отказы не по делу» queue survives a Bitrix outage.
     """
     rows = (
-        await session.execute(
-            select(AuditVerdict)
-            .join(Manager, Manager.id == AuditVerdict.manager_id)
-            .where(
-                Manager.bitrix_user_id == bitrix_user_id,
-                AuditVerdict.verdict == "contradicted",
+        (
+            await session.execute(
+                select(AuditVerdict)
+                .join(Manager, Manager.id == AuditVerdict.manager_id)
+                .where(
+                    Manager.bitrix_user_id == bitrix_user_id,
+                    AuditVerdict.verdict == "contradicted",
+                )
+                .order_by(AuditVerdict.audited_at.desc())
+                .limit(limit),
             )
-            .order_by(AuditVerdict.audited_at.desc())
-            .limit(limit),
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     return [
         AuditFailedItem(
             deal_id=r.bitrix_deal_id,
@@ -161,6 +194,139 @@ async def _audit_failed_items(
         )
         for r in rows
     ]
+
+
+def _closing_scores(criteria: dict[str, Any]) -> dict[int, int]:
+    """``criterion_id -> ДА(1)/НЕТ(0)`` for the closing block of one scored call.
+
+    Н.П. elements are absent from ``per_criterion`` altogether (the scorer drops
+    them so they leave the denominator), so a missing id means "not applicable",
+    never "failed" — callers must not read absence as a НЕТ.
+    """
+    out: dict[int, int] = {}
+    for pc in criteria.get("per_criterion") or []:
+        if pc.get("block_id") != "closing":
+            continue
+        try:
+            out[int(pc["id"])] = int(pc.get("score") or 0)
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def _no_meeting_reason(scores: dict[int, int], ids: dict[str, int]) -> str:
+    """Why the close failed, in the rubric's own terms — the manager's next move.
+
+    Ordered by what is most worth fixing on the callback: an unanswered doubt
+    beats a missing time slot, which beats a valueless invite.
+    """
+    if scores.get(ids["retry"]) == 0:
+        return "клиент засомневался — дожать не пытались"
+    if scores.get(ids["time"]) == 0:
+        return "конкретное время встречи не предложили"
+    if scores.get(ids["value"]) == 0:
+        return "позвал на встречу без ценности"
+    return "дату и время записи не зафиксировали"
+
+
+async def _no_meeting_items(
+    session: AsyncSession,
+    bitrix_user_id: int,
+    start: datetime,
+    end: datetime,
+    limit: int,
+) -> list[NoMeetingItem]:
+    """Целевые calls the rubric says never got a meeting booked, for this manager.
+
+    A Postgres read of OKK's own scores: the closing block's «Зафиксировал дату +
+    время записи в ОП» came back НЕТ, so nothing reached the calendar and the
+    client is still callable. Клиент, который согласился приехать и всё равно не
+    записан, идёт первым — он самый тёплый. Independent of the live Bitrix read
+    (names are filled in later, best-effort), so both the queue and the number to
+    dial survive a Bitrix outage.
+    """
+    rows = (
+        await session.execute(
+            text(
+                "SELECT cs.call_id, cs.started_at, cs.rubric_version, "
+                "cs.crm_entity_type, cs.crm_entity_id, c.phone_number, s.criteria "
+                "FROM call_scores_latest cs "
+                "JOIN scores s ON s.id = cs.score_id "
+                "JOIN calls c ON c.id = cs.call_id "
+                "WHERE cs.manager_bitrix_user_id = :uid "
+                "AND cs.target_status = 'целевой' "
+                "AND cs.started_at >= :start AND cs.started_at < :end "
+                "ORDER BY cs.started_at DESC",
+            ),
+            {"uid": bitrix_user_id, "start": start, "end": end},
+        )
+    ).all()
+
+    items: list[NoMeetingItem] = []
+    for r in rows:
+        ids = _CLOSING_CRITERIA.get(r.rubric_version)
+        criteria = r.criteria if isinstance(r.criteria, dict) else {}
+        if ids is None or not criteria:
+            continue
+        scores = _closing_scores(criteria)
+        if scores.get(ids["booked"]) != 0:
+            continue  # booked, or the element was Н.П. — either way, not ours
+        wants_to_visit = criteria.get("wants_to_visit")
+        is_contact = r.crm_entity_type == "CONTACT" and r.crm_entity_id
+        items.append(
+            NoMeetingItem(
+                call_id=r.call_id,
+                started_at=r.started_at,
+                contact_id=int(r.crm_entity_id) if is_contact else None,
+                phone=r.phone_number,
+                wants_to_visit=wants_to_visit,
+                reason=(
+                    "хотел приехать — так и не записали"
+                    if wants_to_visit
+                    else _no_meeting_reason(scores, ids)
+                ),
+                bitrix_url=crm_card_url(r.crm_entity_type, r.crm_entity_id)
+                if r.crm_entity_type and r.crm_entity_id
+                else None,
+            ),
+        )
+
+    # Warmest first (client said yes and still wasn't booked), then freshest —
+    # a client who talked yesterday is likelier to pick up than one from week one.
+    items.sort(
+        key=lambda i: (
+            bool(i.wants_to_visit),
+            i.started_at or datetime.min.replace(tzinfo=UTC),
+        ),
+        reverse=True,
+    )
+    return items[:limit]
+
+
+async def _fill_client_names(
+    bx: BitrixClient,
+    items: Sequence[NoMeetingItem],
+) -> None:
+    """Fill in contact names on the callback queue, in place. Best-effort.
+
+    Only CONTACT-linked calls carry a resolvable name; anything else keeps the
+    phone number the card already shows. A Bitrix failure here must never cost
+    the manager the queue, so the caller treats the whole step as optional.
+    """
+    by_contact: dict[int, list[NoMeetingItem]] = {}
+    for it in items:
+        if it.contact_id:
+            by_contact.setdefault(it.contact_id, []).append(it)
+    if not by_contact:
+        return
+    contacts = await _contacts(bx, set(by_contact))
+    for cid, group in by_contact.items():
+        contact = contacts.get(cid)
+        if contact is None:
+            continue
+        name = _name_of(contact)
+        for it in group:
+            it.client_name = name
 
 
 async def _open_deals(bx: BitrixClient, uid: int) -> list[dict[str, Any]]:
@@ -1092,14 +1258,27 @@ async def get_day(
 
     manager = await _manager_ref(session, bitrix_user_id)
     now = datetime.now(tz=UTC)
-    # Postgres read, independent of the live Bitrix pull below — survives a Bitrix
-    # outage and populates the «Отказы не по делу» queue.
+    # Postgres reads, independent of the live Bitrix pull below — they survive a
+    # Bitrix outage and populate the «Отказы не по делу» and «По оценке ОКК» queues.
     audit_failed = await _audit_failed_items(
         session, bitrix_user_id, settings.companion_day_audit_max_items
+    )
+    no_meeting = await _no_meeting_items(
+        session,
+        bitrix_user_id,
+        start,
+        end,
+        settings.companion_day_no_meeting_max_items,
     )
 
     try:
         async with BitrixClient() as bx:
+            try:
+                await _fill_client_names(bx, no_meeting)
+            except BitrixError as exc:
+                # Cosmetic read: the cards still carry the phone to dial. Never let
+                # a failed name lookup collapse the whole day view.
+                logger.warning("Callback-queue names unresolved: {e}", e=exc)
             deals = await _open_deals(bx, bitrix_user_id)
             try:
                 with_task_ids: set[int] | None = await _deals_with_open_task(
@@ -1119,9 +1298,7 @@ async def get_day(
             }
             contacts = await _contacts(bx, contact_ids)
             money = await _money(bx, bitrix_user_id, start, end)
-            today = await _today_metrics(
-                bx, bitrix_user_id, day_start, day_end, deals
-            )
+            today = await _today_metrics(bx, bitrix_user_id, day_start, day_end, deals)
             overdue_tasks = await _overdue_task_items(
                 bx,
                 bitrix_user_id,
@@ -1143,6 +1320,7 @@ async def get_day(
             stats=DayStats(meetings=0, no_answer=0, cooling=0),
             money=MoneyAxis(),
             audit_failed=audit_failed,
+            no_meeting=no_meeting,
         )
 
     stats = _compute_stats(deals, now, with_task_ids)
@@ -1158,6 +1336,7 @@ async def get_day(
         today=today,
         overdue_tasks=overdue_tasks,
         audit_failed=audit_failed,
+        no_meeting=no_meeting,
     )
     expiry = time.monotonic() + settings.companion_day_cache_ttl_seconds
     _cache[cache_key] = (expiry, view)

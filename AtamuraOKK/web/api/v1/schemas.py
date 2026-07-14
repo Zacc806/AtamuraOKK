@@ -662,6 +662,44 @@ class AuditFailedItem(BaseModel):
     )
 
 
+class NoMeetingItem(BaseModel):
+    """One целевой call the rubric says ended without a meeting actually booked.
+
+    Feeds the «По оценке ОКК» queue in «Займись сейчас». The closing block's
+    «Зафиксировал дату + время записи в ОП» came back НЕТ, so nothing landed in
+    the calendar and the client is still callable — the manager rings back and
+    closes on the visit (КЭВ). ``wants_to_visit`` marks the hottest case: the
+    client *agreed* to come and was still never booked.
+
+    Sourced from OKK's own scores (Postgres); only ``client_name`` needs Bitrix,
+    so the queue — and the number to dial — survive a Bitrix outage.
+    """
+
+    call_id: int
+    started_at: datetime | None = None
+    contact_id: int | None = Field(
+        default=None,
+        description="Bitrix CONTACT id, when the call is contact-linked",
+    )
+    client_name: str | None = None
+    phone: str | None = Field(
+        default=None,
+        description="Number to call back — OKK's own, not resolved from Bitrix",
+    )
+    wants_to_visit: bool | None = Field(
+        default=None,
+        description="Client agreed to come but was never booked — hottest callback",
+    )
+    reason: str | None = Field(
+        default=None,
+        description="Why the close failed, in the rubric's own terms (Russian)",
+    )
+    bitrix_url: str | None = Field(
+        default=None,
+        description="Deep link to the client's CRM card in Bitrix24, when known",
+    )
+
+
 class DayView(BaseModel):
     """Everything the Мой день screen needs for one manager, live from Bitrix.
 
@@ -684,6 +722,10 @@ class DayView(BaseModel):
     audit_failed: list[AuditFailedItem] = Field(
         default_factory=list,
         description="Closed-lost deals whose stated reason contradicted the call",
+    )
+    no_meeting: list[NoMeetingItem] = Field(
+        default_factory=list,
+        description="Целевые calls that never got a meeting booked — call back",
     )
 
 
@@ -847,6 +889,23 @@ class AnalyticsView(BaseModel):
     calls: AnalyticsCalls = Field(default_factory=AnalyticsCalls)
 
 
+class HygieneFailedItem(BaseModel):
+    """One CRM card failing a hygiene criterion, with a deep link to fix it.
+
+    The cabinet lists these under the criterion so the manager can open the exact
+    card, correct it, and lift the index. ``detail`` says what is wrong / how to fix
+    (e.g. «не заполнено 3 из 5 полей анкеты», «нет запланированного дела»).
+    """
+
+    entity_id: int = Field(description="Bitrix deal id (or the failing entity's id)")
+    title: str | None = Field(default=None, description="Deal title, when known")
+    stage: str | None = Field(default=None, description="Human stage label, when known")
+    detail: str | None = Field(default=None, description="What is wrong / how to fix")
+    bitrix_url: str | None = Field(
+        default=None, description="Deep link to the card in Bitrix24"
+    )
+
+
 class HygieneCriterion(BaseModel):
     """One CRM-hygiene criterion for a manager in a period.
 
@@ -855,7 +914,9 @@ class HygieneCriterion(BaseModel):
     criterion could be computed from Bitrix and ``"not_available"`` when its data
     source is not wired (e.g. the анкета field list is unconfigured) — the cabinet
     badges it «нет данных» rather than showing a fake number. ``note`` carries a
-    short caveat or the reason it is unavailable.
+    short caveat or the reason it is unavailable. ``failed_items`` are the concrete
+    cards that failed the criterion (capped at ``companion_hygiene_failed_max_items``;
+    ``failed_truncated`` is True when more failed than the cap returns).
     """
 
     key: str = Field(
@@ -872,6 +933,14 @@ class HygieneCriterion(BaseModel):
         description="Cards/tasks considered (the share's base)",
     )
     note: str | None = None
+    failed_items: list[HygieneFailedItem] = Field(
+        default_factory=list,
+        description="The concrete cards that failed this criterion (capped)",
+    )
+    failed_truncated: bool = Field(
+        default=False,
+        description="True when more cards failed than the returned cap",
+    )
 
 
 class HygieneView(BaseModel):

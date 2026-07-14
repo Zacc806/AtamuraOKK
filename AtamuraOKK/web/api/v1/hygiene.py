@@ -46,11 +46,15 @@ from zoneinfo import ZoneInfo
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from AtamuraOKK.bitrix import BitrixClient, BitrixError
+from AtamuraOKK.bitrix import BitrixClient, BitrixError, crm_card_url
 from AtamuraOKK.bitrix.client import PAGE_SIZE
 from AtamuraOKK.settings import settings
 from AtamuraOKK.web.api.v1 import day, okk
-from AtamuraOKK.web.api.v1.schemas import HygieneCriterion, HygieneView
+from AtamuraOKK.web.api.v1.schemas import (
+    HygieneCriterion,
+    HygieneFailedItem,
+    HygieneView,
+)
 
 # Bitrix CRM owner type id for a deal (crm.activity OWNER_TYPE_ID).
 _DEAL_OWNER_TYPE = 2
@@ -170,6 +174,24 @@ def _in_period(created: str, start: datetime, end: datetime) -> bool:
     return start <= moment < end
 
 
+def _deal_item(d: dict[str, Any], detail: str | None) -> HygieneFailedItem:
+    """A failing-card entry for an open deal row (title/stage/deep-link)."""
+    deal_id = int(d["ID"])
+    return HygieneFailedItem(
+        entity_id=deal_id,
+        title=str(d.get("TITLE") or "").strip() or None,
+        stage=day.stage_label(str(d.get("STAGE_ID") or "")),
+        detail=detail,
+        bitrix_url=crm_card_url("DEAL", deal_id),
+    )
+
+
+def _cap(items: list[HygieneFailedItem]) -> tuple[list[HygieneFailedItem], bool]:
+    """Trim the failing list to the drill-down cap; flag whether it truncated."""
+    limit = settings.companion_hygiene_failed_max_items
+    return items[:limit], len(items) > limit
+
+
 def _unavailable(key: str, note: str) -> HygieneCriterion:
     return HygieneCriterion(key=key, status="not_available", note=note)
 
@@ -179,6 +201,8 @@ def _scored(
     numerator: int,
     denominator: int,
     note: str | None = None,
+    failed: list[HygieneFailedItem] | None = None,
+    failed_truncated: bool = False,
 ) -> HygieneCriterion:
     return HygieneCriterion(
         key=key,
@@ -187,12 +211,20 @@ def _scored(
         numerator=numerator,
         denominator=denominator,
         note=note,
+        failed_items=failed or [],
+        failed_truncated=failed_truncated,
     )
 
 
 async def _open_deals(bx: BitrixClient, uid: int) -> list[dict[str, Any]]:
     """Open TM-funnel deals for the manager, with the anketa fields selected."""
-    select = ["ID", "STAGE_ID", "LAST_ACTIVITY_TIME", *settings.companion_anketa_fields]
+    select = [
+        "ID",
+        "TITLE",
+        "STAGE_ID",
+        "LAST_ACTIVITY_TIME",
+        *settings.companion_anketa_fields,
+    ]
     return [
         d
         async for d in bx.list(
@@ -238,8 +270,10 @@ def _statuses(deals: list[dict[str, Any]] | None) -> HygieneCriterion:
         return _unavailable("statuses", "Bitrix недоступен")
     if not deals:
         return _unavailable("statuses", "Нет открытых сделок в работе")
-    cutoff = _now() - timedelta(days=settings.companion_hygiene_stale_days)
+    now = _now()
+    cutoff = now - timedelta(days=settings.companion_hygiene_stale_days)
     maintained = 0
+    failed: list[HygieneFailedItem] = []
     for d in deals:
         raw = d.get("LAST_ACTIVITY_TIME")
         last: datetime | None = None
@@ -250,12 +284,20 @@ def _statuses(deals: list[dict[str, Any]] | None) -> HygieneCriterion:
                 last = None
         if last is not None and last >= cutoff:
             maintained += 1
+        else:
+            detail = (
+                f"нет активности {(now - last).days} дн."
+                if last is not None
+                else "ни одной активности"
+            )
+            failed.append(_deal_item(d, detail))
     note = (
         f"Прокси-метрика: открытая сделка без активности дольше "
         f"{settings.companion_hygiene_stale_days} дн. считается зависшей. Строгая "
         "сверка статуса с исходом звонка — на стороне ОКК-скоринга (в плане)."
     )
-    return _scored("statuses", maintained, len(deals), note)
+    items, truncated = _cap(failed)
+    return _scored("statuses", maintained, len(deals), note, items, truncated)
 
 
 def _anketa(deals: list[dict[str, Any]] | None) -> HygieneCriterion:
@@ -276,13 +318,23 @@ def _anketa(deals: list[dict[str, Any]] | None) -> HygieneCriterion:
     due = [d for d in deals if _anketa_due(str(d.get("STAGE_ID") or ""))]
     if not due:
         return _unavailable("anketa", "Нет сделок на этапах, где анкета уже нужна")
-    complete = sum(1 for d in due if all(_filled(d.get(f)) for f in fields))
+    complete = 0
+    failed: list[HygieneFailedItem] = []
+    for d in due:
+        missing = sum(1 for f in fields if not _filled(d.get(f)))
+        if missing:
+            failed.append(
+                _deal_item(d, f"не заполнено {missing} из {len(fields)} полей анкеты")
+            )
+        else:
+            complete += 1
     note = (
         "База — сделки, дошедшие до квалификации («Лид квалифицирован» и далее); "
         "лиды в дозвоне анкеты ещё не должны. Засчитывается карточка, где "
         "заполнены все поля анкеты."
     )
-    return _scored("anketa", complete, len(due), note)
+    items, truncated = _cap(failed)
+    return _scored("anketa", complete, len(due), note, items, truncated)
 
 
 def _tasks_set(
@@ -303,12 +355,60 @@ def _tasks_set(
         return _unavailable(
             "tasks_set", "Нет открытых сделок на этапах, где нужна задача"
         )
-    with_task = sum(1 for d in required if int(d["ID"]) in deal_ids_with_task)
+    with_task = 0
+    failed: list[HygieneFailedItem] = []
+    for d in required:
+        if int(d["ID"]) in deal_ids_with_task:
+            with_task += 1
+        else:
+            failed.append(_deal_item(d, "нет запланированного дела"))
     note = (
         "База — только сделки на этапах, где регламент требует задачу; этапы "
         "«нет задач» (Новая заявка, Взято в работу, Недозвон 1/2) исключены."
     )
-    return _scored("tasks_set", with_task, len(required), note)
+    items, truncated = _cap(failed)
+    return _scored("tasks_set", with_task, len(required), note, items, truncated)
+
+
+async def _overdue_items(
+    bx: BitrixClient,
+    uid: int,
+    start: datetime,
+    due_end: datetime,
+) -> list[HygieneFailedItem]:
+    """The still-open, past-deadline activities in the window (capped), for the list.
+
+    Each links to the CRM entity it hangs off of (usually the deal). The count API
+    gives the exact numerator/denominator; this is only the drill-down sample.
+    """
+    limit = settings.companion_hygiene_failed_max_items
+    items: list[HygieneFailedItem] = []
+    async for row in bx.list(
+        "crm.activity.list",
+        {
+            "filter": {
+                "RESPONSIBLE_ID": uid,
+                "COMPLETED": "N",
+                ">=DEADLINE": start.isoformat(),
+                "<DEADLINE": due_end.isoformat(),
+            },
+            "select": ["ID", "SUBJECT", "OWNER_ID", "OWNER_TYPE_ID", "DEADLINE"],
+            "order": {"DEADLINE": "ASC"},
+        },
+        max_items=limit,
+    ):
+        owner_id = int(row.get("OWNER_ID") or 0)
+        entity = day.activity_owner_entity(int(row.get("OWNER_TYPE_ID") or 0))
+        deadline = str(row.get("DEADLINE") or "")[:10]
+        items.append(
+            HygieneFailedItem(
+                entity_id=owner_id,
+                title=str(row.get("SUBJECT") or "").strip() or f"Дело #{row.get('ID')}",
+                detail=f"просрочено (срок {deadline})" if deadline else "просрочено",
+                bitrix_url=crm_card_url(entity, owner_id) if owner_id else None,
+            )
+        )
+    return items
 
 
 async def _tasks_on_time(
@@ -341,6 +441,7 @@ async def _tasks_on_time(
                 "<DEADLINE": due_end.isoformat(),
             },
         )
+        failed = await _overdue_items(bx, uid, start, due_end) if overdue else []
     except BitrixError:
         return _unavailable("tasks_on_time", "Bitrix недоступен")
     if not due:
@@ -350,7 +451,9 @@ async def _tasks_on_time(
         "Строгое «закрыто точно в срок» требует таймстемпа закрытия активности "
         "(его нет в count-API), поэтому закрытое с опозданием тут засчитывается."
     )
-    return _scored("tasks_on_time", due - overdue, due, note)
+    return _scored(
+        "tasks_on_time", due - overdue, due, note, failed, overdue > len(failed)
+    )
 
 
 async def _called_deals(
@@ -395,6 +498,22 @@ async def _called_deals(
     return deal_ids, False
 
 
+async def _deal_titles(bx: BitrixClient, deal_ids: list[int]) -> dict[int, str]:
+    """Titles for a bounded set of deal ids (one page), for the failing-notes list."""
+    if not deal_ids:
+        return {}
+    out: dict[int, str] = {}
+    async for d in bx.list(
+        "crm.deal.list",
+        {"filter": {"ID": deal_ids}, "select": ["ID", "TITLE"]},
+        max_items=len(deal_ids),
+    ):
+        title = str(d.get("TITLE") or "").strip()
+        if title:
+            out[int(d["ID"])] = title
+    return out
+
+
 def _is_note(text: str, marker: str) -> bool:
     """Whether a timeline comment counts as a proper post-call note.
 
@@ -428,8 +547,8 @@ async def _notes(
     marker = settings.companion_note_template_marker.strip().lower()
     gate = asyncio.Semaphore(_NOTES_BATCH_CONCURRENCY)
 
-    async def noted_in(deal_ids: list[int]) -> int:
-        """How many of these (≤ PAGE_SIZE) deals carry a note by the manager."""
+    async def noted_in(deal_ids: list[int]) -> set[int]:
+        """Which of these (≤ PAGE_SIZE) deals carry a note by the manager."""
         async with gate:
             comments = await bx.batch(
                 {
@@ -444,15 +563,16 @@ async def _notes(
                     for deal_id in deal_ids
                 },
             )
-        return sum(
-            any(
+        return {
+            deal_id
+            for deal_id in deal_ids
+            if any(
                 int(r.get("AUTHOR_ID") or 0) == uid
                 and _in_period(str(r.get("CREATED") or ""), start, end)
                 and _is_note(str(r.get("COMMENT") or ""), marker)
                 for r in comments.get(str(deal_id)) or []
             )
-            for deal_id in deal_ids
-        )
+        }
 
     try:
         deal_ids, truncated = await _called_deals(bx, uid, start, end)
@@ -464,7 +584,23 @@ async def _notes(
         chunks = [
             deal_ids[i : i + PAGE_SIZE] for i in range(0, len(deal_ids), PAGE_SIZE)
         ]
-        with_note = sum(await asyncio.gather(*(noted_in(c) for c in chunks)))
+        noted: set[int] = set()
+        for chunk_noted in await asyncio.gather(*(noted_in(c) for c in chunks)):
+            noted |= chunk_noted
+        # deal_ids is most-recently-called first, so the failing sample surfaces the
+        # freshest un-noted cards; titles are one more small read for just the cap.
+        missing = [d for d in deal_ids if d not in noted]
+        capped = missing[: settings.companion_hygiene_failed_max_items]
+        titles = await _deal_titles(bx, capped)
+        failed = [
+            HygieneFailedItem(
+                entity_id=deal_id,
+                title=titles.get(deal_id),
+                detail="нет примечания в карточке",
+                bitrix_url=crm_card_url("DEAL", deal_id),
+            )
+            for deal_id in capped
+        ]
     except BitrixError:
         return _unavailable("notes", "Bitrix недоступен")
 
@@ -480,20 +616,33 @@ async def _notes(
         else " Засчитывается любое содержательное примечание менеджера в карточке "
         "сделки (комментарий в таймлайне); автосообщения интеграций не в счёт."
     )
-    return _scored("notes", with_note, len(deal_ids), base + rule)
+    return _scored(
+        "notes",
+        len(noted),
+        len(deal_ids),
+        base + rule,
+        failed,
+        len(missing) > len(capped),
+    )
 
 
 async def get_hygiene(
     session: AsyncSession,
     bitrix_user_id: int,
     period: str | None,
+    refresh: bool = False,
 ) -> HygieneView:
-    """Live CRM-hygiene view for a manager (Bitrix user id) in a period."""
+    """Live CRM-hygiene view for a manager (Bitrix user id) in a period.
+
+    ``refresh`` bypasses the short TTL cache so a manager who just fixed a flagged
+    card sees the index move on the very next load (the «Проверить снова» button).
+    """
     start, end, label = okk.parse_period(period)
     cache_key = (bitrix_user_id, label)
-    hit = _cache.get(cache_key)
-    if hit and hit[0] > time.monotonic():
-        return hit[1]
+    if not refresh:
+        hit = _cache.get(cache_key)
+        if hit and hit[0] > time.monotonic():
+            return hit[1]
 
     manager = await day.manager_ref(session, bitrix_user_id)
     norm = settings.companion_hygiene_norm_pct

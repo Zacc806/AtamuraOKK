@@ -332,6 +332,9 @@ class Settings(BaseSettings):
     companion_day_cache_ttl_seconds: int = 60
     # «Отказы не по делу» — cap on failed-audit deals shown in «Займись сейчас».
     companion_day_audit_max_items: int = 20
+    # Callback queue in «Займись сейчас» — cap on целевые calls the rubric says
+    # never got a meeting booked, warmest first.
+    companion_day_no_meeting_max_items: int = 20
     # РОП «Просроченные задачи» — cap on the team-wide overdue-task list so a
     # long-neglected team can't return an unbounded page (oldest-due first).
     companion_overdue_max_items: int = 200
@@ -407,6 +410,10 @@ class Settings(BaseSettings):
     # reads several points better than the real month.
     companion_hygiene_notes_max_deals: int = 800
     companion_hygiene_notes_max_calls: int = 4000
+    # How many failing cards each hygiene criterion returns for the cabinet's
+    # drill-down list (the manager opens them to fix). Beyond this the list is
+    # truncated (``failed_truncated``) — the pct/numerator/denominator stay exact.
+    companion_hygiene_failed_max_items: int = 50
     # A comment counts as a proper note only when it contains this marker. Empty ->
     # any note the manager wrote counts (BB-code markup and integration autoposts
     # are stripped/ignored either way).

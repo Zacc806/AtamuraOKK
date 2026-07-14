@@ -71,6 +71,38 @@ own `DayStats.no_task`. `_select_action_deals` additionally surfaces *neutral-st
 no-task deals (normally dropped) so the queue has examples. If the activity read
 fails, `no_task` degrades to `null` (UI shows "—"), never a fake zero.
 
+### «По оценке ОКК» — не дожали до встречи (`no_meeting`)
+
+The one «Займись сейчас» queue that is **not** a Bitrix read: it is OKK's own
+scoring, turned into a callback list. A целевой call whose closing block scored
+«Зафиксировал дату + время записи в ОП» = **НЕТ** never put anything in the
+calendar — the client is still callable, so `_no_meeting_items()` surfaces them
+(newest first, capped by `companion_day_no_meeting_max_items`) with the phone to
+dial and *why* the close failed, in the rubric's own terms («клиент засомневался
+— дожать не пытались», «конкретное время встречи не предложили», …).
+
+Three things are load-bearing:
+
+- **`wants_to_visit` sorts first.** The client *agreed to come* and still wasn't
+  booked — the warmest possible callback and the most expensive miss. (Real
+  example: a cash buyer travelling in from Қызылорда agreed to come «ертең», no
+  hour was ever fixed, and nothing existed to remind anyone.)
+- **Criterion ids are rubric-version-specific**; only `block_id` (`"closing"`) is
+  stable. `_CLOSING_CRITERIA` maps them per version and a rubric absent from it
+  yields **no rows rather than a guessed verdict** — `tm-call-v2` lumped the whole
+  close into one weighted element and simply cannot say whether a meeting was
+  booked. `tests/test_companion_no_meeting.py` pins the ids against the live
+  rubric file, so a renumber breaks the test instead of the queue.
+- **Н.П. elements are absent from `per_criterion`** (the scorer drops them so they
+  leave the denominator), so a *missing* id is "not applicable", never a НЕТ —
+  e.g. «При отказе — повторная попытка закрыть» is Н.П. when the client agreed at
+  once, and reading that absence as a failure would blame the manager for the one
+  thing they got right.
+
+Like «Отказы не по делу» it is a pure Postgres read, so the queue *and the number
+to dial* survive a Bitrix outage; only the client's **name** is enriched from
+Bitrix (`_fill_client_names`, best-effort — a failure leaves the phone showing).
+
 ### Meeting attribution (solved 2026-06-12 — was misdiagnosed as a data gate)
 
 A snapshot query (cat 24 + `STAGE_ID=C24:WON` + `ASSIGNED_BY_ID=TM`) **always

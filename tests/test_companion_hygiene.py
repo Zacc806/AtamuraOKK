@@ -66,6 +66,7 @@ class FakeBitrix:
         task_owners: list[int] | None = None,
         calls: list[dict[str, Any]] | None = None,
         comments: dict[int, list[dict[str, Any]]] | None = None,
+        overdue_rows: list[dict[str, Any]] | None = None,
         due: int = 0,
         overdue: int = 0,
     ) -> None:
@@ -73,6 +74,7 @@ class FakeBitrix:
         self._task_owners = task_owners or []
         self._calls = calls or []
         self._comments = comments or {}
+        self._overdue_rows = overdue_rows or []
         self.due = due
         self.overdue = overdue
         self.seen: list[str] = []
@@ -97,14 +99,23 @@ class FakeBitrix:
         *,
         max_items: int | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
-        """Open deals, open-task owners and the completed calls behind the notes."""
+        """Open deals, open-task owners, overdue rows and the calls behind the notes."""
         self.seen.append(method)
         flt = (params or {}).get("filter") or {}
         if method == "crm.deal.list":
+            wanted = flt.get("ID")  # _deal_titles narrows to a set of ids
+            ids = {int(i) for i in wanted} if isinstance(wanted, list) else None
             for d in self._deals:
-                yield d
+                if ids is None or int(d["ID"]) in ids:
+                    yield d
             return
         if method == "crm.activity.list":
+            if (
+                ">=DEADLINE" in flt and flt.get("COMPLETED") == "N"
+            ):  # overdue drill-down
+                for row in self._overdue_rows:
+                    yield row
+                return
             if flt.get("COMPLETED") == "N":  # open-task owner lookup
                 for owner in self._task_owners:
                     yield {"ID": "1", "OWNER_ID": owner}
@@ -134,15 +145,37 @@ class FakeBitrix:
 def test_statuses_splits_stale_from_maintained() -> None:
     """Open deals untouched longer than the stale window are not «maintained»."""
     deals = [
-        {"ID": "1", "LAST_ACTIVITY_TIME": _iso_days_ago(1)},  # fresh
-        {"ID": "2", "LAST_ACTIVITY_TIME": _iso_days_ago(2)},  # fresh
-        {"ID": "3", "LAST_ACTIVITY_TIME": _iso_days_ago(60)},  # stale
-        {"ID": "4", "LAST_ACTIVITY_TIME": None},  # no activity → stale
+        {"ID": "1", "TITLE": "Свежая", "LAST_ACTIVITY_TIME": _iso_days_ago(1)},  # fresh
+        {"ID": "2", "TITLE": "Тоже", "LAST_ACTIVITY_TIME": _iso_days_ago(2)},  # fresh
+        {
+            "ID": "3",
+            "TITLE": "Зависла",
+            "LAST_ACTIVITY_TIME": _iso_days_ago(60),
+        },  # stale
+        {"ID": "4", "TITLE": "Пустая", "LAST_ACTIVITY_TIME": None},  # none → stale
     ]
     crit = hygiene._statuses(deals)
     assert crit.status == "live"
     assert (crit.numerator, crit.denominator) == (2, 4)
     assert crit.pct == 50.0
+    # the two stale cards are listed for the manager to open and move
+    assert {i.entity_id for i in crit.failed_items} == {3, 4}
+    assert not crit.failed_truncated
+    by_id = {i.entity_id: i for i in crit.failed_items}
+    assert by_id[3].title == "Зависла" and "дн." in (by_id[3].detail or "")
+    assert by_id[4].detail == "ни одной активности"
+
+
+def test_statuses_failed_list_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """More stale cards than the cap → list is truncated but the pct stays exact."""
+    monkeypatch.setattr(settings, "companion_hygiene_failed_max_items", 2)
+    deals = [
+        {"ID": str(i), "LAST_ACTIVITY_TIME": _iso_days_ago(60)} for i in range(1, 6)
+    ]
+    crit = hygiene._statuses(deals)
+    assert (crit.numerator, crit.denominator) == (0, 5)  # counts unaffected by the cap
+    assert len(crit.failed_items) == 2
+    assert crit.failed_truncated
 
 
 def test_statuses_no_open_deals_is_not_available() -> None:
@@ -184,6 +217,10 @@ def test_anketa_counts_fully_filled_deals(monkeypatch: pytest.MonkeyPatch) -> No
     assert crit.status == "live"
     assert (crit.numerator, crit.denominator) == (2, 4)
     assert crit.pct == 50.0
+    # the incomplete cards are listed with how many fields are still empty
+    by_id = {i.entity_id: i for i in crit.failed_items}
+    assert set(by_id) == {2, 4}
+    assert "1 из 2" in (by_id[2].detail or "")
 
 
 def test_anketa_counts_only_qualified_stages(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -232,6 +269,9 @@ def test_tasks_set_counts_only_task_requiring_stages() -> None:
     crit = hygiene._tasks_set(deals, {1, 3, 99})  # 99 isn't an open deal
     assert crit.status == "live"
     assert (crit.numerator, crit.denominator) == (2, 3)  # deals 4 & 5 out of base
+    # deal 2 requires a task but has none → it is the one listed to fix
+    assert [i.entity_id for i in crit.failed_items] == [2]
+    assert crit.failed_items[0].detail == "нет запланированного дела"
 
 
 def test_tasks_set_no_task_requiring_stage_is_not_available() -> None:
@@ -254,11 +294,28 @@ def test_tasks_set_bitrix_down_is_not_available() -> None:
 
 async def test_tasks_on_time_splits_overdue() -> None:
     """Of activities already due in the period, the overdue share is the failure."""
-    bx = FakeBitrix(due=10, overdue=3)
+    bx = FakeBitrix(
+        due=10,
+        overdue=3,
+        overdue_rows=[
+            {
+                "ID": "77",
+                "SUBJECT": "Перезвонить",
+                "OWNER_ID": "501",
+                "OWNER_TYPE_ID": 2,
+                "DEADLINE": "2020-01-10T09:00:00+05:00",
+            }
+        ],
+    )
     crit = await hygiene._tasks_on_time(bx, 5, _PAST_START, _PAST_END)  # type: ignore[arg-type]
     assert crit.status == "live"
     assert (crit.numerator, crit.denominator) == (7, 10)
     assert crit.pct == 70.0
+    # the overdue activities are listed (linked to their deal) for the manager to close
+    assert [i.entity_id for i in crit.failed_items] == [501]
+    assert crit.failed_items[0].title == "Перезвонить"
+    assert "2020-01-10" in (crit.failed_items[0].detail or "")
+    assert crit.failed_truncated  # 3 overdue, only 1 row sampled here
 
 
 async def test_tasks_on_time_future_period_has_nothing_due() -> None:
@@ -300,6 +357,9 @@ async def test_notes_counts_manager_note_on_the_called_deal(
     crit = await hygiene._notes(bx, 5, _PAST_START, _PAST_END)  # type: ignore[arg-type]
     assert crit.status == "live"
     assert (crit.numerator, crit.denominator) == (1, 4)
+    # the three cards missing the manager's note are listed to go back and fill
+    assert {i.entity_id for i in crit.failed_items} == {2, 3, 4}
+    assert all(i.detail == "нет примечания в карточке" for i in crit.failed_items)
 
 
 async def test_notes_collapses_repeat_calls_to_one_card(
@@ -463,7 +523,9 @@ async def test_hygiene_endpoint_scopes_to_manager(
         "X-Companion-User-Key": _MANAGER_KEY,
     }
 
-    async def _fake_get(session: Any, uid: int, period: str | None) -> Any:
+    async def _fake_get(
+        session: Any, uid: int, period: str | None, refresh: bool = False
+    ) -> Any:
         from AtamuraOKK.web.api.v1.schemas import HygieneView
 
         return HygieneView(manager=ManagerRef(bitrix_user_id=uid), period="2026-03")

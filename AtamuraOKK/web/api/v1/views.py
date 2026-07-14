@@ -455,6 +455,10 @@ async def manager_hygiene(
             "default current month"
         ),
     ),
+    refresh: bool = Query(
+        default=False,
+        description="Bypass the short TTL cache (re-check after fixing cards)",
+    ),
     identity: CompanionIdentity = Depends(get_companion_identity),
     session: AsyncSession = Depends(get_db_session),
 ) -> HygieneView:
@@ -462,11 +466,13 @@ async def manager_hygiene(
 
     Live read-through to Bitrix (open deals, activities). Each criterion carries
     its own ``status`` so the cabinet badges it independently; ``pct`` is null
-    (UI «нет данных») when its source is unconfigured or could not be read.
+    (UI «нет данных») when its source is unconfigured or could not be read. Each
+    criterion also lists its concrete failing cards (``failed_items``) so the
+    manager can open, fix, and re-check.
     """
     await ensure_can_view_manager(session, identity, manager_id)
     try:
-        return await hygiene.get_hygiene(session, manager_id, period)
+        return await hygiene.get_hygiene(session, manager_id, period, refresh)
     except PeriodError as exc:
         raise _bad_period(exc) from exc
 
@@ -648,9 +654,7 @@ async def review_appeal(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="A department head can only review their own department's appeals.",
         )
-    disputed_ids = {
-        int(c["criterion_id"]) for c in (appeal.disputed_criteria or [])
-    }
+    disputed_ids = {int(c["criterion_id"]) for c in (appeal.disputed_criteria or [])}
     invalid = sorted(set(payload.confirmed_criteria) - disputed_ids)
     if invalid:
         raise HTTPException(
@@ -829,10 +833,9 @@ async def revoke_companion_user(
             )
     else:
         dept = await manager_department_bitrix_id(session, user.bitrix_user_id)
-        if (
-            CompanionRole(user.role) is not CompanionRole.MANAGER
-            or not identity.can_view_department(dept)
-        ):
+        if CompanionRole(
+            user.role
+        ) is not CompanionRole.MANAGER or not identity.can_view_department(dept):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
