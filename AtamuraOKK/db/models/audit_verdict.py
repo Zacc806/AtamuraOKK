@@ -4,7 +4,10 @@ For a deal that closed as lost, the manager picks a reason from the «Причи
 закрытия/отказа» Bitrix enum. The audit pass (``AtamuraOKK/audit/``) joins that
 stated reason against the client's actual call transcript(s) and asks the LLM
 whether the call ``supported`` / ``contradicted`` / ``not_determinable`` the
-reason. Re-auditing a deal upserts this row (unique on ``bitrix_deal_id``).
+reason. The «Дубль…» reasons are settled against the CRM instead of the call
+(``audit/duplicates.py``) — same verdict vocabulary, but ``model`` is NULL and the
+duplicate evidence lands in ``details``. Re-auditing a deal upserts this row
+(unique on ``bitrix_deal_id``).
 """
 
 from __future__ import annotations
@@ -56,7 +59,13 @@ class AuditVerdict(Base):
     evidence_quote: Mapped[str | None] = mapped_column(Text)
     # The call ids whose transcript(s) were judged.
     call_ids: Mapped[list[Any] | None] = mapped_column(JSONB)
+    # Structured evidence from a deterministic (non-LLM) check — for «Дубль…» reasons
+    # the duplicate deal/contact/lead ids, the projects, and whether the manager's
+    # subtype («этому» vs «другим проектам») was right. NULL for LLM-judged verdicts.
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The LLM that judged this deal — NULL when the verdict came from a deterministic
+    # check instead (see `details.check`), which is the case for the «Дубль…» reasons.
     model: Mapped[str | None] = mapped_column(String(length=128))
     # When a manager nudge was sent for this verdict. Deliberately NOT written by
     # the upsert, so a re-audit never re-notifies. NULL = not yet / not applicable.

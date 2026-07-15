@@ -26,8 +26,10 @@ the closed-lost filter and enum-label logic mirror ``web/api/v1/analytics.py``. 
 Coverage caveat: we only hold transcripts for the *analyzable* subset (calls until the
 client qualifies). Never-qualified clients stay fully in scope, so closed-lost,
 never-qualified leads are where call history is fullest. Some reasons (e.g.
-«Хронический недозвон», «Дубль…») are not verifiable from an answered-call transcript —
-the judge returns ``not_determinable`` for those rather than forcing a verdict.
+«Хронический недозвон») are not verifiable from an answered-call transcript — the judge
+returns ``not_determinable`` for those rather than forcing a verdict. The «Дубль…»
+reasons are no longer judged at all: the standing audit settles them against the CRM
+instead (``AtamuraOKK/audit/duplicates.py``), which this probe does not replicate.
 """
 
 from __future__ import annotations

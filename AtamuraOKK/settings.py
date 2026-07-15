@@ -167,6 +167,28 @@ class Settings(BaseSettings):
     # Off by default — enable only once Anthropic credits are available, else every
     # pass records `error` verdicts. Reuses `anthropic_scoring_model`/max_tokens.
     audit_enabled: bool = False
+    # The «Дубль…» reasons are a claim about the CRM, not about the call, so they are
+    # checked against Bitrix (does the number really sit on another deal?) instead of
+    # being sent to the judge — no transcript and no LLM needed (`audit/duplicates.py`).
+    # Enum ids in `companion_closed_reason_field`; empty → that reason falls back to
+    # the judge, which can only ever answer not_determinable for it.
+    audit_dup_same_project_reason_id: str = "1814"  # «Дубль по этому проекту»
+    audit_dup_other_project_reason_id: str = "1186"  # «Дубль по другим проектам»
+    # Cap on the deals pulled per duplicate lookup (a long-lived contact can carry
+    # many); only their count/project matters, so a bounded read is enough.
+    audit_dup_max_deals: int = 50
+    # When False, no deal is sent to the LLM judge and only the deterministic checks
+    # run — the audit still produces «Дубль» verdicts while Anthropic credits are out.
+    # Unjudged deals are left pending (the cursor does not advance past them), so
+    # flipping this back to True picks them up on the next pass.
+    audit_llm_judge_enabled: bool = True
+    # The «недозвон»-family reasons are a claim about telephony, not about the call
+    # (there is no answered call to transcribe), so they are checked against
+    # `voximplant.statistic.get` — was the number ever answered? — instead of the
+    # judge, which can only answer not_determinable for them (`audit/telephony.py`).
+    # No transcript and no LLM needed. Enum ids in `companion_closed_reason_field`:
+    # «Хронический недозвон» / «Автодозвон» / «Перестал выходить на связь».
+    audit_never_reached_reason_ids: list[str] = ["1192", "1956", "3774"]
 
     # --- Glossary correction (post-STT LLM repair of ЖК names & addresses) ---
     # Yandex v3 has no vocabulary API, so a cheap Claude pass fixes complex names

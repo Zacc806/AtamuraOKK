@@ -118,11 +118,13 @@ async def report_afternoon(ctx: dict[str, Any]) -> None:
 
 
 async def audit_closed_deals(ctx: dict[str, Any]) -> None:
-    """LLM-audit freshly closed-lost deals; persist a verdict per deal.
+    """Audit freshly closed-lost deals; persist a verdict per deal.
 
     Its own cron (not part of the tick): one LLM call per newly closed deal makes
     this pass minutes-long, so it needs a timeout far above the arq default. Gated
-    by ``audit_enabled`` so it stays dormant until Anthropic credits are available.
+    by ``audit_enabled``. The «Дубль…» reasons are settled against the CRM rather
+    than the LLM, so with ``audit_llm_judge_enabled`` off this pass still runs them
+    (and costs nothing) while Anthropic credits are out.
     """
     if not settings.audit_enabled:
         return

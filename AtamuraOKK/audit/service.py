@@ -2,12 +2,21 @@
 
 Incremental like ingestion: a ``IngestState`` cursor (``audit_closed_deals``) tracks
 the CLOSEDATE watermark. Each pass fetches deals closed-lost since the cursor
-(``STAGE_SEMANTIC_ID='F'`` in the TM category), joins each to the client's call
-transcript(s) we already hold, LLM-judges the stated close reason against the call,
-and upserts an :class:`AuditVerdict` (idempotent on ``bitrix_deal_id``). Deals
-without a transcript are skipped; deals already judged (a non-error verdict) are not
-re-judged; the cursor only advances past deals that are definitively done, so an
-``error`` (e.g. the API out of credits) is retried on the next pass.
+(``STAGE_SEMANTIC_ID='F'`` in the TM category) and settles each one's stated close
+reason, by one of two routes:
+
+* **«Дубль…» reasons** (``audit/duplicates.py``) — a claim about the CRM, not about
+  the conversation, so they are checked against Bitrix: does the client's number
+  really sit on another deal? These need no transcript and no LLM.
+* **every other reason** (``audit/judge.py``) — joined to the client's call
+  transcript(s) we already hold and LLM-judged against it. Deals without a
+  transcript are skipped.
+
+Either way the result upserts an :class:`AuditVerdict` (idempotent on
+``bitrix_deal_id``). Deals already settled (a non-error verdict) are not re-done; the
+cursor only advances past deals that are definitively done, so an ``error`` (e.g. the
+API out of credits) is retried on the next pass — as is a deal left unjudged because
+``audit_llm_judge_enabled`` is off.
 """
 
 from __future__ import annotations
@@ -21,6 +30,8 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
+from AtamuraOKK.audit import telephony
+from AtamuraOKK.audit.duplicates import check_many, dup_reason_ids
 from AtamuraOKK.audit.judge import build_judge_client, judge_one
 from AtamuraOKK.db.models.audit_verdict import AuditVerdict
 from AtamuraOKK.db.models.call import Call
@@ -45,8 +56,11 @@ class AuditStats:
 
     scanned: int = 0
     judged: int = 0
+    checked: int = 0
+    telephony: int = 0
     no_transcript: int = 0
     already_done: int = 0
+    judge_off: int = 0
     cursor: str | None = None
     verdicts: dict[str, int] = field(default_factory=dict)
 
@@ -123,7 +137,8 @@ async def _upsert_verdict(
     closed_at: datetime | None,
     manager_id: int | None,
     verdict: dict[str, Any],
-    model: str,
+    model: str | None,
+    details: dict[str, Any] | None = None,
 ) -> None:
     """Idempotent upsert of one deal's verdict (mirrors scoring _persist_score)."""
     assigned = deal.get("ASSIGNED_BY_ID")
@@ -141,14 +156,13 @@ async def _upsert_verdict(
         "justification": verdict.get("justification"),
         "evidence_quote": verdict.get("evidence_quote"),
         "call_ids": call_ids,
+        "details": details,
         "closed_at": closed_at,
         "model": model,
     }
     stmt = insert(AuditVerdict).values(**values)
     # notified_at is deliberately excluded so a re-audit never re-notifies.
-    update_cols = {
-        c: stmt.excluded[c] for c in values if c not in ("bitrix_deal_id",)
-    }
+    update_cols = {c: stmt.excluded[c] for c in values if c not in ("bitrix_deal_id",)}
     update_cols["audited_at"] = stmt.excluded.audited_at
     await session.execute(
         stmt.on_conflict_do_update(
@@ -165,10 +179,19 @@ async def _resolve_targets(
     labels: dict[str, str],
     field_name: str,
     stats: AuditStats,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Resolve each deal's transcript; return (ordered entries, deals to judge)."""
+) -> tuple[
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+    list[dict[str, Any]],
+]:
+    """Route each deal; return (entries, to_judge, to_check, to_telephony)."""
+    dup_kinds = dup_reason_ids()
+    nr_ids = telephony.never_reached_reason_ids()
     entries: list[dict[str, Any]] = []
     to_judge: list[dict[str, Any]] = []
+    to_check: list[dict[str, Any]] = []
+    to_telephony: list[dict[str, Any]] = []
     for d in deals:
         stats.scanned += 1
         closedate = str(d.get("CLOSEDATE") or "")
@@ -176,6 +199,9 @@ async def _resolve_targets(
             stats.already_done += 1
             entries.append({"cd": closedate, "done": True})
             continue
+        ids = reason_ids(d.get(field_name))
+        reason_id = ids[0] if ids else None
+        label = labels.get(reason_id, reason_id) if reason_id else _UNSPECIFIED_REASON
         contact_id = d.get("CONTACT_ID")
         client_key = (
             f"CONTACT:{contact_id}" if contact_id not in (None, "", 0, "0") else None
@@ -185,61 +211,117 @@ async def _resolve_targets(
             if client_key
             else ([], "")
         )
+        target = {
+            "deal": d,
+            "reason_label": label,
+            "reason_id": reason_id,
+            "call_ids": call_ids,
+            "closed_at": _parse_dt(d.get("CLOSEDATE")),
+        }
+
+        # «Дубль…»: settled against the CRM, so it is audited even with no transcript
+        # (a lead closed on sight never got a call — precisely the case worth checking).
+        kind = dup_kinds.get(reason_id or "")
+        if kind:
+            entries.append(
+                {"cd": closedate, "done": None, "kind": "dup", "idx": len(to_check)},
+            )
+            to_check.append({**target, "reason_kind": kind})
+            continue
+
+        # «недозвон»-family: settled against Voximplant (was the number ever answered?),
+        # so — like «Дубль…» — it is audited even with no transcript, which is the whole
+        # point (a lead never reached never produced a stored call).
+        if reason_id in nr_ids:
+            entries.append(
+                {
+                    "cd": closedate,
+                    "done": None,
+                    "kind": "nodial",
+                    "idx": len(to_telephony),
+                },
+            )
+            to_telephony.append(target)
+            continue
+
         if not call_ids:
             stats.no_transcript += 1
             entries.append({"cd": closedate, "done": True})
             continue
-        ids = reason_ids(d.get(field_name))
-        reason_id = ids[0] if ids else None
-        label = labels.get(reason_id, reason_id) if reason_id else _UNSPECIFIED_REASON
-        entries.append({"cd": closedate, "done": None, "idx": len(to_judge)})
-        to_judge.append(
-            {
-                "deal": d,
-                "reason_label": label,
-                "reason_id": reason_id,
-                "call_ids": call_ids,
-                "transcript": transcript,
-                "closed_at": _parse_dt(d.get("CLOSEDATE")),
-            }
+        if not settings.audit_llm_judge_enabled:
+            # Left pending, not done — the cursor stops here so a later pass (with
+            # the judge back on) still picks this deal up.
+            stats.judge_off += 1
+            entries.append({"cd": closedate, "done": False})
+            continue
+        entries.append(
+            {"cd": closedate, "done": None, "kind": "judge", "idx": len(to_judge)},
         )
-    return entries, to_judge
+        to_judge.append({**target, "transcript": transcript})
+    return entries, to_judge, to_check, to_telephony
 
 
-async def _judge_and_persist(
+async def _judge_all(to_judge: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """LLM-judge every non-«Дубль» deal concurrently."""
+    if not to_judge:
+        return []
+    judge_client = build_judge_client()
+    sem = asyncio.Semaphore(_CONCURRENCY)
+    return list(
+        await asyncio.gather(
+            *(
+                judge_one(
+                    judge_client,
+                    transcript=x["transcript"],
+                    close_reason=x["reason_label"],
+                    model=settings.anthropic_scoring_model,
+                    sem=sem,
+                )
+                for x in to_judge
+            )
+        )
+    )
+
+
+async def _settle_and_persist(
     session: AsyncSession,
     bx: BitrixClient,
     entries: list[dict[str, Any]],
     to_judge: list[dict[str, Any]],
+    to_check: list[dict[str, Any]],
+    to_telephony: list[dict[str, Any]],
     stats: AuditStats,
 ) -> None:
-    """Judge all pending deals concurrently and upsert their verdicts."""
+    """Judge / dup-check / telephony-check pending deals and upsert their verdicts."""
+    pending = to_judge + to_check + to_telephony
     assigned = {
         int(x["deal"]["ASSIGNED_BY_ID"])
-        for x in to_judge
+        for x in pending
         if x["deal"].get("ASSIGNED_BY_ID")
     }
     mgr_map = await ensure_managers(session, assigned, bx) if assigned else {}
-    judge_client = build_judge_client()
-    model = settings.anthropic_scoring_model
-    sem = asyncio.Semaphore(_CONCURRENCY)
-    results = await asyncio.gather(
-        *(
-            judge_one(
-                judge_client,
-                transcript=x["transcript"],
-                close_reason=x["reason_label"],
-                model=model,
-                sem=sem,
-            )
-            for x in to_judge
-        )
-    )
+    judged = await _judge_all(to_judge)
+    checked = await check_many(bx, to_check)
+    dialed = await telephony.check_many(bx, to_telephony)
+
     for e in entries:
         if e.get("done") is not None:
             continue
-        x = to_judge[e["idx"]]
-        verdict = results[e["idx"]]
+        kind = e["kind"]
+        if kind == "dup":
+            x = to_check[e["idx"]]
+            check = checked[e["idx"]]
+            verdict, details = check.as_verdict(), check.details
+            model: str | None = None
+        elif kind == "nodial":
+            x = to_telephony[e["idx"]]
+            tel = dialed[e["idx"]]
+            verdict, details = tel.as_verdict(), tel.details
+            model = None
+        else:
+            x = to_judge[e["idx"]]
+            verdict, details = judged[e["idx"]], None
+            model = settings.anthropic_scoring_model
         assigned_id = x["deal"].get("ASSIGNED_BY_ID")
         manager_id = mgr_map.get(int(assigned_id)) if assigned_id else None
         await _upsert_verdict(
@@ -252,10 +334,16 @@ async def _judge_and_persist(
             manager_id,
             verdict,
             model,
+            details,
         )
         name = str(verdict.get("verdict"))
         e["done"] = name != "error"
-        stats.judged += 1
+        if kind == "dup":
+            stats.checked += 1
+        elif kind == "nodial":
+            stats.telephony += 1
+        else:
+            stats.judged += 1
         stats.verdicts[name] = stats.verdicts.get(name, 0) + 1
 
 
@@ -290,6 +378,7 @@ async def run_audit(
                 "TITLE",
                 "ASSIGNED_BY_ID",
                 "CONTACT_ID",
+                "DATE_CREATE",
                 "CLOSEDATE",
                 field_name,
             ],
@@ -318,11 +407,13 @@ async def run_audit(
     )
     labels = await reason_enum_labels(bx, field_name)
 
-    entries, to_judge = await _resolve_targets(
+    entries, to_judge, to_check, to_telephony = await _resolve_targets(
         session, deals, done_ids, labels, field_name, stats
     )
-    if to_judge:
-        await _judge_and_persist(session, bx, entries, to_judge, stats)
+    if to_judge or to_check or to_telephony:
+        await _settle_and_persist(
+            session, bx, entries, to_judge, to_check, to_telephony, stats
+        )
 
     # Advance the cursor only across the contiguous leading run of done deals,
     # so an errored deal (and everything after it) is retried next pass.
@@ -337,12 +428,15 @@ async def run_audit(
         stats.cursor = new_cursor
 
     logger.info(
-        "audit pass: scanned={s} judged={j} no_transcript={nt} already_done={ad} "
-        "verdicts={v} cursor={c}",
+        "audit pass: scanned={s} judged={j} dup_checked={dc} nodial_checked={nd} "
+        "no_transcript={nt} already_done={ad} judge_off={jo} verdicts={v} cursor={c}",
         s=stats.scanned,
         j=stats.judged,
+        dc=stats.checked,
+        nd=stats.telephony,
         nt=stats.no_transcript,
         ad=stats.already_done,
+        jo=stats.judge_off,
         v=stats.verdicts,
         c=stats.cursor,
     )
