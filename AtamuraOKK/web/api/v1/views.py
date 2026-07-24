@@ -57,6 +57,7 @@ from AtamuraOKK.web.api.v1.schemas import (
     DepartmentRef,
     FeedItem,
     HygieneView,
+    ManagerRosterEntry,
     ManagerScorecard,
     MeetingFeedback,
     MeetingFeedItem,
@@ -301,6 +302,28 @@ async def call_feedback(
         raise HTTPException(status_code=404, detail="Call not scored.")
     await ensure_can_view_manager(session, identity, feedback.manager.bitrix_user_id)
     return feedback
+
+
+@router.get(
+    "/managers/roster",
+    response_model=list[ManagerRosterEntry],
+    tags=["companion"],
+)
+async def managers_roster(
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[ManagerRosterEntry]:
+    """Reconciled manager list: CRM identity + names voiced on transcribed calls.
+
+    Head-only. The global head sees every manager (dept-less included); an office
+    РОП sees only their own department's enriched managers. Read-only — CRM stays
+    authoritative, the spoken names are verification/gap-fill.
+    """
+    ensure_head(identity)
+    return await service.get_manager_roster(
+        session,
+        department_bitrix_id=identity.department_id,
+    )
 
 
 @router.get(

@@ -354,6 +354,12 @@ class Settings(BaseSettings):
     companion_day_cache_ttl_seconds: int = 60
     # «Отказы не по делу» — cap on failed-audit deals shown in «Займись сейчас».
     companion_day_audit_max_items: int = 20
+    # Close-reason enum ids whose contradicted verdicts are audited and stored, but
+    # NOT surfaced in the «Отказы не по делу» queue. «Автодозвон» (1956) is here:
+    # the dial was the robot's, not the manager's, so «клиент всё-таки ответил» is
+    # not a call the manager failed to make — the queue only shows leads a human
+    # never reached. The verdict still lands in `audit_verdicts` for reporting.
+    companion_day_audit_hidden_reason_ids: list[str] = ["1956"]
     # Callback queue in «Займись сейчас» — cap on целевые calls the rubric says
     # never got a meeting booked, warmest first.
     companion_day_no_meeting_max_items: int = 20
@@ -408,6 +414,13 @@ class Settings(BaseSettings):
     companion_hygiene_cache_ttl_seconds: int = 600
     # Norm (target) per criterion, %, shown on the cards and used to colour them.
     companion_hygiene_norm_pct: int = 85
+    # Cap on the period deal pull feeding statuses/anketa/tasks_set. Its own knob
+    # (not companion_day_max_scan): that one bounds the *open* deals of a single
+    # day, while this base is every deal CREATED in the period, closed included —
+    # a busy manager opens 800+ cards a month, so a 500 cap would silently
+    # truncate the month while the week fitted, making the two incomparable. When
+    # the cap does bite, the three criteria say so in their note.
+    companion_hygiene_deals_max_scan: int = 3000
     # Status criterion: an open TM deal with no activity for longer than this many
     # days is treated as a card whose status is not maintained (stuck stage). The
     # strict "stage matches the call outcome" version needs an OKK transcript-vs-

@@ -214,6 +214,7 @@ async def _persist_score(
         "summary": result.summary,
         "flags": result.red_flags,
         "model": model_label,
+        "manager_spoken_name": result.manager_spoken_name,
     }
     # Upsert: a re-claim or duplicate delivery must not create a second row.
     stmt = insert(Score).values(**values)

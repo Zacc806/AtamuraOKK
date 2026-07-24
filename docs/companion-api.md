@@ -116,6 +116,7 @@ score; reminders/vendor/internal/wrong-number calls are excluded.
 | GET | `/api/v1/rubrics` | active criteria set per `source` (`"tm"` calls / `"op"` meetings) |
 | GET | `/api/v1/teams/{department_id}/summary?period=YYYY-MM` | РОП-вид — per-manager roster + group rollup, calls **and** meetings (**head only**; a scoped head only their own department). For the **TM department** each roster card + the group carry `money.meetings` = conversions to «Фактический визит» (live from Bitrix stage history; null when Bitrix is unavailable / non-TM department) |
 | GET | `/api/v1/teams/{department_id}/overdue-tasks` | РОП «Просроченные задачи» — every incomplete activity of the department's team whose deadline has already passed (просроченные до сейчас), oldest-due first, each attributed to its responsible manager. Live from Bitrix `crm.activity.list`; capped (`companion_overdue_max_items`, `truncated` flag). Empty (not an error) when Bitrix is unavailable (**head only**; a scoped head only their own department) |
+| GET | `/api/v1/managers/roster` | reconciled manager list from **both** sources — each manager's CRM identity (`bitrix_user_id` + `crm_name` + department; authoritative) alongside `spoken_names` (`[{name, calls}]`, most-frequent first): the names the manager actually voiced when introducing themselves on their transcribed calls, from the scorer (`scores.manager_spoken_name`). CRM is never overwritten — spoken names are verification / a way to read a name off the calls for an un-enriched CRM row. `spoken_names` is empty until a manager's calls are scored under this schema (**head only**; the global head sees every manager incl. dept-less, a scoped head only their own department's enriched managers) |
 | GET | `/api/v1/departments` | departments (`{bitrix_id, name}`, name-sorted) for the office-РОП assignment dropdown; names lazily backfilled from Bitrix `department.get` (**global head only**) |
 | GET | `/api/v1/users` | cabinet users — all for the global head; a scoped head sees only their own department's manager keys (**head only**) |
 | POST | `/api/v1/users` | issue a key; raw key returned once. Manager (`{bitrix_user_id, name?}`): any head — a scoped head's manager is tied to their department. Head (`{role: "head", department_id, name? \| bitrix_user_id?}`): **global head only** |
@@ -234,8 +235,8 @@ Postgres** by a periodic job (the live read-through is the v1). Stage ids / tren
 
 ### CRM hygiene
 
-`GET /managers/{id}/hygiene?period=...` is a **live read-through to Bitrix** (open
-deals + activities, same caching/role-scoping as `/analytics`) that measures the
+`GET /managers/{id}/hygiene?period=...` is a **live read-through to Bitrix** (deals
++ activities, same caching/role-scoping as `/analytics`) that measures the
 discipline of keeping the deal card in order *after* the call. It returns a
 `HygieneView` — `{manager, period, norm_pct, overall_pct, criteria:[…]}` — where
 `overall_pct` is the mean of the **live** criteria (None if none are live) and
@@ -243,17 +244,29 @@ each `HygieneCriterion` carries `{key, status, pct, numerator, denominator, note
 A criterion whose source is not wired returns `status:"not_available"` (cabinet
 badges it «нет данных») rather than a fake `0`. The five criteria:
 
+All five criteria are **scoped to `period`**, so a week and a month give genuinely
+different numbers. `tasks_on_time` and `notes` window their own Bitrix reads by
+`DEADLINE`/`CREATED`; the three card criteria share one `crm.deal.list` pull
+scoped by `DATE_CREATE` — the base is «карточки, заведённые в периоде», **closed
+ones included**, so a past week keeps reporting the same cards instead of
+emptying out as they close. (Before 2026-07-20 that pull filtered on `CLOSED:"N"`
+with no date term at all, and those three criteria returned identical blocks for
+every period.)
+
 | key | «…» | computed from | denominator |
 |---|---|---|---|
-| `statuses` | Правильное вписывание статусов | open TM deals **not stale** (touched within `companion_hygiene_stale_days`, default 14) | open deals |
-| `anketa` | Правильное заполнение анкеты | open deals with **every** `companion_anketa_fields` UF field non-empty; **unconfigured → not_available** | open deals |
-| `tasks_set` | Постановка дел | open deals carrying ≥1 **open** activity (one `crm.activity.list` owner pull, intersected with the open-deal ids) | open deals |
+| `statuses` | Правильное вписывание статусов | the period's TM deals **not stale as of the period's end** — activity within `companion_hygiene_stale_days` (default 14) of `min(end, now)`; a closed card is never stale | deals created in period |
+| `anketa` | Правильное заполнение анкеты | of the period's deals that reached a stage where the анкета is owed (`_ANKETA_STAGES`, plus any **won** deal — a lost one's current stage no longer says how far it got), those with **every** `companion_anketa_fields` UF field non-empty; **unconfigured → not_available** | qualified deals created in period |
+| `tasks_set` | Постановка дел | of the period's **still-open** deals on a task-requiring stage, those carrying ≥1 **open** activity (one `crm.activity.list` owner pull, intersected with the period's deal ids) | task-requiring open deals created in period |
 | `tasks_on_time` | Исполнение дел в сроки | of activities whose deadline already passed in the period, the share **not left overdue** (two count reads) | due-passed activities |
 | `notes` | Примечание по шаблону | of the **deals the manager called**, those carrying a timeline comment **they wrote** in the period (containing `companion_note_template_marker` when set; BB-code markup, image/link-only autoposts and other authors don't count) | distinct deals called in period (capped at `companion_hygiene_notes_max_deals`) |
 
 **Honest limits (documented in each criterion's `note`):** `statuses` is a *stale-
 card proxy* — the strict "stage matches the call outcome" check needs an ОКК
-transcript↔stage comparison on the scoring side (not wired). `tasks_on_time`
+transcript↔stage comparison on the scoring side (not wired). `tasks_set` scopes
+its *base* to the period but reads has-a-task **as of now**, so a past period's
+figure still drifts; a true point-in-time reading needs a per-deal
+`crm.stagehistory` pull. `tasks_on_time`
 counts a late-but-closed task as on-time (a count API exposes no per-activity
 completion timestamp). `anketa` is config-gated: it goes live the moment the PM
 supplies `ATAMURAOKK_COMPANION_ANKETA_FIELDS`. `notes` is live out of the box and

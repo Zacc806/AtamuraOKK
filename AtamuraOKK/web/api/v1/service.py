@@ -18,7 +18,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from loguru import logger
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from AtamuraOKK.bitrix import BitrixClient, BitrixError, crm_card_url
@@ -28,11 +28,13 @@ from AtamuraOKK.db.models.appeal import (
     APPEAL_REJECTED,
     Appeal,
 )
+from AtamuraOKK.db.models.call import Call
 from AtamuraOKK.db.models.department import Department
 from AtamuraOKK.db.models.enums import CompanionRole
 from AtamuraOKK.db.models.manager import Manager
 from AtamuraOKK.db.models.meeting import Meeting
 from AtamuraOKK.db.models.rubric_version import RubricVersion
+from AtamuraOKK.db.models.score import Score
 from AtamuraOKK.scoring.recompute import recompute_percent
 from AtamuraOKK.settings import settings
 from AtamuraOKK.web.api.v1 import day, okk
@@ -48,6 +50,7 @@ from AtamuraOKK.web.api.v1.schemas import (
     DepartmentRef,
     FeedItem,
     ManagerRef,
+    ManagerRosterEntry,
     ManagerScorecard,
     MeetingCriterionFeedback,
     MeetingFeedback,
@@ -59,6 +62,7 @@ from AtamuraOKK.web.api.v1.schemas import (
     RubricView,
     ScoreTrendPoint,
     ScoreTrendView,
+    SpokenName,
     TeamGroupStats,
     TeamOverdueTasks,
     TeamSummary,
@@ -86,11 +90,14 @@ def _is_qual(row: Any) -> bool:
 def _counts_in_score(row: Any) -> bool:
     """Whether a call counts toward the ОКК score / aggregation.
 
-    On top of being a qualification call, the client must have been judged
-    «целевой»: non-target calls (нецелевой / неясно / unknown) are still returned
-    in the feed but excluded from the score, zone distribution and counts.
+    A call counts iff it is a genuine qualification call. ``target_status`` only
+    records whether an actual client was on the line (vs a non-client caller) and
+    is informational — it does NOT gate the score. Non-client calls are already
+    excluded via ``is_qualification_call`` (call_type = нецелевое_обращение), so a
+    real client conversation still counts even if the client was a poor fit,
+    refused, or was non-committal.
     """
-    return _is_qual(row) and getattr(row, "target_status", None) == "целевой"
+    return _is_qual(row)
 
 
 def _transcript_blocks(
@@ -129,7 +136,7 @@ def _transcript_blocks(
 def _okk_from_rows(rows: Sequence[Any]) -> tuple[OkkScore, dict[str, int], int]:
     """Aggregate scored rows into (OkkScore, zone_distribution, n).
 
-    Only целевые qualification calls count (see ``_counts_in_score``).
+    Only genuine qualification calls count (see ``_counts_in_score``).
     """
     counted = [r for r in rows if _counts_in_score(r)]
     zone_dist = dict.fromkeys(_ZONES, 0)
@@ -468,6 +475,73 @@ async def assign_manager_department(
     await session.flush()
 
 
+async def _spoken_names_by_manager(
+    session: AsyncSession,
+) -> dict[int, list[SpokenName]]:
+    """``managers.id`` → names voiced on their scored calls, most-frequent first.
+
+    Sourced from ``scores.manager_spoken_name`` (the scorer's content-identified
+    name) joined back through ``calls.manager_id``; blank/NULL names are dropped.
+    """
+    rows = await session.execute(
+        select(
+            Call.manager_id,
+            Score.manager_spoken_name,
+            func.count().label("n"),
+        )
+        .join(Score, Score.call_id == Call.id)
+        .where(
+            Call.manager_id.is_not(None),
+            Score.manager_spoken_name.is_not(None),
+            func.length(func.trim(Score.manager_spoken_name)) > 0,
+        )
+        .group_by(Call.manager_id, Score.manager_spoken_name),
+    )
+    by_manager: dict[int, list[SpokenName]] = {}
+    for manager_id, name, count in rows:
+        by_manager.setdefault(manager_id, []).append(
+            SpokenName(name=name, calls=int(count)),
+        )
+    for names in by_manager.values():
+        names.sort(key=lambda s: (-s.calls, s.name.casefold()))
+    return by_manager
+
+
+async def get_manager_roster(
+    session: AsyncSession,
+    *,
+    department_bitrix_id: int | None = None,
+) -> list[ManagerRosterEntry]:
+    """Reconciled roster: CRM identity (authoritative) + names voiced on calls.
+
+    ``department_bitrix_id`` scopes to one department (an office РОП) — an inner
+    join, so un-enriched/dept-less managers are dropped and stay global-head-only
+    (mirrors ``ensure_can_view_manager``). ``None`` (global head) lists every
+    manager, dept-less ones included.
+    """
+    query = select(Manager, Department).outerjoin(
+        Department,
+        Department.id == Manager.department_id,
+    )
+    if department_bitrix_id is not None:
+        query = query.where(Department.bitrix_id == department_bitrix_id)
+    query = query.order_by(Manager.bitrix_user_id)
+
+    spoken = await _spoken_names_by_manager(session)
+    return [
+        ManagerRosterEntry(
+            bitrix_user_id=manager.bitrix_user_id,
+            crm_name=_full_name(manager),
+            department_id=department.bitrix_id if department else None,
+            department_name=department.name if department else None,
+            enriched=manager.enriched,
+            active=manager.active,
+            spoken_names=spoken.get(manager.id, []),
+        )
+        for manager, department in (await session.execute(query)).all()
+    ]
+
+
 async def get_scorecard(
     session: AsyncSession,
     bitrix_user_id: int,
@@ -528,7 +602,6 @@ async def get_criteria_averages(
                 "WHERE cs.manager_bitrix_user_id = :uid "
                 "AND cs.started_at >= :start AND cs.started_at < :end "
                 "AND cs.is_qualification_call IS NOT FALSE "
-                "AND cs.target_status = 'целевой' "
                 "GROUP BY cl.criterion_id, cl.block_name, cl.criterion_text "
                 "ORDER BY cl.criterion_id",
             ),
@@ -540,8 +613,7 @@ async def get_criteria_averages(
             "SELECT COUNT(*) FROM call_scores_latest "
             "WHERE manager_bitrix_user_id = :uid "
             "AND started_at >= :start AND started_at < :end "
-            "AND is_qualification_call IS NOT FALSE "
-            "AND target_status = 'целевой'",
+            "AND is_qualification_call IS NOT FALSE",
         ),
         win,
     )
@@ -632,7 +704,6 @@ async def get_score_trend(
                 "WHERE cs.manager_bitrix_user_id = :uid "
                 "AND cs.started_at >= :start AND cs.started_at < :end "
                 "AND cs.is_qualification_call IS NOT FALSE "
-                "AND cs.target_status = 'целевой' "
                 "GROUP BY 1 ORDER BY 1",
             ),
             {

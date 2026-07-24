@@ -37,6 +37,37 @@ class DepartmentRef(BaseModel):
     name: str | None = None
 
 
+class SpokenName(BaseModel):
+    """A name a manager voiced when introducing themselves, with its frequency."""
+
+    name: str
+    calls: int = Field(description="Scored calls on which this name was voiced")
+
+
+class ManagerRosterEntry(BaseModel):
+    """One manager reconciled from both sources.
+
+    ``crm_name`` / ``department`` are the authoritative Bitrix identity (the join
+    key). ``spoken_names`` are the names the manager actually voiced across their
+    transcribed calls (from the scorer) — supplementary, for verification and for
+    reading a name off the calls when the CRM row is un-enriched. Ordered
+    most-frequent first; empty until the manager's calls are scored.
+    """
+
+    bitrix_user_id: int
+    crm_name: str | None = None
+    department_id: int | None = Field(
+        default=None,
+        description="Bitrix department id",
+    )
+    department_name: str | None = None
+    enriched: bool = Field(
+        description="Whether the CRM profile (name/department) has been filled in",
+    )
+    active: bool
+    spoken_names: list[SpokenName] = Field(default_factory=list)
+
+
 class MeView(BaseModel):
     """Who the cabinet session belongs to — drives the role-aware UI.
 

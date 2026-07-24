@@ -5,24 +5,34 @@ per request (short TTL cache) rather than OKK's Postgres — it measures the
 discipline of keeping the deal card in order *after* the call, which lives in the
 CRM, not in the scoring tables.
 
+**Every criterion is scoped to the requested period**, so неделя and месяц give
+genuinely different numbers. The two activity criteria window their own Bitrix
+reads by ``DEADLINE``/``CREATED``; the three card criteria share one deal pull
+scoped by ``DATE_CREATE`` (``_period_deals``) — the base is «карточки, заведённые
+в периоде», closed ones included, so a past week keeps reporting the same cards
+instead of emptying out as they close.
+
 Five criteria, each independently resilient (a failing sub-read degrades that one
 criterion to ``status="not_available"`` rather than failing the whole view):
 
-* **statuses**     — «Правильное вписывание статусов». Proxy: share of the
-  manager's open TM deals that are NOT stale (had activity within
-  ``companion_hygiene_stale_days``). The strict "stage matches the call outcome"
-  check needs an ОКК transcript↔stage comparison on the scoring side (not wired);
-  a stuck, untouched card is the computable signal that the status is not kept.
-* **anketa**       — «Правильное заполнение анкеты». Of the open deals that reached
-  a stage where the questionnaire is owed (``_ANKETA_STAGES``), the share with every
-  configured field (``companion_anketa_fields``) filled. Leads still in dialling owe
-  no анкета and stay out of the base. Unconfigured → not_available (we never invent
-  a field list).
-* **tasks_set**    — «Постановка дел». Of the open deals whose current stage
-  *requires* a task per the регламент (``_TASK_STAGES``), the share carrying at
-  least one open (incomplete) activity. No-task stages (Новая заявка, Недозвон, …)
-  are excluded from the base, so a card parked where no task is due never counts
-  against it.
+* **statuses**     — «Правильное вписывание статусов». Proxy: share of the period's
+  TM deals that were NOT stale as of the period's end (activity within
+  ``companion_hygiene_stale_days`` of ``min(end, now)``); a closed card is never
+  stale. The strict "stage matches the call outcome" check needs an ОКК
+  transcript↔stage comparison on the scoring side (not wired); a stuck, untouched
+  card is the computable signal that the status is not kept.
+* **anketa**       — «Правильное заполнение анкеты». Of the period's deals that
+  reached a stage where the questionnaire is owed (``_ANKETA_STAGES``, plus any
+  won deal), the share with every configured field (``companion_anketa_fields``)
+  filled. Leads still in dialling owe no анкета and stay out of the base.
+  Unconfigured → not_available (we never invent a field list).
+* **tasks_set**    — «Постановка дел». Of the period's still-open deals whose
+  current stage *requires* a task per the регламент (``_TASK_STAGES``), the share
+  carrying at least one open (incomplete) activity. No-task stages (Новая заявка,
+  Недозвон, …) and closed cards are excluded from the base, so a card parked where
+  no task is due never counts against it. The base is period-scoped but the
+  has-a-task check is a *now* reading — per-stage history would need a per-deal
+  crm.stagehistory pull.
 * **tasks_on_time**— «Исполнение дел в сроки». Of activities whose deadline has
   already passed in the period, the share that are not left hanging overdue.
 * **notes**        — «Примечание по шаблону». Of the **deals** the manager called in
@@ -216,12 +226,27 @@ def _scored(
     )
 
 
-async def _open_deals(bx: BitrixClient, uid: int) -> list[dict[str, Any]]:
-    """Open TM-funnel deals for the manager, with the anketa fields selected."""
+async def _period_deals(
+    bx: BitrixClient,
+    uid: int,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    """TM-funnel deals the manager *opened in the period*, anketa fields selected.
+
+    Scoped by ``DATE_CREATE``, not by ``CLOSED``: the base is «карточки, заведённые
+    на той неделе», so a week and a month give genuinely different (strictly nested)
+    numbers, and a past period keeps returning the same cards as they close instead
+    of quietly emptying out. Each criterion decides for itself what a closed card
+    means — ``CLOSED``/``STAGE_SEMANTIC_ID`` come along for that.
+    """
     select = [
         "ID",
         "TITLE",
         "STAGE_ID",
+        "STAGE_SEMANTIC_ID",
+        "CLOSED",
+        "DATE_CREATE",
         "LAST_ACTIVITY_TIME",
         *settings.companion_anketa_fields,
     ]
@@ -233,14 +258,35 @@ async def _open_deals(bx: BitrixClient, uid: int) -> list[dict[str, Any]]:
                 "filter": {
                     "CATEGORY_ID": settings.companion_tm_category_id,
                     "ASSIGNED_BY_ID": uid,
-                    "CLOSED": "N",
+                    ">=DATE_CREATE": start.isoformat(),
+                    "<DATE_CREATE": end.isoformat(),
                 },
                 "select": select,
-                "order": {"LAST_ACTIVITY_TIME": "ASC"},
+                "order": {"DATE_CREATE": "ASC"},
             },
-            max_items=settings.companion_day_max_scan,
+            max_items=settings.companion_hygiene_deals_max_scan,
         )
     ]
+
+
+def _truncated_deals(deals: list[dict[str, Any]] | None) -> bool:
+    """Whether the period deal pull hit its cap (so the base is a partial sample)."""
+    return deals is not None and len(deals) >= settings.companion_hygiene_deals_max_scan
+
+
+_TRUNCATED_NOTE = (
+    " Внимание: сделок в периоде больше лимита выборки — показана только часть, "
+    "проценты приблизительные."
+)
+
+
+def _is_closed(d: dict[str, Any]) -> bool:
+    return str(d.get("CLOSED") or "").upper() == "Y"
+
+
+def _is_won(d: dict[str, Any]) -> bool:
+    """Deal closed successfully (Bitrix stage semantics: S = success)."""
+    return str(d.get("STAGE_SEMANTIC_ID") or "").upper() == "S"
 
 
 async def _open_task_deal_ids(bx: BitrixClient, uid: int) -> set[int]:
@@ -264,17 +310,27 @@ async def _open_task_deal_ids(bx: BitrixClient, uid: int) -> set[int]:
     return ids
 
 
-def _statuses(deals: list[dict[str, Any]] | None) -> HygieneCriterion:
-    """Share of open deals not stale (touched within the stale window)."""
+def _statuses(deals: list[dict[str, Any]] | None, end: datetime) -> HygieneCriterion:
+    """Share of the period's deals not left hanging as of the period's end.
+
+    Staleness is measured against ``min(end, now)``, not against today: for a past
+    week the question is «была ли карточка заброшена на тот момент», and anchoring
+    to the period end keeps that answer stable instead of drifting staler with every
+    day that passes. A closed card counts as maintained — a deal that was carried to
+    won/lost is by definition not left hanging.
+    """
     if deals is None:
         return _unavailable("statuses", "Bitrix недоступен")
     if not deals:
-        return _unavailable("statuses", "Нет открытых сделок в работе")
-    now = _now()
-    cutoff = now - timedelta(days=settings.companion_hygiene_stale_days)
+        return _unavailable("statuses", "Нет сделок, заведённых в периоде")
+    as_of = min(end, _now())
+    cutoff = as_of - timedelta(days=settings.companion_hygiene_stale_days)
     maintained = 0
     failed: list[HygieneFailedItem] = []
     for d in deals:
+        if _is_closed(d):
+            maintained += 1
+            continue
         raw = d.get("LAST_ACTIVITY_TIME")
         last: datetime | None = None
         if raw:
@@ -286,26 +342,30 @@ def _statuses(deals: list[dict[str, Any]] | None) -> HygieneCriterion:
             maintained += 1
         else:
             detail = (
-                f"нет активности {(now - last).days} дн."
+                f"нет активности {(as_of - last).days} дн."
                 if last is not None
                 else "ни одной активности"
             )
             failed.append(_deal_item(d, detail))
     note = (
-        f"Прокси-метрика: открытая сделка без активности дольше "
-        f"{settings.companion_hygiene_stale_days} дн. считается зависшей. Строгая "
-        "сверка статуса с исходом звонка — на стороне ОКК-скоринга (в плане)."
+        f"База — сделки, заведённые в периоде. Прокси-метрика: открытая сделка без "
+        f"активности дольше {settings.companion_hygiene_stale_days} дн. (на конец "
+        "периода) считается зависшей; закрытая карточка зависшей не считается. "
+        "Строгая сверка статуса с исходом звонка — на стороне ОКК-скоринга (в плане)."
     )
     items, truncated = _cap(failed)
     return _scored("statuses", maintained, len(deals), note, items, truncated)
 
 
 def _anketa(deals: list[dict[str, Any]] | None) -> HygieneCriterion:
-    """Share of qualified open deals with every configured questionnaire field filled.
+    """Share of qualified period deals with every configured questionnaire field filled.
 
     Only deals that reached a stage where the анкета is owed (``_ANKETA_STAGES``)
     enter the base; a lead still being dialled has no questionnaire due and so
-    neither helps nor hurts the criterion.
+    neither helps nor hurts the criterion. A won deal is in the base whatever stage
+    id it now carries — it demonstrably passed qualification. A lost deal is not:
+    its current stage no longer says how far it actually got, and reconstructing
+    that needs a per-deal crm.stagehistory pull.
     """
     fields = settings.companion_anketa_fields
     if not fields:
@@ -315,7 +375,7 @@ def _anketa(deals: list[dict[str, Any]] | None) -> HygieneCriterion:
         )
     if deals is None:
         return _unavailable("anketa", "Bitrix недоступен")
-    due = [d for d in deals if _anketa_due(str(d.get("STAGE_ID") or ""))]
+    due = [d for d in deals if _is_won(d) or _anketa_due(str(d.get("STAGE_ID") or ""))]
     if not due:
         return _unavailable("anketa", "Нет сделок на этапах, где анкета уже нужна")
     complete = 0
@@ -329,9 +389,9 @@ def _anketa(deals: list[dict[str, Any]] | None) -> HygieneCriterion:
         else:
             complete += 1
     note = (
-        "База — сделки, дошедшие до квалификации («Лид квалифицирован» и далее); "
-        "лиды в дозвоне анкеты ещё не должны. Засчитывается карточка, где "
-        "заполнены все поля анкеты."
+        "База — сделки периода, дошедшие до квалификации («Лид квалифицирован» и "
+        "далее, включая успешно закрытые); лиды в дозвоне анкеты ещё не должны. "
+        "Засчитывается карточка, где заполнены все поля анкеты."
     )
     items, truncated = _cap(failed)
     return _scored("anketa", complete, len(due), note, items, truncated)
@@ -341,19 +401,24 @@ def _tasks_set(
     deals: list[dict[str, Any]] | None,
     deal_ids_with_task: set[int] | None,
 ) -> HygieneCriterion:
-    """Share of task-requiring open deals that carry an open activity planned.
+    """Share of task-requiring period deals that carry an open activity planned.
 
     Only deals whose current stage requires a task per the регламент
     (``_TASK_STAGES``) enter the base; stages marked «нет задач» (Новая заявка,
     Взято в работу, Недозвон 1/2) are excluded, so a card parked where no task is
-    due neither helps nor hurts «Постановка дел».
+    due neither helps nor hurts «Постановка дел». Closed cards owe no follow-up and
+    drop out too.
     """
     if deals is None or deal_ids_with_task is None:
         return _unavailable("tasks_set", "Bitrix недоступен")
-    required = [d for d in deals if _requires_task(str(d.get("STAGE_ID") or ""))]
+    required = [
+        d
+        for d in deals
+        if not _is_closed(d) and _requires_task(str(d.get("STAGE_ID") or ""))
+    ]
     if not required:
         return _unavailable(
-            "tasks_set", "Нет открытых сделок на этапах, где нужна задача"
+            "tasks_set", "Нет открытых сделок периода на этапах, где нужна задача"
         )
     with_task = 0
     failed: list[HygieneFailedItem] = []
@@ -363,8 +428,9 @@ def _tasks_set(
         else:
             failed.append(_deal_item(d, "нет запланированного дела"))
     note = (
-        "База — только сделки на этапах, где регламент требует задачу; этапы "
-        "«нет задач» (Новая заявка, Взято в работу, Недозвон 1/2) исключены."
+        "База — сделки периода на этапах, где регламент требует задачу; этапы "
+        "«нет задач» (Новая заявка, Взято в работу, Недозвон 1/2) и закрытые "
+        "карточки исключены. Наличие дела проверяется на текущий момент."
     )
     items, truncated = _cap(failed)
     return _scored("tasks_set", with_task, len(required), note, items, truncated)
@@ -653,7 +719,7 @@ async def get_hygiene(
             # period-scoped activity reads. The Bitrix client self-throttles, so
             # the fan-out is safe and roughly halves cold wall-time.
             deals_res, owners_res, ontime, notes = await asyncio.gather(
-                _open_deals(bx, bitrix_user_id),
+                _period_deals(bx, bitrix_user_id, start, end),
                 _open_task_deal_ids(bx, bitrix_user_id),
                 _tasks_on_time(bx, bitrix_user_id, start, end),
                 _notes(bx, bitrix_user_id, start, end),
@@ -678,13 +744,18 @@ async def get_hygiene(
         else _unavailable("notes", "Bitrix недоступен")
     )
 
-    criteria = [
-        _statuses(deals),
-        _anketa(deals),
-        _tasks_set(deals, owners),
-        ontime_crit,
-        notes_crit,
-    ]
+    card_criteria = [_statuses(deals, end), _anketa(deals), _tasks_set(deals, owners)]
+    if _truncated_deals(deals):
+        # Silent truncation would read as «мы посчитали всё» — say it out loud.
+        logger.warning(
+            "Hygiene deal pull hit the scan cap for {uid} in {label}",
+            uid=bitrix_user_id,
+            label=label,
+        )
+        for crit in card_criteria:
+            crit.note = (crit.note or "") + _TRUNCATED_NOTE
+
+    criteria = [*card_criteria, ontime_crit, notes_crit]
     live = [c.pct for c in criteria if c.status == "live" and c.pct is not None]
     overall = round(sum(live) / len(live), 1) if live else None
 

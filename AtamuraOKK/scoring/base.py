@@ -72,6 +72,13 @@ class CallScore(BaseModel):
     manager_identified: bool = Field(
         description="Удалось ли однозначно определить менеджера Atamura в разговоре",
     )
+    # Supplementary, for reconciliation against the CRM-attributed manager — the
+    # Bitrix user id stays authoritative; this is only the name the manager voiced.
+    manager_spoken_name: str | None = Field(
+        default=None,
+        description="Имя, которым менеджер Atamura представился в разговоре "
+        "(«меня зовут …», «это …»); null, если менеджер не назвал своё имя",
+    )
     # Which audio side the manager turned out to be on. Lets the pipeline reconcile
     # the stored transcript labels with the content-identified manager (the stereo
     # channel->role guess is sometimes inverted). "A" = СТОРОНА A (канал 1, метка
@@ -89,7 +96,9 @@ class CallScore(BaseModel):
     summary: str = Field(description="Резюме звонка в 2-3 предложениях на русском")
     red_flags: list[str] = Field(description="Список нарушений/красных флагов")
     target_status: TargetStatus = Field(
-        description="Целевой ли клиент по итогам звонка"
+        description="Клиент ли на линии: «целевой» — реальный клиент-покупатель "
+        "(даже если отказался/плохой лид), «нецелевой» — не клиент "
+        "(риэлтор/HR/спам/не туда), «неясно» — не определить. НЕ о качестве лида."
     )
     strengths: str = Field(description="Сильные стороны менеджера")
     growth_zone: str = Field(description="Зона роста менеджера")

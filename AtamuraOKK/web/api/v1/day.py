@@ -24,7 +24,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from loguru import logger
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from AtamuraOKK.bitrix import BitrixClient, BitrixError, crm_card_url
@@ -164,18 +164,32 @@ async def _audit_failed_items(
     A Postgres read of OKK's ``audit_verdicts`` (verdict = ``contradicted``), scoped
     to the manager by ``managers.bitrix_user_id``. Independent of the live Bitrix
     read, so the «Отказы не по делу» queue survives a Bitrix outage.
+
+    Reasons in ``companion_day_audit_hidden_reason_ids`` («Автодозвон») are audited
+    and stored but withheld here: their dial was the robot's, so a client who
+    answered is not a call the manager failed to make.
     """
+    hidden = [r for r in settings.companion_day_audit_hidden_reason_ids if r]
+    stmt = (
+        select(AuditVerdict)
+        .join(Manager, Manager.id == AuditVerdict.manager_id)
+        .where(
+            Manager.bitrix_user_id == bitrix_user_id,
+            AuditVerdict.verdict == "contradicted",
+        )
+    )
+    if hidden:
+        # NULL reason_id is «Не указана», never a hidden enum — keep it visible.
+        stmt = stmt.where(
+            or_(
+                AuditVerdict.reason_id.is_(None),
+                AuditVerdict.reason_id.not_in(hidden),
+            ),
+        )
     rows = (
         (
             await session.execute(
-                select(AuditVerdict)
-                .join(Manager, Manager.id == AuditVerdict.manager_id)
-                .where(
-                    Manager.bitrix_user_id == bitrix_user_id,
-                    AuditVerdict.verdict == "contradicted",
-                )
-                .order_by(AuditVerdict.audited_at.desc())
-                .limit(limit),
+                stmt.order_by(AuditVerdict.audited_at.desc()).limit(limit),
             )
         )
         .scalars()

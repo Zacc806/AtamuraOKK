@@ -51,6 +51,14 @@ and wrong-numbers are scored but **excluded** from averages/zones in the reports
 and dashboards (the report summarizes their count by `call_type`). The scorer also
 returns `manager_identified`.
 
+`is_qualification_call` is the **only** score gate. `target_status`
+(целевой/нецелевой/неясно) is informational — it records whether a real
+buyer-client was on the line, **not** lead quality — and does **not** exclude a
+call from the score. A genuine qualification call still counts when the client was
+a poor fit, refused, wanted something not on offer, or was non-committal (those
+are the manager's job to handle, so they belong in the score). Non-client callers
+are already filtered by `is_qualification_call` (`нецелевое_обращение`).
+
 Speaker labels are presented to the model **by audio channel, not role** (the
 Atamura manager is often on either channel), and the prompt has it identify the
 manager from content — fixing a class of mislabeled-speaker mis-scores.

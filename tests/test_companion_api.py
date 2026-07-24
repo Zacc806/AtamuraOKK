@@ -257,27 +257,40 @@ async def test_scorecard_excludes_non_qualification(
     assert body["okk"]["score_5"] == 3
 
 
-async def test_scorecard_excludes_non_target(
+async def test_scorecard_counts_non_target_qualification(
     client: AsyncClient,
     dbsession: AsyncSession,
     head_auth: dict[str, str],
 ) -> None:
-    """Non-target calls (нецелевой/неясно) don't count toward the ОКК score."""
+    """target_status doesn't gate the score; only non-qualification calls drop.
+
+    A real qualification call counts even when the client was judged нецелевой /
+    неясно — target_status is informational, not a score gate.
+    """
     mgr = await _seed_manager(dbsession, bitrix_user_id=505)
-    await _seed_scored_call(dbsession, bitrix_call_id="t1", manager=mgr, percent=80.0)
+    await _seed_scored_call(dbsession, bitrix_call_id="t1", manager=mgr, percent=90.0)
+    # Non-target but still a real client call → counts.
     await _seed_scored_call(
         dbsession,
         bitrix_call_id="n1",
         manager=mgr,
-        percent=10.0,
+        percent=70.0,
         target_status="нецелевой",
     )
     await _seed_scored_call(
         dbsession,
         bitrix_call_id="u1",
         manager=mgr,
-        percent=20.0,
+        percent=80.0,
         target_status="неясно",
+    )
+    # Not a qualification call (realtor/vendor/etc.) → excluded.
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="x1",
+        manager=mgr,
+        percent=10.0,
+        is_qual=False,
     )
 
     resp = await client.get(
@@ -285,8 +298,8 @@ async def test_scorecard_excludes_non_target(
         headers=head_auth,
     )
     body = resp.json()
-    assert body["calls_scored"] == 1  # only the целевой call counts
-    assert body["okk"]["percent"] == 80.0
+    assert body["calls_scored"] == 3  # all three qualification calls count
+    assert body["okk"]["percent"] == 80.0  # (90 + 70 + 80) / 3
 
 
 async def test_criteria_averages(
@@ -294,11 +307,12 @@ async def test_criteria_averages(
     dbsession: AsyncSession,
     head_auth: dict[str, str],
 ) -> None:
-    """Балл ОКК averages each criterion over целевые qual calls, skips others."""
+    """Балл ОКК averages each criterion over qual calls; non-qual skipped."""
     mgr = await _seed_manager(dbsession, bitrix_user_id=520)
-    # criterion 1 scores 4/5 on both → avg 4, 80%; non-target/reminder ignored.
+    # criterion 1 scores 4/5 on each qual call → avg 4, 80%; reminder ignored.
     await _seed_scored_call(dbsession, bitrix_call_id="a", manager=mgr, percent=80.0)
     await _seed_scored_call(dbsession, bitrix_call_id="b", manager=mgr, percent=80.0)
+    # Non-target but still a qualification call → counts.
     await _seed_scored_call(
         dbsession, bitrix_call_id="c", manager=mgr, percent=10.0,
         target_status="нецелевой",
@@ -313,9 +327,9 @@ async def test_criteria_averages(
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["calls_scored"] == 2
+    assert body["calls_scored"] == 3
     crit = {c["criterion_id"]: c for c in body["criteria"]}
-    assert crit[1]["count"] == 2
+    assert crit[1]["count"] == 3
     assert crit[1]["avg_score"] == 4.0
     assert crit[1]["avg_pct_of_max"] == 80.0
     assert crit[1]["max"] == 5.0
@@ -326,7 +340,7 @@ async def test_score_trend_buckets_recent_calls(
     dbsession: AsyncSession,
     head_auth: dict[str, str],
 ) -> None:
-    """Динамика buckets целевые calls by day over the trailing window."""
+    """Динамика buckets qualification calls by day over the trailing window."""
     mgr = await _seed_manager(dbsession, bitrix_user_id=521)
     today = datetime.now(tz=_TZ).replace(hour=12, minute=0, second=0, microsecond=0)
     await _seed_scored_call(
@@ -335,9 +349,10 @@ async def test_score_trend_buckets_recent_calls(
     await _seed_scored_call(
         dbsession, bitrix_call_id="t2", manager=mgr, percent=60.0, started_at=today,
     )
+    # Non-qualification call → excluded from the trend.
     await _seed_scored_call(
         dbsession, bitrix_call_id="t3", manager=mgr, percent=10.0,
-        target_status="нецелевой", started_at=today,
+        is_qual=False, started_at=today,
     )
 
     resp = await client.get(
@@ -348,7 +363,7 @@ async def test_score_trend_buckets_recent_calls(
     body = resp.json()
     assert body["bucket"] == "day"
     point = {p["bucket"]: p for p in body["points"]}[today.date().isoformat()]
-    assert point["calls"] == 2  # non-target excluded
+    assert point["calls"] == 2  # non-qualification excluded
     assert point["avg_percent"] == 70.0  # (80 + 60) / 2
 
 

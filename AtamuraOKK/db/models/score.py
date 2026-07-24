@@ -45,6 +45,10 @@ class Score(Base):
     # List of red-flag tags such as rudeness or missed compliance.
     flags: Mapped[list[Any] | None] = mapped_column(JSONB)
     model: Mapped[str | None] = mapped_column(String(length=128))
+    # Name the manager voiced when introducing themselves on the call, extracted by
+    # the scorer for reconciliation against the CRM-attributed manager. The Bitrix
+    # user id (calls.manager_id) stays authoritative; NULL = manager gave no name.
+    manager_spoken_name: Mapped[str | None] = mapped_column(String(length=255))
     # When a manager alert was sent for this score (cash-buyer Bitrix notification).
     # Deliberately NOT written by _persist_score, so it survives a re-score upsert
     # and a re-score never re-notifies. NULL = not yet notified / not applicable.

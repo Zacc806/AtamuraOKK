@@ -78,6 +78,7 @@ class FakeBitrix:
         self.due = due
         self.overdue = overdue
         self.seen: list[str] = []
+        self.deal_filters: list[dict[str, Any]] = []
 
     async def call_raw(
         self,
@@ -103,6 +104,7 @@ class FakeBitrix:
         self.seen.append(method)
         flt = (params or {}).get("filter") or {}
         if method == "crm.deal.list":
+            self.deal_filters.append(flt)
             wanted = flt.get("ID")  # _deal_titles narrows to a set of ids
             ids = {int(i) for i in wanted} if isinstance(wanted, list) else None
             for d in self._deals:
@@ -154,7 +156,7 @@ def test_statuses_splits_stale_from_maintained() -> None:
         },  # stale
         {"ID": "4", "TITLE": "Пустая", "LAST_ACTIVITY_TIME": None},  # none → stale
     ]
-    crit = hygiene._statuses(deals)
+    crit = hygiene._statuses(deals, _FUT_END)
     assert crit.status == "live"
     assert (crit.numerator, crit.denominator) == (2, 4)
     assert crit.pct == 50.0
@@ -172,7 +174,7 @@ def test_statuses_failed_list_is_capped(monkeypatch: pytest.MonkeyPatch) -> None
     deals = [
         {"ID": str(i), "LAST_ACTIVITY_TIME": _iso_days_ago(60)} for i in range(1, 6)
     ]
-    crit = hygiene._statuses(deals)
+    crit = hygiene._statuses(deals, _FUT_END)
     assert (crit.numerator, crit.denominator) == (0, 5)  # counts unaffected by the cap
     assert len(crit.failed_items) == 2
     assert crit.failed_truncated
@@ -180,14 +182,38 @@ def test_statuses_failed_list_is_capped(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_statuses_no_open_deals_is_not_available() -> None:
     """No open deals → nothing to measure, criterion is «нет данных»."""
-    crit = hygiene._statuses([])
+    crit = hygiene._statuses([], _FUT_END)
     assert crit.status == "not_available"
     assert crit.pct is None
 
 
 def test_statuses_bitrix_down_is_not_available() -> None:
     """A failed deal pull degrades the criterion, not the whole view."""
-    assert hygiene._statuses(None).status == "not_available"
+    assert hygiene._statuses(None, _FUT_END).status == "not_available"
+
+
+def test_statuses_closed_deal_is_never_stale() -> None:
+    """A card carried to won/lost was not left hanging, however old it now is."""
+    deals = [
+        {"ID": "1", "CLOSED": "Y", "LAST_ACTIVITY_TIME": _iso_days_ago(300)},
+        {"ID": "2", "CLOSED": "N", "LAST_ACTIVITY_TIME": _iso_days_ago(300)},
+    ]
+    crit = hygiene._statuses(deals, _FUT_END)
+    assert (crit.numerator, crit.denominator) == (1, 2)
+    assert {i.entity_id for i in crit.failed_items} == {2}
+
+
+def test_statuses_staleness_is_measured_at_period_end() -> None:
+    """For a past period the cutoff anchors to its end, not to today.
+
+    The card was touched the day before the period closed — fresh as of then, and
+    it must stay fresh however many months have since passed.
+    """
+    end = datetime.now(tz=_TZ) - timedelta(days=200)
+    deals = [{"ID": "1", "LAST_ACTIVITY_TIME": (end - timedelta(days=1)).isoformat()}]
+    crit = hygiene._statuses(deals, end)
+    assert (crit.numerator, crit.denominator) == (1, 1)
+    assert crit.failed_items == []
 
 
 # --- anketa (config-gated completeness) -------------------------------------
@@ -254,6 +280,22 @@ def test_anketa_without_qualified_deals_is_not_available(
     assert crit.pct is None
 
 
+def test_anketa_counts_won_deals_whatever_stage_they_now_carry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A won deal passed qualification, so it owes an анкета; a lost one is unknown."""
+    monkeypatch.setattr(settings, "companion_anketa_fields", ["UF_A"])
+    deals = [
+        {"ID": "1", "STAGE_ID": "C24:WON", "STAGE_SEMANTIC_ID": "S", "UF_A": "да"},
+        {"ID": "2", "STAGE_ID": "C24:WON", "STAGE_SEMANTIC_ID": "S", "UF_A": ""},
+        # lost at an unknown depth — current stage no longer says how far it got
+        {"ID": "3", "STAGE_ID": "C24:LOSE", "STAGE_SEMANTIC_ID": "F", "UF_A": ""},
+    ]
+    crit = hygiene._anketa(deals)
+    assert (crit.numerator, crit.denominator) == (1, 2)
+    assert [i.entity_id for i in crit.failed_items] == [2]
+
+
 # --- tasks_set (open deals carrying an open activity) ------------------------
 
 
@@ -281,6 +323,17 @@ def test_tasks_set_no_task_requiring_stage_is_not_available() -> None:
         {"ID": "2", "STAGE_ID": "C24:UC_LS7DKY"},  # Недозвон 2
     ]
     assert hygiene._tasks_set(deals, {1, 2}).status == "not_available"
+
+
+def test_tasks_set_excludes_closed_deals() -> None:
+    """A closed card owes no follow-up task, so it leaves the base entirely."""
+    deals = [
+        {"ID": "1", "STAGE_ID": "C24:UC_OPEENZ", "CLOSED": "N"},
+        {"ID": "2", "STAGE_ID": "C24:UC_OPEENZ", "CLOSED": "Y"},
+    ]
+    crit = hygiene._tasks_set(deals, set())
+    assert (crit.numerator, crit.denominator) == (0, 1)
+    assert [i.entity_id for i in crit.failed_items] == [1]
 
 
 def test_tasks_set_bitrix_down_is_not_available() -> None:
@@ -451,15 +504,17 @@ async def test_get_hygiene_overall_is_mean_of_live_criteria(
     monkeypatch.setattr(settings, "companion_anketa_fields", [])
     fake = FakeBitrix(
         deals=[
+            # staleness is judged as of the period's end (2020-02-01), so these
+            # timestamps sit inside/outside the window relative to *that*, not today
             {
                 "ID": "1",
                 "STAGE_ID": "C24:UC_OPEENZ",
-                "LAST_ACTIVITY_TIME": _iso_days_ago(1),
+                "LAST_ACTIVITY_TIME": "2020-01-31T10:00:00+05:00",
             },
             {
                 "ID": "2",
                 "STAGE_ID": "C24:PREPAYMENT_INVOIC",
-                "LAST_ACTIVITY_TIME": _iso_days_ago(99),
+                "LAST_ACTIVITY_TIME": "2019-06-01T10:00:00+05:00",
             },
         ],
         task_owners=[1, 2],  # both deals have an open task → tasks_set 100%
@@ -484,6 +539,66 @@ async def test_get_hygiene_overall_is_mean_of_live_criteria(
     assert by_key["notes"].pct == 100.0
     # mean of the four live criteria (50 + 100 + 75 + 100) / 4
     assert view.overall_pct == round((50 + 100 + 75 + 100) / 4, 1)
+
+
+async def test_get_hygiene_flags_a_truncated_deal_pull(
+    dbsession: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hitting the scan cap must be said out loud, not read as «посчитали всё»."""
+    monkeypatch.setattr(settings, "companion_hygiene_deals_max_scan", 2)
+    monkeypatch.setattr(settings, "companion_anketa_fields", ["UF_A"])
+    fake = FakeBitrix(
+        deals=[
+            {"ID": "1", "STAGE_ID": "C24:UC_OPEENZ", "LAST_ACTIVITY_TIME": None},
+            {"ID": "2", "STAGE_ID": "C24:UC_OPEENZ", "LAST_ACTIVITY_TIME": None},
+        ],
+        task_owners=[1, 2],
+    )
+    monkeypatch.setattr(hygiene, "BitrixClient", lambda: _FakeClientCtx(fake))
+
+    async def _ref(_session: Any, uid: int) -> ManagerRef:
+        return ManagerRef(bitrix_user_id=uid)
+
+    monkeypatch.setattr(day, "manager_ref", _ref)
+
+    view = await hygiene.get_hygiene(dbsession, 5, "2020-01")
+    by_key = {c.key: c for c in view.criteria}
+    assert "лимита выборки" in (by_key["statuses"].note or "")
+    assert "лимита выборки" in (by_key["tasks_set"].note or "")
+    # the period-windowed criteria read their own Bitrix calls — not truncated
+    assert "лимита выборки" not in (by_key["notes"].note or "")
+
+
+async def test_get_hygiene_scopes_the_deal_pull_to_the_period(
+    dbsession: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The card criteria read deals created in the period — not every open deal.
+
+    Regression: the pull used to filter on ``CLOSED: "N"`` alone, so statuses /
+    anketa / tasks_set returned byte-identical blocks for a week and for a month.
+    """
+    fake = FakeBitrix(deals=[], due=0, overdue=0)
+    monkeypatch.setattr(hygiene, "BitrixClient", lambda: _FakeClientCtx(fake))
+
+    async def _ref(_session: Any, uid: int) -> ManagerRef:
+        return ManagerRef(bitrix_user_id=uid)
+
+    monkeypatch.setattr(day, "manager_ref", _ref)
+
+    await hygiene.get_hygiene(dbsession, 5, "2020-01-06..2020-01-12")
+    week = fake.deal_filters[0]
+    assert week[">=DATE_CREATE"] == "2020-01-06T00:00:00+05:00"
+    assert week["<DATE_CREATE"] == "2020-01-13T00:00:00+05:00"  # upper day exclusive
+    assert "CLOSED" not in week  # closed cards stay in the base of a past period
+
+    fake.deal_filters.clear()
+    await hygiene.get_hygiene(dbsession, 5, "2020-01")
+    month = fake.deal_filters[0]
+    assert month[">=DATE_CREATE"] == "2020-01-01T00:00:00+05:00"
+    assert month["<DATE_CREATE"] == "2020-02-01T00:00:00+05:00"
+    assert month[">=DATE_CREATE"] != week[">=DATE_CREATE"]
 
 
 # --- endpoint scoping --------------------------------------------------------

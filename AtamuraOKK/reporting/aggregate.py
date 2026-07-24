@@ -75,8 +75,8 @@ class ReportData:
     managers: list[ManagerReport]
     weakest_criteria: list[CriterionStat]
     flagged: list[CallRow] = field(default_factory=list)
-    # Calls excluded from the score: non-target (нецелевой/неясно) + non-qualification
-    # (reminders/vendor/internal/…).
+    # Calls excluded from the score: non-qualification only
+    # (reminders/vendor/internal/…). Non-target client calls still count.
     n_excluded: int = 0
     excluded_by_type: dict[str, int] = field(default_factory=dict)
 
@@ -129,24 +129,19 @@ def _call_row(r: Any) -> CallRow:
 
 
 def _counts_in_score(r: Any) -> bool:
-    """A целевой qualification call counts toward the score (mirrors the read API).
+    """A genuine qualification call counts toward the score (mirrors the read API).
 
-    Non-target calls (нецелевой / неясно / unknown) are summarized as excluded.
+    ``target_status`` is informational (client-on-the-line vs not) and does NOT
+    gate the score; only non-qualification calls are excluded + summarized.
     """
-    return (
-        getattr(r, "is_qualification_call", None) is not False
-        and getattr(r, "target_status", None) == "целевой"
-    )
+    return getattr(r, "is_qualification_call", None) is not False
 
 
 def _excluded_label(c: CallRow) -> str:
     """Bucket for an excluded call in the report footnote.
 
-    A qualification call can be excluded only for being non-target, so label it
-    by целевой статус instead of «квалификация».
+    Only non-qualification calls are excluded now, so label by call type.
     """
-    if c.is_qualification_call:
-        return f"нецелевой ({c.target_status})"
     return c.call_type
 
 
@@ -174,14 +169,13 @@ async def aggregate_window(
                     "JOIN call_scores_latest cs ON cs.call_id = cl.call_id "
                     "WHERE cl.started_at >= :start AND cl.started_at < :end "
                     "AND cs.is_qualification_call IS NOT FALSE "
-                    "AND cs.target_status = 'целевой' "
                     "GROUP BY 1,2,3 ORDER BY avg_pct ASC LIMIT 6",
                 ),
                 {"start": start, "end": end},
             )
         ).all()
 
-    # Score only целевые qualification calls; the rest are excluded + summarized.
+    # Score every qualification call; non-qualification calls are excluded + summarized.
     qual_rows = [r for r in rows if _counts_in_score(r)]
     excluded = [r for r in rows if not _counts_in_score(r)]
     excluded_by_type = _count(
