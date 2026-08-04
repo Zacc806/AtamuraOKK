@@ -9,6 +9,7 @@ engine modules just import ``config as settings``.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -46,6 +47,15 @@ class MeetingScoringConfig(BaseSettings):
     score_retry_base_delay: float = 1.0
     score_max_transcript_chars: int = 24000
     score_script_version: str = ""  # sales-script id for deviation dim; empty = off
+    # Prompt caching (Anthropic only). The rubric framing is ~2.5k tokens and
+    # identical per rubric — ~40% of a typical request, served at ~0.1x once
+    # cached. Chunked meetings gain most: every chunk of one meeting re-sends the
+    # same framing back-to-back, so the cache always hits after the first.
+    score_prompt_cache: bool = True
+    # "1h" (2x write, survives a quiet hour) or "5m" (1.25x write). Meetings
+    # arrive in bursts a few times a day, so 1h keeps the entry alive across a
+    # whole pass; 5m would expire between bursts and make every request a write.
+    score_cache_ttl: Literal["5m", "1h"] = "1h"
 
     # Meeting chunking (long transcripts).
     score_meeting_rubric_version: str = "okk_meeting_v1"

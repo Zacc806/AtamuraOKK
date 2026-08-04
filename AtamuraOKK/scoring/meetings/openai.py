@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from AtamuraOKK.scoring.meetings.errors import ProviderUnavailableError, ScoringError
 from AtamuraOKK.scoring.meetings.llm import BaseLLMScorer
+from AtamuraOKK.scoring.meetings.prompts import MeetingPrompt
 from AtamuraOKK.scoring.meetings.rubric import Rubric
 from AtamuraOKK.scoring.meetings.script import Script
 
@@ -60,7 +61,7 @@ class OpenAIScorer(BaseLLMScorer):
             self._client = AsyncOpenAI(api_key=self._api_key)
         return self._client
 
-    async def _raw_complete(self, prompt: str) -> str:
+    async def _raw_complete(self, prompt: MeetingPrompt) -> str:
         from openai import (  # noqa: PLC0415
             APIConnectionError,
             APIStatusError,
@@ -73,7 +74,7 @@ class OpenAIScorer(BaseLLMScorer):
                 model=self.model,
                 temperature=0,
                 max_tokens=_MAX_OUTPUT_TOKENS,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": prompt.flat()}],
             )
         except RateLimitError as exc:
             # Out-of-credit ("insufficient_quota") is permanent, not a transient

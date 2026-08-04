@@ -1,6 +1,7 @@
 import enum
 from pathlib import Path
 from tempfile import gettempdir
+from typing import Literal
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -154,6 +155,23 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     anthropic_scoring_model: str = "claude-sonnet-4-6"
     anthropic_max_tokens: int = 8000
+    # Prompt caching. The system prompt + rendered checklist + tool schema are
+    # byte-identical for every call on a given rubric (~5.8k tokens, ~77% of the
+    # input), so one breakpoint after the checklist serves that prefix at ~0.1x.
+    anthropic_prompt_cache: bool = True
+    # Cache TTL: "1h" (2x write, survives a quiet hour) or "5m" (1.25x write).
+    # 1h is the safe default for this traffic shape — calls trickle in a few per
+    # hour, and a 5m entry would usually expire between them, turning every request
+    # into a cache *write* (1.25x) with no read. Prefer "5m" only for a dense
+    # backfill, where every request lands within the window anyway.
+    anthropic_cache_ttl: Literal["5m", "1h"] = "1h"
+    # Batch API for the non-urgent backlog: 50% off, results within 24h (usually
+    # much less). Not used for today's calls — the cash-buyer alert only fires
+    # within `cash_alert_max_age_minutes`, so those must stay on the realtime path.
+    anthropic_batch_enabled: bool = True
+    # Calls per submitted batch. The API allows 100k; this bounds how much work a
+    # single failed/expired batch puts back on the queue.
+    anthropic_batch_size: int = 500
     # When True (default), automatic scoring (dispatcher + legacy worker) only
     # claims calls that started *today* in the report timezone. Older TRANSCRIBED
     # calls accumulate and are scored on demand via `python -m AtamuraOKK.scoring

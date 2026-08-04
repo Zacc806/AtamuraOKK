@@ -117,6 +117,25 @@ async def test_claim_since_skips_older_calls(_seeded: None) -> None:
     assert all(statuses[i] == CallStatus.TRANSCRIBED for i in old)
 
 
+async def test_claim_until_skips_todays_calls(_seeded: None) -> None:
+    """``until`` is the batch path's guard: today's calls stay for the realtime path."""
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(hours=12)
+    today = await _seed(2, CallStatus.TRANSCRIBED, tag="today", started_at=now)
+    old = await _seed(
+        2, CallStatus.TRANSCRIBED, tag="old", started_at=now - timedelta(days=2)
+    )
+
+    claimed = await claim_ready(
+        CallStatus.TRANSCRIBED, CallStatus.SCORING, 10, until=cutoff
+    )
+
+    assert sorted(claimed) == sorted(old)
+    statuses = await _statuses(today + old)
+    assert all(statuses[i] == CallStatus.SCORING for i in old)
+    assert all(statuses[i] == CallStatus.TRANSCRIBED for i in today)
+
+
 async def test_reclaim_stale_reverts_old_claims(_seeded: None) -> None:
     """A claim older than the TTL reverts to its ready status; fresh ones don't."""
     [stale_id] = await _seed(1, CallStatus.TRANSCRIBING, tag="stale")

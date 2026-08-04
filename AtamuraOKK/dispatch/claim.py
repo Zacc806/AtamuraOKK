@@ -93,17 +93,22 @@ async def claim_ready(
     limit: int,
     *,
     since: datetime | None = None,
+    until: datetime | None = None,
 ) -> list[int]:
     """Atomically claim up to ``limit`` analyzable rows from ``src`` into ``dst``.
 
     Returns the ids of the rows this caller now owns. ``FOR UPDATE SKIP LOCKED``
-    guarantees concurrent callers receive disjoint sets. When ``since`` is given,
-    only rows whose ``started_at`` is at or after it are claimed (used to restrict
-    automatic scoring to today's calls).
+    guarantees concurrent callers receive disjoint sets. ``since`` / ``until`` bound
+    ``started_at``: ``since`` restricts automatic scoring to today's calls, and
+    ``until`` is its mirror for the batch path, which takes only the older backlog
+    so today's calls stay on the realtime path (the cash-buyer alert has a
+    ``cash_alert_max_age_minutes`` window that batch latency would miss).
     """
     conditions = [Call.status == src, Call.analyzable.is_(True)]
     if since is not None:
         conditions.append(Call.started_at >= since)
+    if until is not None:
+        conditions.append(Call.started_at < until)
     candidates = (
         select(Call.id)
         .where(*conditions)

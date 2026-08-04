@@ -9,13 +9,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from loguru import logger
+
+from AtamuraOKK.scoring.meetings.config import config
 from AtamuraOKK.scoring.meetings.errors import ProviderUnavailableError, ScoringError
 from AtamuraOKK.scoring.meetings.llm import BaseLLMScorer
+from AtamuraOKK.scoring.meetings.prompts import MeetingPrompt
 from AtamuraOKK.scoring.meetings.rubric import Rubric
 from AtamuraOKK.scoring.meetings.script import Script
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
+    from anthropic.types import TextBlockParam
 
 _HTTP_TOO_MANY = 429
 _HTTP_SERVER_ERROR = 500
@@ -59,7 +64,23 @@ class AnthropicScorer(BaseLLMScorer):
             self._client = AsyncAnthropic(api_key=self._api_key)
         return self._client
 
-    async def _raw_complete(self, prompt: str) -> str:
+    def _content(self, prompt: MeetingPrompt) -> list[TextBlockParam]:
+        """Prompt as content blocks, with the cache breakpoint after the framing.
+
+        The framing is ~2.5k tokens and identical for every meeting on this
+        rubric, so caching it serves ~40% of a typical request at ~0.1x. It clears
+        the 1024-token minimum comfortably; the transcript stays after the
+        breakpoint where it belongs.
+        """
+        framing: TextBlockParam = {"type": "text", "text": prompt.framing}
+        if config.score_prompt_cache:
+            framing["cache_control"] = {
+                "type": "ephemeral",
+                "ttl": config.score_cache_ttl,
+            }
+        return [framing, {"type": "text", "text": prompt.task}]
+
+    async def _raw_complete(self, prompt: MeetingPrompt) -> str:
         from anthropic import (  # noqa: PLC0415
             APIConnectionError,
             APIStatusError,
@@ -72,7 +93,7 @@ class AnthropicScorer(BaseLLMScorer):
                 model=self.model,
                 max_tokens=_MAX_OUTPUT_TOKENS,
                 temperature=0,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": self._content(prompt)}],
             )
         except (RateLimitError, APIConnectionError) as exc:
             raise ProviderUnavailableError(f"anthropic: {exc}") from exc
@@ -85,6 +106,14 @@ class AnthropicScorer(BaseLLMScorer):
                 raise ProviderUnavailableError(f"anthropic: {exc}") from exc
             raise ScoringError(f"anthropic: {exc}") from exc
 
+        if usage := getattr(resp, "usage", None):
+            logger.debug(
+                "meeting scoring usage: in={i} cache_write={w} cache_read={r} out={o}",
+                i=usage.input_tokens,
+                w=getattr(usage, "cache_creation_input_tokens", 0),
+                r=getattr(usage, "cache_read_input_tokens", 0),
+                o=usage.output_tokens,
+            )
         text = "".join(
             getattr(block, "text", "")
             for block in resp.content

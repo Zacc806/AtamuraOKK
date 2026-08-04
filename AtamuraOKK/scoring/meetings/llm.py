@@ -20,7 +20,7 @@ from AtamuraOKK.scoring.meetings.errors import (
     MalformedOutputError,
     ProviderUnavailableError,
 )
-from AtamuraOKK.scoring.meetings.prompts import build_prompt
+from AtamuraOKK.scoring.meetings.prompts import MeetingPrompt, build_prompt_parts
 from AtamuraOKK.scoring.meetings.result import assemble_score
 from AtamuraOKK.scoring.meetings.rubric import Rubric
 from AtamuraOKK.scoring.meetings.schema import parse_llm_json
@@ -54,8 +54,12 @@ class BaseLLMScorer(ABC):
         self.kev_bonus_points = kev_bonus_points
 
     @abstractmethod
-    async def _raw_complete(self, prompt: str) -> str:
+    async def _raw_complete(self, prompt: MeetingPrompt) -> str:
         """Send the prompt to the provider and return its raw text answer.
+
+        The prompt arrives split so a provider that supports prompt caching can
+        put a breakpoint between the two parts; one that doesn't calls
+        :meth:`~MeetingPrompt.flat`.
 
         :raises ProviderUnavailableError: on rate limit / network / 5xx.
         """
@@ -77,7 +81,7 @@ class BaseLLMScorer(ABC):
                 cap=self.max_transcript_chars,
                 cut=truncated_chars,
             )
-        prompt = build_prompt(
+        prompt = build_prompt_parts(
             self.rubric,
             text=cleaned,
             duration_sec=call.duration_sec,

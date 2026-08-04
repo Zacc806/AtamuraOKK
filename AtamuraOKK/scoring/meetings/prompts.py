@@ -8,11 +8,33 @@ adapts to ``rubric.context`` (ОП meeting by default).
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 
 from AtamuraOKK.scoring.meetings.rubric import Rubric
 from AtamuraOKK.scoring.meetings.script import Script
 
 _MEETING_CONTEXT = "op_meeting"
+
+
+@dataclass(frozen=True)
+class MeetingPrompt:
+    """The meeting prompt split at its cache boundary.
+
+    ``framing`` (rubric, red flags, script, output format, rules) is identical for
+    every meeting on a given rubric — ~2.5k tokens, roughly 40% of a typical
+    request — so a provider that supports prompt caching puts its breakpoint after
+    it. ``task`` carries everything per-meeting and must come last: the visit
+    context lives here rather than beside the checklist precisely because
+    ``visit_index`` varies, and a variable byte inside ``framing`` would give
+    repeat visits their own cache entry and halve the hit rate.
+    """
+
+    framing: str
+    task: str
+
+    def flat(self) -> str:
+        """The whole prompt as one string, for providers without caching."""
+        return f"{self.framing}\n\n{self.task}"
 
 
 def _objection_ids(rubric: Rubric) -> list[int]:
@@ -95,7 +117,27 @@ def build_prompt(
     script: Script | None = None,
     visit_index: int = 1,
 ) -> str:
-    """Build the scoring prompt for one call or ОП meeting.
+    """Build the scoring prompt as one flat string (see :func:`build_prompt_parts`)."""
+    return build_prompt_parts(
+        rubric,
+        text=text,
+        duration_sec=duration_sec,
+        max_chars=max_chars,
+        script=script,
+        visit_index=visit_index,
+    ).flat()
+
+
+def build_prompt_parts(
+    rubric: Rubric,
+    *,
+    text: str,
+    duration_sec: int,
+    max_chars: int,
+    script: Script | None = None,
+    visit_index: int = 1,
+) -> MeetingPrompt:
+    """Build the scoring prompt for one call or ОП meeting, split for caching.
 
     The framing (call vs meeting) is driven by ``rubric.context``: an
     ``op_meeting`` rubric (okk_meeting_v1) yields meeting wording, the
@@ -108,7 +150,7 @@ def build_prompt(
     :param max_chars: truncate the transcript to this many characters (cost guard).
     :param script: optional sales script to also measure adherence against.
     :param visit_index: client contact position (ТЗ 2.4); >1 adds repeat context.
-    :returns: the full prompt string.
+    :returns: the prompt split into its cacheable framing and per-meeting task.
     """
     is_meeting = rubric.context == _MEETING_CONTEXT
     unit = "встречу менеджера ОП" if is_meeting else "звонок менеджера"
@@ -164,7 +206,7 @@ def build_prompt(
         else []
     )
 
-    parts = [
+    framing = [
         "Ты эксперт отдела контроля качества компании Атамура Групп.",
         "",
         f"Оцени {unit} по чек-листу из {len(ai)} критериев.",
@@ -174,7 +216,6 @@ def build_prompt(
         "",
         *_type_section(is_meeting=is_meeting),
         "",
-        *_visit_section(visit_index, is_meeting=is_meeting),
         "ЧЕК-ЛИСТ:",
         criteria_desc,
         "",
@@ -212,10 +253,12 @@ def build_prompt(
         "скилы; если разметки нет — не выдумывай",
         *objection_rule,
         *script_rules,
-        "",
+    ]
+    task = [
+        *_visit_section(visit_index, is_meeting=is_meeting),
         f"{duration_label}: {duration_sec} секунд",
         "",
         "Транскрипция:",
         text[:max_chars],
     ]
-    return "\n".join(parts)
+    return MeetingPrompt(framing="\n".join(framing), task="\n".join(task))

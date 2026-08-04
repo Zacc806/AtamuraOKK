@@ -107,6 +107,76 @@ Anthropic-credit outage requeues thousands of FAILED rows back to `TRANSCRIBED`)
 from auto-draining credits. Set `ATAMURAOKK_SCORE_AUTO_TODAY_ONLY=false` to
 auto-score the full backlog again.
 
+## Cost structure and the three levers
+Measured over 200 real transcripts on `claude-sonnet-4-6`: input ~7.5k tokens
+(~5.8k of it the fixed prefix, ~1.7k the transcript), output ~5.2k tokens. **Output
+is ~78% of the bill** — the per-criterion text, not the transcript.
+
+| Lever | Where | Effect |
+|---|---|---|
+| Trimmed criterion text | `base.py` / `prompt.py` | `justification`/`evidence`/`recommendation` are requested **only** for failed elements (`score=0 && applicable=true`). A passing element's justification restates the checklist, and a Н.П. element is dropped by `_assemble` anyway, so both were pure spend. ~-26%. |
+| Prompt caching | `anthropic_scorer.build_request` | One `cache_control` breakpoint on the checklist block covers tools + system + checklist (~5.8k tokens, 77% of input) at ~0.1x. ~-16%. |
+| Batch API | `scoring/batch.py` | 50% off everything, for the backlog only. |
+
+Together ≈ **-70%** per call (≈$0.10 → ≈$0.03).
+
+The numeric score is unaffected by the first lever: `_assemble` reads only `score`
+and `applicable`. Reports and `call_criteria_latest` render text for failed
+criteria as before; passing criteria now carry empty strings.
+
+**Caching caveat.** `anthropic_cache_ttl` defaults to `1h` (2x write) rather than
+`5m` (1.25x write) because calls trickle in a few per hour — a 5-minute entry
+would usually expire between them, making every request a cache *write* with no
+read. Prefer `5m` only for a dense backfill. `ATAMURAOKK_ANTHROPIC_PROMPT_CACHE=false`
+turns it off entirely. Verify with the `scoring usage:` debug line
+(`cache_read` should dominate `cache_write` after the first call).
+
+## Batch scoring (the backlog)
+```bash
+python -m AtamuraOKK.scoring batch-submit --limit 1000   # claim + submit
+python -m AtamuraOKK.scoring batch-poll --wait           # drain until done
+```
+Half price, results usually well inside the 24h SLA. **Today's calls are excluded
+by default** (`claim_ready(..., until=report_today_start())`): the cash-buyer alert
+only fires within `cash_alert_max_age_minutes`, which batch latency would miss, so
+today stays on the realtime path. `--include-today` overrides at that cost.
+
+Submitted calls stay claimed (`SCORING`) for the batch's whole life — far past
+`claim_stale_seconds_score` — so `batch-poll` heartbeats their `claimed_at` on
+every pass. **Leave `batch-poll --wait` running after a submit**; if it stops, the
+heartbeat stops with it and the reconciler releases the calls on the normal TTL
+(correct, just wasted work). Batch state lives in `score_batches` (migration
+`d5e3f2b1a8c9`).
+
+Release semantics differ from the realtime path, deliberately: a rejected submit
+or a canceled/expired result goes back to `TRANSCRIBED` **without** burning a retry
+attempt (the model never saw the call, and the cause — credits, network — is shared
+across the whole chunk), while a per-request `errored` result fails normally so it
+can dead-letter.
+
+## ОП meeting scoring — same caching, different economics
+`scoring/meetings/` is a separate pipeline with its own prompt, so it got the same
+treatment where it applies. **Only caching does.** Its output carries no
+per-criterion text (`CriterionScore` there is `id/block/name/score/max_score`) and
+is capped at 1500 tokens, so lever 1 has nothing to trim; at ~400 meetings/month
+against ~3,000 calls, the batch machinery isn't worth its complexity either.
+
+`build_prompt_parts` splits the prompt into a cacheable `framing` (~2.5k tokens:
+rubric, red flags, script, output format, rules) and a per-meeting `task`
+(duration + transcript). `AnthropicScorer._content` puts the breakpoint between
+them; `build_prompt` still returns the flat string for the OpenAI transport.
+
+The split also fixed a live cache-defeating bug: the CRM visit context
+(«КОНТЕКСТ КЛИЕНТА … это N-й визит») was rendered **before** the checklist, so
+every repeat visit produced a different prefix. It now sits in `task`.
+
+Cacheable share is **39% of a typical request** (framing 2,455 tok vs a 3,828-tok
+transcript — measured over 218 stored transcripts averaging 9.5k chars), dropping
+to 20% for a meeting at the 24k-char cap. Chunked meetings gain most: each chunk
+re-sends the same framing back-to-back, so every chunk after the first is a hit.
+Knobs: `score_prompt_cache` (default on), `score_cache_ttl` (default `1h` — the
+worker processes meetings in bursts, and a 5m entry would expire between them).
+
 ## Validated live (13 Russian calls)
 Scores ranged **1–84%** with sound, well-calibrated judgments: a tile-factory
 vendor cold-call and "wrong number" calls scored ~0–1% (flagged non-target); an

@@ -4,6 +4,10 @@ Claude has no native "response_format=schema", so we get structured output by
 forcing a single tool call whose ``input_schema`` is the :class:`CallScore` JSON
 schema, then validate the tool input back into the model. Temperature 0 for
 consistent scoring.
+
+:func:`build_request` and :func:`parse_response` are shared with the Batch API
+path (``scoring/batch.py``) so both send byte-identical prompts — the batch path
+would otherwise miss the prompt cache the realtime path just wrote.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from loguru import logger
 
 from AtamuraOKK.scoring.base import CallScore
-from AtamuraOKK.scoring.prompt import build_messages
+from AtamuraOKK.scoring.prompt import build_prompt
 from AtamuraOKK.settings import settings
 
 if TYPE_CHECKING:
@@ -47,6 +51,76 @@ def _inline_defs(schema: dict[str, Any]) -> dict[str, Any]:
         return node
 
     return resolve(schema)
+
+
+def _tool() -> dict[str, Any]:
+    """The forced tool whose input schema *is* :class:`CallScore`."""
+    return {
+        "name": _TOOL_NAME,
+        "description": "Сохрани структурированную оценку звонка по чек-листу ОКК.",
+        "input_schema": _inline_defs(CallScore.model_json_schema()),
+    }
+
+
+def build_request(
+    *,
+    transcript: str,
+    rubric: Rubric,
+    direction: str,
+    client_category: str | None,
+    model: str,
+    max_tokens: int,
+) -> dict[str, Any]:
+    """Build the ``messages.create`` parameters for one call.
+
+    The cache breakpoint sits on the checklist block, which is the last of the
+    stable content: rendering order is tools -> system -> messages, so one
+    ``cache_control`` there covers the tool schema, the system prompt and the
+    checklist (~5.8k tokens) while the per-call transcript stays after it.
+    """
+    prompt = build_prompt(transcript, rubric, direction, client_category)
+    checklist: dict[str, Any] = {"type": "text", "text": prompt.checklist}
+    if settings.anthropic_prompt_cache:
+        checklist["cache_control"] = {
+            "type": "ephemeral",
+            "ttl": settings.anthropic_cache_ttl,
+        }
+    return {
+        "model": model,
+        "max_tokens": max_tokens,
+        "temperature": 0,
+        "system": prompt.system,
+        "messages": [
+            {
+                "role": "user",
+                "content": [checklist, {"type": "text", "text": prompt.task}],
+            },
+        ],
+        "tools": [_tool()],
+        "tool_choice": {"type": "tool", "name": _TOOL_NAME},
+    }
+
+
+def parse_response(content: list[Any], stop_reason: str | None) -> CallScore:
+    """Validate the forced tool call out of a Claude response.
+
+    A truncated response is rejected rather than parsed: the tool input would be
+    incomplete JSON, which either raises here or silently drops criteria that the
+    worker would then score 0, deflating the call.
+    """
+    if stop_reason == "max_tokens":
+        raise RuntimeError(
+            "Anthropic scoring truncated (stop_reason=max_tokens); "
+            "raise ATAMURAOKK_ANTHROPIC_MAX_TOKENS.",
+        )
+    for block in content:
+        if block.type == "tool_use" and block.name == _TOOL_NAME:
+            parsed = CallScore.model_validate(block.input)
+            logger.debug("Scored transcript: {n} criteria", n=len(parsed.criteria))
+            return parsed
+    raise RuntimeError(
+        f"Anthropic scorer returned no tool_use (stop_reason={stop_reason})",
+    )
 
 
 class AnthropicScorer:
@@ -83,39 +157,21 @@ class AnthropicScorer:
     ) -> CallScore:
         """Return the structured QA assessment for one call."""
         client = self._get_client()
-        messages = build_messages(transcript, rubric, direction, client_category)
-        system = next(m["content"] for m in messages if m["role"] == "system")
-        user_messages = [
-            {"role": m["role"], "content": m["content"]}
-            for m in messages
-            if m["role"] != "system"
-        ]
-        tool = {
-            "name": _TOOL_NAME,
-            "description": "Сохрани структурированную оценку звонка по чек-листу ОКК.",
-            "input_schema": _inline_defs(CallScore.model_json_schema()),
-        }
-        resp = await client.messages.create(  # type: ignore[call-overload]
+        params = build_request(
+            transcript=transcript,
+            rubric=rubric,
+            direction=direction,
+            client_category=client_category,
             model=self.model,
             max_tokens=settings.anthropic_max_tokens,
-            temperature=0,
-            system=system,
-            messages=user_messages,
-            tools=[tool],
-            tool_choice={"type": "tool", "name": _TOOL_NAME},
         )
-        if resp.stop_reason == "max_tokens":
-            # The tool input is truncated JSON; validating it would either raise or
-            # silently drop criteria (scored 0 downstream). Fail loudly to retry.
-            raise RuntimeError(
-                "Anthropic scoring truncated (stop_reason=max_tokens); "
-                "raise ATAMURAOKK_ANTHROPIC_MAX_TOKENS.",
+        resp = await client.messages.create(**params)  # type: ignore[call-overload]
+        if usage := getattr(resp, "usage", None):
+            logger.debug(
+                "scoring usage: in={i} cache_write={w} cache_read={r} out={o}",
+                i=usage.input_tokens,
+                w=getattr(usage, "cache_creation_input_tokens", 0),
+                r=getattr(usage, "cache_read_input_tokens", 0),
+                o=usage.output_tokens,
             )
-        for block in resp.content:
-            if block.type == "tool_use" and block.name == _TOOL_NAME:
-                parsed = CallScore.model_validate(block.input)
-                logger.debug("Scored transcript: {n} criteria", n=len(parsed.criteria))
-                return parsed
-        raise RuntimeError(
-            f"Anthropic scorer returned no tool_use (stop_reason={resp.stop_reason})",
-        )
+        return parse_response(resp.content, resp.stop_reason)

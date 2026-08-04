@@ -36,7 +36,16 @@ CallType = Literal[
 
 
 class CriterionScore(BaseModel):
-    """Binary verdict for one rubric element (ДА=1 / НЕТ=0 / Н.П.)."""
+    """Binary verdict for one rubric element (ДА=1 / НЕТ=0 / Н.П.).
+
+    The three text fields are the bulk of the model's output, and they only carry
+    information for a *failed* element: a passing element's justification restates
+    the checklist, and a Н.П. element is dropped from the payload entirely by
+    ``_assemble``. They are therefore requested only when ``score=0`` and
+    ``applicable=true`` and default to empty everywhere else — that is ~26% of the
+    per-call cost with no effect on the numeric score, which reads only ``score``
+    and ``applicable``.
+    """
 
     id: int = Field(description="Номер элемента из чек-листа")
     score: int = Field(
@@ -50,13 +59,23 @@ class CriterionScore(BaseModel):
         "Ставь false ТОЛЬКО когда в чек-листе для этого элемента указано условие "
         "Н.П. и оно выполняется.",
     )
-    justification: str = Field(description="Краткое обоснование оценки на русском")
+    justification: str = Field(
+        default="",
+        description="ТОЛЬКО при score=0 и applicable=true: краткое обоснование, "
+        "почему элемент не выполнен (на русском). При score=1 или applicable=false "
+        "верни пустую строку.",
+    )
     evidence: str = Field(
-        description="Цитата из разговора на языке оригинала (или пусто)"
+        default="",
+        description="ТОЛЬКО при score=0 и applicable=true: цитата из разговора на "
+        "языке оригинала, подтверждающая невыполнение (или пусто, если цитаты нет). "
+        "При score=1 или applicable=false верни пустую строку.",
     )
     recommendation: str = Field(
-        description="Конкретная рекомендация менеджеру: что улучшить по этому "
-        "критерию на следующем звонке (на русском)"
+        default="",
+        description="ТОЛЬКО при score=0 и applicable=true: конкретная рекомендация "
+        "менеджеру, что сделать иначе на следующем звонке (на русском). "
+        "При score=1 или applicable=false верни пустую строку.",
     )
 
 

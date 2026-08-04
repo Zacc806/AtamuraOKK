@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from AtamuraOKK.scoring.rubric import Rubric
 
 # Channel labels are by AUDIO CHANNEL, not by role — the manager is sometimes on
@@ -71,9 +73,13 @@ score=0 (НЕТ — не выполнен). Промежуточных балл�
 - Итоговый балл считает система: ДА ÷ (число применимых элементов) × 100 по всем \
 элементам (каждый элемент весит одинаково; блоки только группируют элементы). Тебе \
 считать его не нужно — верни только оценки по элементам.
-- Для каждого элемента дай justification (краткое обоснование, рус.), evidence \
-(цитата из разговора на языке оригинала или пусто) и recommendation (конкретная \
-рекомендация менеджеру: что улучшить по этому элементу на следующем звонке, рус.).
+- Текстовые поля заполняй ТОЛЬКО у невыполненных элементов (score=0 и \
+applicable=true): justification (кратко, почему не выполнен, рус.), evidence \
+(цитата из разговора на языке оригинала или пусто) и recommendation (что сделать \
+иначе на следующем звонке, рус.). Для элементов со score=1 и для Н.П. \
+(applicable=false) верни во всех трёх полях пустую строку "" — обоснование \
+выполненного элемента и так очевидно из чек-листа, а Н.П. в отчёт не попадает. \
+Это экономит вывод; на итоговый балл текст не влияет.
 - Название компании часто искажается распознаванием речи (Yandex STT не знает \
 бренд): «амбра групп», «атом рок групп», «от умра групп», «отобрал групп», \
 «атом раб ру», «тамрақ...», «атамұра групп» и т.п. — это одно и то же «ATAMURA \
@@ -131,11 +137,66 @@ def _checklist(rubric: Rubric) -> str:
                 parts.append(f"ДА(1): {c.yes_rule}")
             if c.no_rule:
                 parts.append(f"НЕТ(0): {c.no_rule}")
-            parts.append(
-                f"Н.П.: {c.na_rule}" if c.na_rule else "Н.П.: не применяется"
-            )
+            parts.append(f"Н.П.: {c.na_rule}" if c.na_rule else "Н.П.: не применяется")
             lines.append(" — ".join(parts))
     return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class ScoringPrompt:
+    """The scoring prompt split at its cache boundary.
+
+    ``system`` + ``checklist`` are byte-identical for every call on a given rubric
+    (~5.8k tokens, 77% of the input), so a provider that supports prompt caching
+    puts its breakpoint after ``checklist`` and pays ~0.1x for that prefix on every
+    subsequent call. ``task`` holds everything that varies per call and must
+    therefore come last — any variable byte placed before the breakpoint would
+    invalidate the whole cached prefix.
+    """
+
+    system: str
+    checklist: str
+    task: str
+
+    def user_text(self) -> str:
+        """The two user parts joined, for providers without prompt caching."""
+        return f"{self.checklist}\n\n{self.task}"
+
+
+def build_prompt(
+    transcript: str,
+    rubric: Rubric,
+    direction: str,
+    client_category: str | None = None,
+) -> ScoringPrompt:
+    """Build the scoring prompt, split into its stable and per-call parts.
+
+    ``client_category`` is accepted for interface compatibility but the v4 rubric
+    does not re-weight by lead category (the sheet handles edge cases via
+    per-element Н.П.), so it does not affect the checklist.
+    """
+    direction_ru = {
+        "outbound": "исходящий (компания звонит клиенту)",
+        "inbound": "входящий (звонят в компанию)",
+    }.get(direction, "направление неизвестно")
+
+    checklist = (
+        "ЧЕК-ЛИСТ (по каждому элементу поставь score 0/1 и applicable):\n"
+        f"{_checklist(rubric)}"
+    )
+    task = (
+        f"Направление звонка: {direction_ru}.\n\n"
+        f"ТРАНСКРИПТ ЗВОНКА:\n{present_transcript(transcript)}\n\n"
+        "Верни строго по схеме: call_type, is_qualification_call, "
+        "manager_identified, manager_side, manager_spoken_name, массив criteria "
+        "{id, score, applicable, justification, evidence, recommendation} "
+        "для КАЖДОГО элемента чек-листа, objections_present, тональности, резюме, "
+        "красные флаги, целевой статус, сильные стороны, зону роста, "
+        "рекомендацию по обучению, payment_method, wants_to_visit, on_premises. "
+        "Напоминание: justification/evidence/recommendation заполняй только у "
+        "элементов со score=0 и applicable=true, у остальных — пустые строки."
+    )
+    return ScoringPrompt(system=_SYSTEM, checklist=checklist, task=task)
 
 
 def build_messages(
@@ -144,32 +205,9 @@ def build_messages(
     direction: str,
     client_category: str | None = None,
 ) -> list[dict[str, str]]:
-    """Return chat messages for the scorer.
-
-    ``client_category`` is accepted for interface compatibility but the v4 rubric
-    does not re-weight by lead category (the sheet handles edge cases via
-    per-element Н.П.), so it does not affect the checklist.
-    """
-    checklist = _checklist(rubric)
-
-    direction_ru = {
-        "outbound": "исходящий (компания звонит клиенту)",
-        "inbound": "входящий (звонят в компанию)",
-    }.get(direction, "направление неизвестно")
-
-    user = (
-        f"Направление звонка: {direction_ru}.\n\n"
-        f"ЧЕК-ЛИСТ (по каждому элементу поставь score 0/1 и applicable):\n"
-        f"{checklist}\n\n"
-        f"ТРАНСКРИПТ ЗВОНКА:\n{present_transcript(transcript)}\n\n"
-        "Верни строго по схеме: call_type, is_qualification_call, "
-        "manager_identified, manager_side, manager_spoken_name, массив criteria "
-        "{id, score, applicable, justification, evidence, recommendation} "
-        "для КАЖДОГО элемента выше, objections_present, тональности, резюме, "
-        "красные флаги, целевой статус, сильные стороны, зону роста, "
-        "рекомендацию по обучению, payment_method, wants_to_visit, on_premises."
-    )
+    """Return flat chat messages for scorers without prompt caching (OpenAI)."""
+    prompt = build_prompt(transcript, rubric, direction, client_category)
     return [
-        {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": user},
+        {"role": "system", "content": prompt.system},
+        {"role": "user", "content": prompt.user_text()},
     ]
