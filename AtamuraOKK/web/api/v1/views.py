@@ -19,7 +19,7 @@ from __future__ import annotations
 import secrets
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -28,7 +28,7 @@ from AtamuraOKK.db.models.companion_user import CompanionUser
 from AtamuraOKK.db.models.department import Department
 from AtamuraOKK.db.models.enums import CompanionRole
 from AtamuraOKK.db.models.manager import Manager
-from AtamuraOKK.web.api.v1 import analytics, day, hygiene, service
+from AtamuraOKK.web.api.v1 import analytics, day, export, hygiene, service
 from AtamuraOKK.web.api.v1.auth import (
     CompanionIdentity,
     ensure_access_admin,
@@ -349,6 +349,44 @@ async def team_summary(
     if summary is None:
         raise HTTPException(status_code=404, detail="Department not found.")
     return summary
+
+
+@router.get(
+    "/teams/{department_id}/export.xlsx",
+    response_class=Response,
+    tags=["companion"],
+)
+async def team_export_xlsx(
+    department_id: int,
+    period: str | None = Query(
+        default=None,
+        description="YYYY-MM (month), YYYY-MM-DD..YYYY-MM-DD (week) or "
+        "YYYY-MM-DD (day); default current month",
+    ),
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """РОП-выгрузка: one row per scored item (менеджер · дата+время · оценка).
+
+    Head-scoped like the team summary. The department decides what is exported:
+    ТМ → scored calls, a meeting office → scored meetings.
+    """
+    ensure_head(identity, department_id)
+    try:
+        data = await export.get_team_export(session, department_id, period)
+    except PeriodError as exc:
+        raise _bad_period(exc) from exc
+    if data is None:
+        raise HTTPException(status_code=404, detail="Department not found.")
+    return Response(
+        content=export.build_workbook(data),
+        media_type=export.CONTENT_TYPE,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{export.filename_for(data)}"'
+            ),
+        },
+    )
 
 
 @router.get(

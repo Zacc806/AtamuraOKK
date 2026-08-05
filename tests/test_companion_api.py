@@ -13,15 +13,18 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
+from io import BytesIO
 from typing import Any, Self
 from zoneinfo import ZoneInfo
 
 import pytest
 from httpx import AsyncClient
+from openpyxl import load_workbook
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from AtamuraOKK.bitrix import BitrixError
+from AtamuraOKK.db.models.appeal import APPEAL_ACCEPTED, Appeal
 from AtamuraOKK.db.models.call import Call
 from AtamuraOKK.db.models.companion_user import CompanionUser
 from AtamuraOKK.db.models.department import Department
@@ -314,11 +317,18 @@ async def test_criteria_averages(
     await _seed_scored_call(dbsession, bitrix_call_id="b", manager=mgr, percent=80.0)
     # Non-target but still a qualification call → counts.
     await _seed_scored_call(
-        dbsession, bitrix_call_id="c", manager=mgr, percent=10.0,
+        dbsession,
+        bitrix_call_id="c",
+        manager=mgr,
+        percent=10.0,
         target_status="нецелевой",
     )
     await _seed_scored_call(
-        dbsession, bitrix_call_id="d", manager=mgr, percent=10.0, is_qual=False,
+        dbsession,
+        bitrix_call_id="d",
+        manager=mgr,
+        percent=10.0,
+        is_qual=False,
     )
 
     resp = await client.get(
@@ -344,15 +354,27 @@ async def test_score_trend_buckets_recent_calls(
     mgr = await _seed_manager(dbsession, bitrix_user_id=521)
     today = datetime.now(tz=_TZ).replace(hour=12, minute=0, second=0, microsecond=0)
     await _seed_scored_call(
-        dbsession, bitrix_call_id="t1", manager=mgr, percent=80.0, started_at=today,
+        dbsession,
+        bitrix_call_id="t1",
+        manager=mgr,
+        percent=80.0,
+        started_at=today,
     )
     await _seed_scored_call(
-        dbsession, bitrix_call_id="t2", manager=mgr, percent=60.0, started_at=today,
+        dbsession,
+        bitrix_call_id="t2",
+        manager=mgr,
+        percent=60.0,
+        started_at=today,
     )
     # Non-qualification call → excluded from the trend.
     await _seed_scored_call(
-        dbsession, bitrix_call_id="t3", manager=mgr, percent=10.0,
-        is_qual=False, started_at=today,
+        dbsession,
+        bitrix_call_id="t3",
+        manager=mgr,
+        percent=10.0,
+        is_qual=False,
+        started_at=today,
     )
 
     resp = await client.get(
@@ -375,22 +397,31 @@ async def test_score_trend_anchor_scrolls_window(
     """?anchor= ends the trailing window on a past day, surfacing older calls."""
     mgr = await _seed_manager(dbsession, bitrix_user_id=523)
     old = datetime.now(tz=_TZ).replace(
-        hour=12, minute=0, second=0, microsecond=0,
+        hour=12,
+        minute=0,
+        second=0,
+        microsecond=0,
     ) - timedelta(days=40)
     await _seed_scored_call(
-        dbsession, bitrix_call_id="old1", manager=mgr, percent=90.0, started_at=old,
+        dbsession,
+        bitrix_call_id="old1",
+        manager=mgr,
+        percent=90.0,
+        started_at=old,
     )
     key = old.date().isoformat()
 
     # Default (today) window is the last 14 days — the 40-day-old call is absent.
     now_resp = await client.get(
-        "/api/v1/managers/523/score-trend?bucket=day", headers=head_auth,
+        "/api/v1/managers/523/score-trend?bucket=day",
+        headers=head_auth,
     )
     assert key not in {p["bucket"] for p in now_resp.json()["points"]}
 
     # Anchored on the old day, it falls inside the window.
     resp = await client.get(
-        f"/api/v1/managers/523/score-trend?bucket=day&anchor={key}", headers=head_auth,
+        f"/api/v1/managers/523/score-trend?bucket=day&anchor={key}",
+        headers=head_auth,
     )
     assert resp.status_code == 200
     point = {p["bucket"]: p for p in resp.json()["points"]}[key]
@@ -406,7 +437,8 @@ async def test_score_trend_bad_anchor_422(
     """A non-day anchor (month/range/garbage) is a 422."""
     await _seed_manager(dbsession, bitrix_user_id=524)
     resp = await client.get(
-        "/api/v1/managers/524/score-trend?bucket=day&anchor=2026-06", headers=head_auth,
+        "/api/v1/managers/524/score-trend?bucket=day&anchor=2026-06",
+        headers=head_auth,
     )
     assert resp.status_code == 422
 
@@ -1092,6 +1124,211 @@ async def test_team_summary_includes_meetings(
     assert by_uid[612]["meetings"]["meetings_scored"] == 1
     # Sorted by primary score: 88 (calls) before 80 (meetings).
     assert [m["manager"]["bitrix_user_id"] for m in body["roster"]] == [611, 612]
+
+
+# --- team Excel export -------------------------------------------------------
+
+
+def _sheet_rows(payload: bytes, title: str) -> list[list[Any]]:
+    """Read a sheet of the exported workbook back as plain rows."""
+    wb = load_workbook(BytesIO(payload))
+    return [list(row) for row in wb[title].iter_rows(values_only=True)]
+
+
+async def test_team_export_lists_calls_with_time_and_score(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """The РОП export carries one row per call: менеджер · дата+время · оценка."""
+    dept = Department(bitrix_id=settings.companion_tm_department_id, name="ТМ")
+    dbsession.add(dept)
+    await dbsession.flush()
+    mgr = await _seed_manager(
+        dbsession,
+        bitrix_user_id=801,
+        department=dept,
+        name="Айгуль",
+        last_name="Ким",
+    )
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="x1",
+        manager=mgr,
+        percent=92.0,
+        day=4,
+    )
+    # A reminder is exported too, but marked as not counting toward the ОКК.
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="x2",
+        manager=mgr,
+        percent=10.0,
+        day=5,
+        is_qual=False,
+    )
+
+    resp = await client.get(
+        f"/api/v1/teams/{settings.companion_tm_department_id}/export.xlsx"
+        f"?period={_PERIOD}",
+        headers=head_auth,
+    )
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument",
+    )
+    assert ".xlsx" in resp.headers["content-disposition"]
+
+    rows = _sheet_rows(resp.content, "Звонки")
+    assert rows[0][:5] == [
+        "Менеджер",
+        "Дата и время",
+        "Длительность",
+        "Тип звонка",
+        "Оценка, %",
+    ]
+    assert len(rows) == 3  # header + two calls
+    first = rows[1]
+    assert first[0] == "Айгуль Ким"
+    assert first[1] == datetime(2026, 3, 4, 12, 0)  # report tz, naive for Excel
+    assert first[2] == "2:00"
+    assert first[4] == 92.0
+    assert first[5] == 5  # ОКК 1–5
+    assert first[7] == "да"  # counts toward the score
+    assert rows[2][7] == "нет"  # the reminder does not
+
+    summary = _sheet_rows(resp.content, "Сводка")
+    assert summary[1][:4] == ["Айгуль Ким", 1, 92.0, 5]
+
+
+async def test_team_export_accepts_a_week(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """A week window (YYYY-MM-DD..YYYY-MM-DD) exports only that week's calls."""
+    dept = Department(bitrix_id=settings.companion_tm_department_id, name="ТМ")
+    dbsession.add(dept)
+    await dbsession.flush()
+    mgr = await _seed_manager(dbsession, bitrix_user_id=802, department=dept)
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="w1",
+        manager=mgr,
+        percent=90.0,
+        day=3,
+    )
+    await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="w2",
+        manager=mgr,
+        percent=70.0,
+        day=12,  # next week — out of the window
+    )
+
+    resp = await client.get(
+        f"/api/v1/teams/{settings.companion_tm_department_id}/export.xlsx"
+        "?period=2026-03-02..2026-03-08",
+        headers=head_auth,
+    )
+    assert resp.status_code == 200
+    rows = _sheet_rows(resp.content, "Звонки")
+    assert len(rows) == 2  # header + the one call inside the week
+    assert rows[1][4] == 90.0
+
+
+async def test_team_export_uses_meetings_for_a_meeting_office(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """A non-TM department exports its scored meetings instead of calls."""
+    dept = Department(bitrix_id=91, name="ОП Астана")
+    dbsession.add(dept)
+    await dbsession.flush()
+    mgr = await _seed_manager(dbsession, bitrix_user_id=803, department=dept)
+    await _seed_meeting(
+        dbsession,
+        bitrix_file_id=9101,
+        uploaded_by=803,
+        manager=mgr,
+        percent=82.0,
+        day=9,
+    )
+
+    resp = await client.get(
+        f"/api/v1/teams/91/export.xlsx?period={_PERIOD}",
+        headers=head_auth,
+    )
+    assert resp.status_code == 200
+    rows = _sheet_rows(resp.content, "Встречи")
+    assert len(rows) == 2
+    assert rows[1][0] == "Иван Петров"
+    assert rows[1][1] == datetime(2026, 3, 9, 12, 0)
+    assert rows[1][4] == 82.0
+    assert rows[1][5] == "сдано"
+
+
+async def test_team_export_reflects_appeal_override(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+) -> None:
+    """A corrected percent from an accepted appeal is what gets exported."""
+    dept = Department(bitrix_id=settings.companion_tm_department_id, name="ТМ")
+    dbsession.add(dept)
+    await dbsession.flush()
+    mgr = await _seed_manager(dbsession, bitrix_user_id=804, department=dept)
+    call = await _seed_scored_call(
+        dbsession,
+        bitrix_call_id="a1",
+        manager=mgr,
+        percent=70.0,
+    )
+    dbsession.add(
+        Appeal(
+            call_id=call.id,
+            manager_bitrix_user_id=804,
+            created_by_bitrix_user_id=804,
+            status=APPEAL_ACCEPTED,
+            override_percent=91.0,
+            reviewed_at=datetime(2026, 3, 16, 9, 0, tzinfo=_TZ),
+        ),
+    )
+    await dbsession.flush()
+
+    resp = await client.get(
+        f"/api/v1/teams/{settings.companion_tm_department_id}/export.xlsx"
+        f"?period={_PERIOD}",
+        headers=head_auth,
+    )
+    rows = _sheet_rows(resp.content, "Звонки")
+    assert rows[1][4] == 91.0
+    assert rows[1][5] == 5
+
+
+async def test_team_export_is_head_only_and_validates_input(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+    manager_auth: dict[str, str],
+) -> None:
+    """Manager → 403; unknown department → 404; malformed period → 422."""
+    dept = Department(bitrix_id=92, name="Отдел ТМ")
+    dbsession.add(dept)
+    await dbsession.flush()
+
+    forbidden = await client.get("/api/v1/teams/92/export.xlsx", headers=manager_auth)
+    assert forbidden.status_code == 403
+
+    missing = await client.get("/api/v1/teams/4242/export.xlsx", headers=head_auth)
+    assert missing.status_code == 404
+
+    bad = await client.get(
+        "/api/v1/teams/92/export.xlsx?period=2026-13",
+        headers=head_auth,
+    )
+    assert bad.status_code == 422
 
 
 # --- unified feed -----------------------------------------------------------
@@ -2451,9 +2688,7 @@ async def test_head_dismisses_red_flag_when_accepting_appeal(
     assert fb["red_flags"] == ["Обещал скидку без согласования"]
 
     # ...and from the manager's feed item for the same call.
-    feed = (
-        await client.get("/api/v1/managers/701/calls", headers=head_auth)
-    ).json()
+    feed = (await client.get("/api/v1/managers/701/calls", headers=head_auth)).json()
     item = next(c for c in feed if c["call_id"] == call.id)
     assert item["red_flags"] == ["Обещал скидку без согласования"]
 
