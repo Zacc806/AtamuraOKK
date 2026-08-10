@@ -63,9 +63,12 @@ from AtamuraOKK.web.api.v1.schemas import (
     ScoreTrendPoint,
     ScoreTrendView,
     SpokenName,
+    TaskCheckpoint,
     TeamGroupStats,
     TeamOverdueTasks,
     TeamSummary,
+    TeamTaskFlow,
+    TeamTaskFlowRow,
     TranscriptBlock,
 )
 
@@ -1766,6 +1769,25 @@ async def get_team_summary(
     )
 
 
+async def _roster_names(
+    session: AsyncSession,
+    department_id: int,
+) -> dict[int, str | None]:
+    """Bitrix user id -> display name for every manager mapped to a department."""
+    rows = (
+        await session.execute(
+            select(Manager.bitrix_user_id, Manager.name, Manager.last_name).where(
+                Manager.department_id == department_id,
+                Manager.bitrix_user_id.is_not(None),
+            ),
+        )
+    ).all()
+    return {
+        r.bitrix_user_id: " ".join(p for p in (r.name, r.last_name) if p) or None
+        for r in rows
+    }
+
+
 async def get_team_overdue_tasks(
     session: AsyncSession,
     department_bitrix_id: int,
@@ -1785,18 +1807,7 @@ async def get_team_overdue_tasks(
         return None
 
     cap = limit or settings.companion_overdue_max_items
-    rows = (
-        await session.execute(
-            select(Manager.bitrix_user_id, Manager.name, Manager.last_name).where(
-                Manager.department_id == department.id,
-                Manager.bitrix_user_id.is_not(None),
-            ),
-        )
-    ).all()
-    names: dict[int, str | None] = {
-        r.bitrix_user_id: " ".join(p for p in (r.name, r.last_name) if p) or None
-        for r in rows
-    }
+    names = await _roster_names(session, department.id)
 
     now = datetime.now(tz=ZoneInfo(settings.report_timezone))
     tasks: list[Any] = []
@@ -1827,6 +1838,117 @@ async def get_team_overdue_tasks(
         truncated=truncated,
         tasks=tasks,
     )
+
+
+# (dept bitrix id, day label, elapsed checkpoint count) -> (expiry, view). The
+# elapsed count is in the key so a view cached before a checkpoint can't hide the
+# column that just arrived.
+_task_flow_cache: dict[tuple[int, str, int], tuple[float, TeamTaskFlow]] = {}
+
+
+async def get_team_task_flow(
+    session: AsyncSession,
+    department_bitrix_id: int,
+    date: str | None = None,
+) -> TeamTaskFlow | None:
+    """РОП «Задачи за день»: остаток дел на 10/14/18, новые задачи, время на линии.
+
+    Live read-through to Bitrix over the department's roster, for ``date``
+    (YYYY-MM-DD, default today). Checkpoints that the day hasn't reached yet come
+    back as ``null`` — the ranking is by the latest one that has. Returns ``None``
+    when the department is unknown; ``data_ready=False`` when Bitrix is
+    unreadable, so the cabinet shows «нет связи» instead of a table of zeros.
+    """
+    department = await session.scalar(
+        select(Department).where(Department.bitrix_id == department_bitrix_id),
+    )
+    if department is None:
+        return None
+
+    day_start, day_end, day_label = day.day_window(date)
+    tz = ZoneInfo(settings.report_timezone)
+    now = datetime.now(tz=tz)
+    checkpoints = [
+        day_start.replace(hour=h)
+        for h in sorted(settings.companion_task_checkpoints)
+        if day_start.replace(hour=h) <= now
+    ]
+    cache_key = (department_bitrix_id, day_label, len(checkpoints))
+    hit = _task_flow_cache.get(cache_key)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+
+    names = await _roster_names(session, department.id)
+    counts: dict[int, day.TaskFlowCounts] = {}
+    truncated = False
+    data_ready = True
+    try:
+        async with BitrixClient() as bx:
+            counts, truncated = await day.team_task_flow(
+                bx,
+                sorted(names),
+                day_start,
+                day_end,
+                checkpoints,
+                settings.companion_task_flow_max_scan,
+            )
+    except BitrixError as exc:
+        data_ready = False
+        logger.warning(
+            "Team task-flow Bitrix read failed for dept {d}: {e}",
+            d=department_bitrix_id,
+            e=exc,
+        )
+
+    hours = [cp.hour for cp in checkpoints]
+    all_hours = sorted(settings.companion_task_checkpoints)
+    rows = [
+        TeamTaskFlowRow(
+            manager=ManagerRef(
+                bitrix_user_id=uid,
+                name=names.get(uid),
+                department_id=department_bitrix_id,
+                department_name=department.name,
+            ),
+            checkpoints=[
+                TaskCheckpoint(
+                    hour=h,
+                    open_tasks=row.open_at.get(h) if h in hours else None,
+                )
+                for h in all_hours
+            ],
+            created=row.created,
+            talk_seconds=row.talk_seconds,
+        )
+        for uid, row in counts.items()
+    ]
+    # Кто хуже разгрёб день — наверх: остаток на последнем состоявшемся срезе.
+    last_hour = hours[-1] if hours else None
+
+    def _rank(row: TeamTaskFlowRow) -> tuple[int, int, str]:
+        left = next(
+            (c.open_tasks for c in row.checkpoints if c.hour == last_hour),
+            None,
+        )
+        return -(left or 0), -row.created, (row.manager.name or "").lower()
+
+    rows.sort(key=_rank)
+
+    view = TeamTaskFlow(
+        department=DepartmentRef(
+            bitrix_id=department_bitrix_id,
+            name=department.name,
+        ),
+        date=day_start.date().isoformat(),
+        checkpoint_hours=all_hours,
+        rows=rows,
+        truncated=truncated,
+        data_ready=data_ready,
+    )
+    if data_ready:
+        expiry = time.monotonic() + settings.companion_task_flow_cache_ttl_seconds
+        _task_flow_cache[cache_key] = (expiry, view)
+    return view
 
 
 def _rubric_view(rv: RubricVersion) -> RubricView:

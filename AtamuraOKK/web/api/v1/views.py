@@ -66,6 +66,7 @@ from AtamuraOKK.web.api.v1.schemas import (
     ScoreTrendView,
     TeamOverdueTasks,
     TeamSummary,
+    TeamTaskFlow,
 )
 
 router = APIRouter(dependencies=[Depends(require_companion_token)])
@@ -410,6 +411,37 @@ async def team_overdue_tasks(
     if tasks is None:
         raise HTTPException(status_code=404, detail="Department not found.")
     return tasks
+
+
+@router.get(
+    "/teams/{department_id}/task-flow",
+    response_model=TeamTaskFlow,
+    tags=["companion"],
+)
+async def team_task_flow(
+    department_id: int,
+    date: str | None = Query(
+        default=None,
+        description="YYYY-MM-DD; default today",
+    ),
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> TeamTaskFlow:
+    """РОП «Задачи за день»: остаток дел на 10/14/18, новые задачи, время на линии.
+
+    One row per team member for a single day, live from Bitrix. The checkpoint
+    counts are reconstructed (created-before / closed-after), not snapshotted;
+    checkpoints the day hasn't reached yet come back null. Head-scoped like the
+    team summary: global head, or the department's own РОП.
+    """
+    ensure_head(identity, department_id)
+    try:
+        flow = await service.get_team_task_flow(session, department_id, date)
+    except PeriodError as exc:
+        raise _bad_period(exc) from exc
+    if flow is None:
+        raise HTTPException(status_code=404, detail="Department not found.")
+    return flow
 
 
 @router.get(

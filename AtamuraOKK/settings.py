@@ -384,6 +384,12 @@ class Settings(BaseSettings):
     # РОП «Просроченные задачи» — cap on the team-wide overdue-task list so a
     # long-neglected team can't return an unbounded page (oldest-due first).
     companion_overdue_max_items: int = 200
+    # РОП «Задачи за день»: часы (в report_timezone), на которые снимается
+    # остаток дел, — планёрочные точки контроля. `max_scan` бьёт по каждому из
+    # трёх сканов дня, чтобы аномальный объём не подвесил вид (флаг truncated).
+    companion_task_checkpoints: list[int] = [10, 14, 18]
+    companion_task_flow_max_scan: int = 3000
+    companion_task_flow_cache_ttl_seconds: int = 300
     # "Важные цифры дня" (today block on /day). The Zvandau stage a deal enters
     # when the manager books a meeting ("Записан на встречу в ОП") — counted via
     # stage history for "назначено сегодня". Call-activity TYPE_ID (Bitrix: 2 =

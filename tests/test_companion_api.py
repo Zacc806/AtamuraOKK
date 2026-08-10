@@ -35,7 +35,7 @@ from AtamuraOKK.db.models.rubric_version import RubricVersion
 from AtamuraOKK.db.models.score import Score
 from AtamuraOKK.db.models.transcript import Transcript
 from AtamuraOKK.settings import settings
-from AtamuraOKK.web.api.v1 import service
+from AtamuraOKK.web.api.v1 import day, service
 from AtamuraOKK.web.api.v1.auth import hash_key
 
 pytestmark = pytest.mark.anyio
@@ -1326,6 +1326,72 @@ async def test_team_export_is_head_only_and_validates_input(
 
     bad = await client.get(
         "/api/v1/teams/92/export.xlsx?period=2026-13",
+        headers=head_auth,
+    )
+    assert bad.status_code == 422
+
+
+# --- «Задачи за день» -------------------------------------------------------
+
+
+async def test_team_task_flow_returns_a_row_per_manager(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each roster member gets checkpoints; a срез not yet reached is null."""
+    dept = Department(bitrix_id=93, name="Отдел ТМ")
+    dbsession.add(dept)
+    await dbsession.flush()
+    await _seed_manager(dbsession, bitrix_user_id=911, department=dept, name="Асем")
+
+    counts = {911: day.TaskFlowCounts({10: 12, 14: 5}, created=7, talk_seconds=930)}
+
+    async def _fake_flow(*args: Any, **kwargs: Any) -> tuple[dict[int, Any], bool]:
+        return counts, False
+
+    monkeypatch.setattr(settings, "companion_task_checkpoints", [10, 14, 18])
+    monkeypatch.setattr(day, "team_task_flow", _fake_flow)
+
+    resp = await client.get(
+        "/api/v1/teams/93/task-flow?date=2026-03-16",
+        headers=head_auth,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["date"] == "2026-03-16"
+    assert body["checkpoint_hours"] == [10, 14, 18]
+    assert body["data_ready"] is True
+    row = body["rows"][0]
+    assert row["manager"]["bitrix_user_id"] == 911
+    assert row["checkpoints"] == [
+        {"hour": 10, "open_tasks": 12},
+        {"hour": 14, "open_tasks": 5},
+        {"hour": 18, "open_tasks": None},  # день до среза не дошёл — не ноль
+    ]
+    assert (row["created"], row["talk_seconds"]) == (7, 930)
+
+
+async def test_team_task_flow_is_head_only_and_validates_input(
+    client: AsyncClient,
+    dbsession: AsyncSession,
+    head_auth: dict[str, str],
+    manager_auth: dict[str, str],
+) -> None:
+    """Manager → 403; unknown department → 404; malformed date → 422."""
+    dept = Department(bitrix_id=94, name="Отдел ТМ")
+    dbsession.add(dept)
+    await dbsession.flush()
+
+    forbidden = await client.get("/api/v1/teams/94/task-flow", headers=manager_auth)
+    assert forbidden.status_code == 403
+
+    missing = await client.get("/api/v1/teams/4243/task-flow", headers=head_auth)
+    assert missing.status_code == 404
+
+    bad = await client.get(
+        "/api/v1/teams/94/task-flow?date=2026-03",
         headers=head_auth,
     )
     assert bad.status_code == 422

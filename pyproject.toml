@@ -188,6 +188,8 @@ line-length = 88
 "tests/test_companion_hygiene.py" = ["SLF001", "RUF001", "RUF002", "RUF003", "S105"]
 # White-box tests of day.team_overdue_tasks plus Russian manager-name fixtures.
 "tests/test_companion_overdue.py" = ["SLF001", "RUF001", "RUF002", "RUF003"]
+# White-box tests of day.team_task_flow (scan filters) plus Russian docstrings.
+"tests/test_companion_task_flow.py" = ["SLF001", "RUF001", "RUF002", "RUF003"]
 # Roster tests: Russian manager-name + spoken-name fixtures, white-box helpers.
 "tests/test_manager_roster.py" = ["SLF001", "RUF001", "RUF002", "RUF003"]
 # Ops scripts print to the operator's console by design.

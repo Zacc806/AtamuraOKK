@@ -794,6 +794,53 @@ class TeamOverdueTasks(BaseModel):
     tasks: list[OverdueTaskItem] = Field(default_factory=list)
 
 
+class TaskCheckpoint(BaseModel):
+    """Остаток дел у менеджера на один срез дня (10:00 / 14:00 / 18:00)."""
+
+    hour: int = Field(description="Checkpoint hour in the report timezone")
+    open_tasks: int | None = Field(
+        default=None,
+        description="Tasks still open at that hour; null when it hasn't arrived yet",
+    )
+
+
+class TeamTaskFlowRow(BaseModel):
+    """One manager's task day: остаток по срезам, новые задачи, время на линии."""
+
+    manager: ManagerRef
+    checkpoints: list[TaskCheckpoint] = Field(default_factory=list)
+    created: int = Field(
+        default=0,
+        description="Новых задач за день — tasks created that day (telephony excluded)",
+    )
+    talk_seconds: int = Field(
+        default=0,
+        description="Время на линии — answered-call talk seconds that day",
+    )
+
+
+class TeamTaskFlow(BaseModel):
+    """РОП-вид «Задачи за день»: как команда разгребает дела по срезам дня.
+
+    The checkpoint counts are reconstructed from Bitrix (created-before /
+    closed-after), not snapshotted — see ``day.team_task_flow``. Checkpoints that
+    haven't arrived yet carry ``open_tasks=null`` rather than a zero.
+    """
+
+    department: DepartmentRef
+    date: str = Field(description="The day these counts cover (YYYY-MM-DD)")
+    checkpoint_hours: list[int] = Field(default_factory=list)
+    rows: list[TeamTaskFlowRow] = Field(default_factory=list)
+    truncated: bool = Field(
+        default=False,
+        description="True when a scan hit its cap and the counts under-report",
+    )
+    data_ready: bool = Field(
+        default=True,
+        description="False when Bitrix was unreadable — show 'нет связи', not zeros",
+    )
+
+
 # --- Моя Аналитика (/analytics) ---------------------------------------------
 # Period analytics for one manager, live from Bitrix (stage history + activities
 # + telephony). Every block carries its own ``status`` so the cabinet can badge

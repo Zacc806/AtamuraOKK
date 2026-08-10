@@ -20,7 +20,7 @@ from __future__ import annotations
 import time
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
 from loguru import logger
@@ -72,6 +72,10 @@ _DEAL_OWNER_TYPE_ID = 2  # crm.activity.list OWNER_TYPE_ID for a deal
 # deadline-less activity, not an overdue task. The team overdue query floors on
 # it so no-deadline activities don't masquerade as maximally overdue.
 _DEADLINE_FLOOR = "2000-01-01T00:00:00"
+# Telephony auto-logs a *completed* activity for every call that happens (~85% of
+# the department's activity rows). Those are a call log, not tasks a manager works
+# off, so the «Задачи за день» scans exclude these providers.
+_TELEPHONY_PROVIDERS = ["VOXIMPLANT_CALL", "CRM_CALL"]
 # Hot pre-booking stages — a deal entering one of these is ripe to push to a
 # meeting ("дожать до встречи"). Derived from the signal map so it stays in sync.
 _HOT_STAGES = [stage for stage, sig in _STAGE_SIGNALS.items() if sig[1] == "hot"]
@@ -100,6 +104,14 @@ _cache: dict[tuple[int, str, str], tuple[float, DayView]] = {}
 # (distinct deals entering a stage per assignee, deals re-entering it 2+ times per
 # assignee) — what stage_outcomes_by_assignee returns.
 _StageOutcomes = tuple[dict[int, int], dict[int, int]]
+
+
+class TaskFlowCounts(NamedTuple):
+    """One manager's «Задачи за день»: остаток по срезам, новые, время на линии."""
+
+    open_at: dict[int, int]  # checkpoint hour -> tasks still open at that hour
+    created: int
+    talk_seconds: int
 
 
 def stage_label(stage_id: str) -> str | None:
@@ -970,6 +982,180 @@ async def team_overdue_tasks(
     return items, truncated
 
 
+async def _scan_activities(
+    bx: BitrixClient,
+    filter_: dict[str, Any],
+    select_: list[str],
+    max_scan: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Page an activity filter, capped; returns ``(rows, truncated)``."""
+    rows: list[dict[str, Any]] = []
+    async for row in bx.list(
+        "crm.activity.list",
+        {"filter": filter_, "select": select_},
+        max_items=max_scan + 1,  # one extra row just to detect truncation
+    ):
+        rows.append(row)
+    return rows[:max_scan], len(rows) > max_scan
+
+
+def _aware(value: Any, tz: ZoneInfo) -> datetime | None:
+    """Bitrix timestamp -> aware datetime (its own offset, else the report tz)."""
+    parsed = _parse_dt(value)
+    if parsed is None:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=tz)
+
+
+def _open_at_checkpoints(
+    still_open: Sequence[dict[str, Any]],
+    closed: Sequence[dict[str, Any]],
+    checkpoints: Sequence[datetime],
+    roster: set[int],
+    tz: ZoneInfo,
+) -> dict[int, dict[int, int]]:
+    """Per manager, how many of the day's tasks were open at each checkpoint.
+
+    A task counts at ``T`` when it was created before ``T`` and was either never
+    closed (``still_open``) or closed at/after it (``closed``, by LAST_UPDATED).
+    """
+    hours = [cp.hour for cp in checkpoints]
+    open_at = {uid: dict.fromkeys(hours, 0) for uid in roster}
+    for row in still_open:
+        uid = int(row.get("RESPONSIBLE_ID") or 0)
+        born = _aware(row.get("CREATED"), tz)
+        if uid not in roster or born is None:
+            continue
+        for cp in checkpoints:
+            if born < cp:
+                open_at[uid][cp.hour] += 1
+    for row in closed:
+        uid = int(row.get("RESPONSIBLE_ID") or 0)
+        born = _aware(row.get("CREATED"), tz)
+        shut = _aware(row.get("LAST_UPDATED"), tz)
+        if uid not in roster or born is None or shut is None:
+            continue
+        for cp in checkpoints:
+            if born < cp <= shut:
+                open_at[uid][cp.hour] += 1
+    return open_at
+
+
+async def team_task_flow(
+    bx: BitrixClient,
+    uids: Sequence[int],
+    day_start: datetime,
+    day_end: datetime,
+    checkpoints: Sequence[datetime],
+    max_scan: int,
+) -> tuple[dict[int, TaskFlowCounts], bool]:
+    """«Задачи за день»: остаток дел на каждый срез, новые за день, время на линии.
+
+    The checkpoint counts are *reconstructed*, since Bitrix keeps no history of
+    "how many were open at 10:00": a task was open at ``T`` when it was created
+    before ``T`` and either is still open, or was closed at/after ``T``. Closing
+    stamps ``LAST_UPDATED`` (verified against the underlying task's own
+    ``closedDate``), so that is the close time. The population is the day's
+    workload — tasks whose deadline falls on the day or has already passed
+    (просрочка), telephony auto-logs excluded. A task whose deadline was later
+    moved out of the window drops out of the whole row, so a heavily-rescheduled
+    day reads slightly low.
+
+    Three capped activity scans plus one telephony scan serve the entire team, so
+    the cost does not grow with roster size. Returns ``(counts by Bitrix user id,
+    truncated)``.
+    """
+    if not uids or not checkpoints:
+        return {}, False
+    tz = ZoneInfo(settings.report_timezone)
+    ids = sorted(uids)
+    roster = set(ids)
+    workload = {
+        "RESPONSIBLE_ID": ids,
+        "!PROVIDER_ID": _TELEPHONY_PROVIDERS,
+        ">=DEADLINE": _DEADLINE_FLOOR,
+        "<DEADLINE": day_end.isoformat(),
+    }
+    still_open, trunc_open = await _scan_activities(
+        bx,
+        {**workload, "COMPLETED": "N"},
+        ["ID", "RESPONSIBLE_ID", "CREATED"],
+        max_scan,
+    )
+    # Only tasks touched at/after the first checkpoint can have been open at one.
+    closed, trunc_closed = await _scan_activities(
+        bx,
+        {
+            **workload,
+            "COMPLETED": "Y",
+            ">=LAST_UPDATED": min(checkpoints).isoformat(),
+        },
+        ["ID", "RESPONSIBLE_ID", "CREATED", "LAST_UPDATED"],
+        max_scan,
+    )
+    created_today, trunc_created = await _scan_activities(
+        bx,
+        {
+            "RESPONSIBLE_ID": ids,
+            "!PROVIDER_ID": _TELEPHONY_PROVIDERS,
+            ">=CREATED": day_start.isoformat(),
+            "<CREATED": day_end.isoformat(),
+        },
+        ["ID", "RESPONSIBLE_ID"],
+        max_scan,
+    )
+    talk = await _talk_seconds_by_user(bx, ids, day_start, day_end)
+
+    open_at = _open_at_checkpoints(still_open, closed, checkpoints, roster, tz)
+    created_counts: dict[int, int] = dict.fromkeys(ids, 0)
+    for row in created_today:
+        uid = int(row.get("RESPONSIBLE_ID") or 0)
+        if uid in roster:
+            created_counts[uid] += 1
+
+    counts = {
+        uid: TaskFlowCounts(
+            open_at=open_at[uid],
+            created=created_counts[uid],
+            talk_seconds=talk.get(uid, 0),
+        )
+        for uid in ids
+    }
+    return counts, trunc_open or trunc_closed or trunc_created
+
+
+async def _talk_seconds_by_user(
+    bx: BitrixClient,
+    uids: Sequence[int],
+    start: datetime,
+    end: datetime,
+) -> dict[int, int]:
+    """Answered-call talk seconds per manager in the window (Bitrix telephony).
+
+    One paged ``voximplant.statistic.get`` serves the whole list of users, so a
+    team view costs the same round-trips as a single manager's.
+    """
+    totals: dict[int, int] = {}
+    if not uids:
+        return totals
+    async for row in bx.list(
+        "voximplant.statistic.get",
+        {
+            "FILTER": {
+                "PORTAL_USER_ID": sorted(uids),
+                ">=CALL_START_DATE": start.isoformat(),
+                "<CALL_START_DATE": end.isoformat(),
+            },
+            "ORDER": {"CALL_START_DATE": "ASC"},
+        },
+    ):
+        if row.get("CALL_FAILED_CODE") != settings.ingest_success_code:
+            continue
+        uid = int(row.get("PORTAL_USER_ID") or 0)
+        totals[uid] = totals.get(uid, 0) + int(row.get("CALL_DURATION") or 0)
+    return totals
+
+
 async def _talk_time_today(
     bx: BitrixClient,
     uid: int,
@@ -981,21 +1167,7 @@ async def _talk_time_today(
     Sums ``CALL_DURATION`` over the manager's answered calls (every call,
     analyzed or not), so it reflects real time on the phone.
     """
-    total = 0
-    async for row in bx.list(
-        "voximplant.statistic.get",
-        {
-            "FILTER": {
-                "PORTAL_USER_ID": uid,
-                ">=CALL_START_DATE": start.isoformat(),
-                "<CALL_START_DATE": end.isoformat(),
-            },
-            "ORDER": {"CALL_START_DATE": "ASC"},
-        },
-    ):
-        if row.get("CALL_FAILED_CODE") == settings.ingest_success_code:
-            total += int(row.get("CALL_DURATION") or 0)
-    return total
+    return (await _talk_seconds_by_user(bx, [uid], start, end)).get(uid, 0)
 
 
 async def _today_metrics(
@@ -1233,7 +1405,7 @@ def _build_actions(
     return actions
 
 
-def _day_window(date: str | None) -> tuple[datetime, datetime, str]:
+def day_window(date: str | None) -> tuple[datetime, datetime, str]:
     """«Важные цифры дня» window: today by default, or a single past ``date``.
 
     ``date`` must be a single ``YYYY-MM-DD`` day (not a month or a range) — the
@@ -1264,7 +1436,7 @@ async def get_day(
     The open-pipeline queues/actions are always the *current* pipeline.
     """
     start, end, label = okk.parse_period(period)
-    day_start, day_end, day_label = _day_window(date)
+    day_start, day_end, day_label = day_window(date)
     cache_key = (bitrix_user_id, label, day_label)
     hit = _cache.get(cache_key)
     if hit and hit[0] > time.monotonic():

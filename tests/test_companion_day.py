@@ -390,10 +390,11 @@ async def test_talk_time_sums_answered_only() -> None:
     """Время-на-линии sums CALL_DURATION of answered calls, skips failed ones."""
     bx = FakeTodayBitrix(
         calls=[
-            {"CALL_FAILED_CODE": "200", "CALL_DURATION": "120"},
-            {"CALL_FAILED_CODE": "200", "CALL_DURATION": 95},
-            {"CALL_FAILED_CODE": "304", "CALL_DURATION": "999"},  # not answered
-            {"CALL_FAILED_CODE": "200"},  # missing duration -> 0
+            {"PORTAL_USER_ID": "5", "CALL_FAILED_CODE": "200", "CALL_DURATION": "120"},
+            {"PORTAL_USER_ID": "5", "CALL_FAILED_CODE": "200", "CALL_DURATION": 95},
+            # not answered
+            {"PORTAL_USER_ID": "5", "CALL_FAILED_CODE": "304", "CALL_DURATION": "999"},
+            {"PORTAL_USER_ID": "5", "CALL_FAILED_CODE": "200"},  # no duration -> 0
         ],
     )
     start, end = day._today_window()
@@ -437,7 +438,9 @@ async def test_today_metrics_resilient_to_partial_failure() -> None:
     bx = FakeTodayBitrix(
         planned_total=8,
         overdue_total=3,
-        calls=[{"CALL_FAILED_CODE": "200", "CALL_DURATION": "60"}],
+        calls=[
+            {"PORTAL_USER_ID": "5", "CALL_FAILED_CODE": "200", "CALL_DURATION": "60"},
+        ],
         booked_deal_ids=[10],
         assignee_by_deal={10: "5"},
         fail_methods={"crm.activity.list"},  # planned + overdue reads fail
@@ -469,14 +472,14 @@ async def test_in_qual_counts_open_deals_at_qualified_stage() -> None:
 
 def test_day_window_defaults_to_today() -> None:
     """No ``date`` -> today's window, labelled so it never collides with a date."""
-    start, end, label = day._day_window(None)
+    start, end, label = day.day_window(None)
     assert label == "today"
     assert (start, end) == day._today_window()
 
 
 def test_day_window_parses_a_past_day() -> None:
     """A YYYY-MM-DD ``date`` -> that single day's window, labelled with the date."""
-    start, end, label = day._day_window("2026-06-15")
+    start, end, label = day.day_window("2026-06-15")
     assert label == "2026-06-15"
     assert start.date().isoformat() == "2026-06-15"
     assert (end - start).days == 1
@@ -488,7 +491,7 @@ def test_day_window_rejects_non_day_specs(bad: str) -> None:
     from AtamuraOKK.web.api.v1.okk import PeriodError
 
     with pytest.raises(PeriodError):
-        day._day_window(bad)
+        day.day_window(bad)
 
 
 async def test_overdue_tasks_future_day_is_zero() -> None:
