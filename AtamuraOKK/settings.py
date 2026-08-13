@@ -390,6 +390,13 @@ class Settings(BaseSettings):
     companion_task_checkpoints: list[int] = [10, 14, 18]
     companion_task_flow_max_scan: int = 3000
     companion_task_flow_cache_ttl_seconds: int = 300
+    # Excel-выгрузка «Задач за день» за день/неделю/месяц. Диапазон читается
+    # одним набором сканов на весь период (не по дню за раз), поэтому кап на скан
+    # выше дневного — иначе месяц упёрся бы в него и молча занизил числа. Кап на
+    # длину периода — предохранитель от `?period=2020-01-01..2026-01-01`: такой
+    # запрос отдаёт 422 вместо того, чтобы висеть минутами.
+    companion_task_flow_export_max_scan: int = 30000
+    companion_task_flow_export_max_days: int = 31
     # "Важные цифры дня" (today block on /day). The Zvandau stage a deal enters
     # when the manager books a meeting ("Записан на встречу в ОП") — counted via
     # stage history for "назначено сегодня". Call-activity TYPE_ID (Bitrix: 2 =

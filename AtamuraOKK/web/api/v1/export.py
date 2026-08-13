@@ -13,11 +13,12 @@ department exports whatever it produces: ТМ → calls, ОП-офис → meeti
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from loguru import logger
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -26,18 +27,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import text
 
-from AtamuraOKK.bitrix import crm_card_url
+from AtamuraOKK.bitrix import BitrixClient, BitrixError, crm_card_url
 from AtamuraOKK.db.models.department import Department
 from AtamuraOKK.db.models.manager import Manager
 from AtamuraOKK.db.models.meeting import Meeting
 from AtamuraOKK.settings import settings
-from AtamuraOKK.web.api.v1 import okk
+from AtamuraOKK.web.api.v1 import day, okk
 from AtamuraOKK.web.api.v1.service import (
     _apply_score_overrides,
     _counts_in_score,
     _full_name,
     _meetings_score_from,
     _okk_from_rows,
+    _roster_names,
 )
 
 CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -332,7 +334,10 @@ def build_workbook(export: TeamExport) -> bytes:
     summary_ws.append([])
     summary_ws.append(["Отдел", export.department_name])
     summary_ws.append(["Период", export.period])
+    return _to_bytes(wb)
 
+
+def _to_bytes(wb: Workbook) -> bytes:
     buffer = BytesIO()
     wb.save(buffer)
     return buffer.getvalue()
@@ -343,3 +348,249 @@ def filename_for(export: TeamExport) -> str:
     period = export.period.replace("..", "_")
     kind = "meetings" if export.kind == "meetings" else "calls"
     return f"okk-{kind}-dept{export.department_bitrix_id}-{period}.xlsx"
+
+
+# --- «Задачи за день» export --------------------------------------------------
+# The same table the Команда card shows, for a day / week / month. Unlike the
+# card (which is one day, live), the range is read in a single set of scans and
+# split per day — see ``day.team_task_flow_range`` for why that matters.
+
+
+@dataclass
+class TaskFlowExportRow:
+    """One manager on one day: остаток по срезам, новые, на линии, встречи."""
+
+    date: datetime
+    manager: str
+    open_at: dict[int, int | None]
+    created: int
+    talk_seconds: int
+    meetings_set: int | None
+
+
+@dataclass
+class TaskFlowExport:
+    """Everything the «Задачи за день» workbook needs."""
+
+    department_name: str
+    department_bitrix_id: int
+    period: str
+    checkpoint_hours: list[int]
+    rows: list[TaskFlowExportRow]
+    with_meetings: bool
+    truncated: bool
+    data_ready: bool
+
+
+def _export_days(start: datetime, end: datetime, tz: ZoneInfo) -> list[day.TaskFlowDay]:
+    """Split a period into days, each carrying only the срезы that have elapsed.
+
+    A future day, or today before its first срез, yields no checkpoints and is
+    dropped by the range read — the export then simply has no row for it, which
+    is honest: nothing has been measured yet.
+    """
+    now = datetime.now(tz=tz)
+    hours = sorted(settings.companion_task_checkpoints)
+    days: list[day.TaskFlowDay] = []
+    cursor = start
+    while cursor < end:
+        nxt = cursor + timedelta(days=1)
+        checkpoints = [
+            cp for cp in (cursor.replace(hour=h) for h in hours) if cp <= now
+        ]
+        if checkpoints:
+            days.append(day.TaskFlowDay(cursor, nxt, checkpoints))
+        cursor = nxt
+    return days
+
+
+async def get_task_flow_export(
+    session: AsyncSession,
+    department_bitrix_id: int,
+    period: str | None,
+) -> TaskFlowExport | None:
+    """Collect «Задачи за день» for every day of a period, or None if unknown.
+
+    ``period`` accepts everything ``okk.parse_period`` does — a single day, a
+    week (``YYYY-MM-DD..YYYY-MM-DD``) or a month. Longer than
+    ``companion_task_flow_export_max_days`` is refused as a period error rather
+    than left to run for minutes. ``data_ready=False`` means Bitrix was
+    unreadable and the caller should say so instead of shipping an empty sheet.
+    """
+    department = await session.scalar(
+        select(Department).where(Department.bitrix_id == department_bitrix_id),
+    )
+    if department is None:
+        return None
+
+    start, end, label = okk.parse_period(period)
+    span = (end - start).days
+    if span > settings.companion_task_flow_export_max_days:
+        raise okk.PeriodError(
+            f"period covers {span} days; the task-flow export allows at most "
+            f"{settings.companion_task_flow_export_max_days}",
+        )
+
+    tz = ZoneInfo(settings.report_timezone)
+    days = _export_days(start, end, tz)
+    names = await _roster_names(session, department.id)
+    with_meetings = department_bitrix_id == settings.companion_tm_department_id
+
+    per_day: dict[str, dict[int, day.TaskFlowCounts]] = {}
+    meetings: dict[str, dict[int, int]] = {}
+    truncated = False
+    data_ready = True
+    if days and names:
+        try:
+            async with BitrixClient() as bx:
+                per_day, truncated = await day.team_task_flow_range(
+                    bx,
+                    sorted(names),
+                    days,
+                    settings.companion_task_flow_export_max_scan,
+                )
+                if with_meetings:
+                    try:
+                        meetings = await day.stage_entrants_by_assignee_per_day(
+                            bx,
+                            settings.companion_meeting_set_stage_id,
+                            start,
+                            end,
+                        )
+                    except BitrixError as exc:
+                        logger.warning(
+                            "Task-flow export meetings read failed for dept {d}: {e}",
+                            d=department_bitrix_id,
+                            e=exc,
+                        )
+                        with_meetings = False
+        except BitrixError as exc:
+            data_ready = False
+            logger.warning(
+                "Task-flow export Bitrix read failed for dept {d}: {e}",
+                d=department_bitrix_id,
+                e=exc,
+            )
+
+    hours = sorted(settings.companion_task_checkpoints)
+    elapsed = {
+        d.start.date().isoformat(): {cp.hour for cp in d.checkpoints} for d in days
+    }
+    rows: list[TaskFlowExportRow] = []
+    for label_day in sorted(per_day):
+        counts = per_day[label_day]
+        seen = elapsed.get(label_day, set())
+        for uid in sorted(counts, key=lambda u: (names.get(u) or "").lower()):
+            row = counts[uid]
+            rows.append(
+                TaskFlowExportRow(
+                    date=datetime.fromisoformat(label_day),
+                    manager=names.get(uid) or f"ID {uid}",
+                    open_at={
+                        h: (row.open_at.get(h) if h in seen else None) for h in hours
+                    },
+                    created=row.created,
+                    talk_seconds=row.talk_seconds,
+                    meetings_set=(
+                        meetings.get(label_day, {}).get(uid, 0)
+                        if with_meetings
+                        else None
+                    ),
+                ),
+            )
+
+    return TaskFlowExport(
+        department_name=department.name or f"ID {department_bitrix_id}",
+        department_bitrix_id=department_bitrix_id,
+        period=label,
+        checkpoint_hours=hours,
+        rows=rows,
+        with_meetings=with_meetings,
+        truncated=truncated,
+        data_ready=data_ready,
+    )
+
+
+def _task_flow_columns(export: TaskFlowExport) -> tuple[tuple[str, int], ...]:
+    columns: list[tuple[str, int]] = [("Дата", 12), ("Менеджер", 28)]
+    columns += [(f"{h:02d}:00", 9) for h in export.checkpoint_hours]
+    columns += [("Новых", 9), ("На линии", 11)]
+    if export.with_meetings:
+        columns.append(("Встреч назн.", 13))
+    return tuple(columns)
+
+
+def _task_flow_summary(export: TaskFlowExport) -> list[list[Any]]:
+    """Per-manager rollup: средний остаток по срезам, суммы за период.
+
+    The checkpoint columns average over the days that actually have a number, so
+    a period containing today (whose 18:00 hasn't arrived) doesn't drag the mean
+    down with a missing срез counted as zero.
+    """
+    by_manager: dict[str, list[TaskFlowExportRow]] = {}
+    for row in export.rows:
+        by_manager.setdefault(row.manager, []).append(row)
+
+    summary: list[list[Any]] = []
+    for name, rows in by_manager.items():
+        line: list[Any] = [name, len(rows)]
+        for hour in export.checkpoint_hours:
+            seen = [n for n in (r.open_at.get(hour) for r in rows) if n is not None]
+            line.append(round(sum(seen) / len(seen), 1) if seen else None)
+        line.append(sum(r.created for r in rows))
+        line.append(_duration(sum(r.talk_seconds for r in rows)))
+        if export.with_meetings:
+            line.append(sum(r.meetings_set or 0 for r in rows))
+        summary.append(line)
+    # Кто хуже разгребает — сверху: по среднему остатку на последнем срезе.
+    last = len(export.checkpoint_hours) + 1
+    summary.sort(key=lambda line: -(line[last] or 0))
+    return summary
+
+
+def _task_flow_summary_columns(export: TaskFlowExport) -> tuple[tuple[str, int], ...]:
+    columns: list[tuple[str, int]] = [("Менеджер", 28), ("Дней в периоде", 14)]
+    columns += [(f"Ср. остаток {h:02d}:00", 16) for h in export.checkpoint_hours]
+    columns += [("Новых задач", 13), ("На линии", 11)]
+    if export.with_meetings:
+        columns.append(("Встреч назначено", 17))
+    return tuple(columns)
+
+
+def build_task_flow_workbook(export: TaskFlowExport) -> bytes:
+    """Render «Задачи за день» for the period as an .xlsx byte string."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Задачи по дням"
+    columns = _task_flow_columns(export)
+    _write_header(ws, columns)
+
+    for row in export.rows:
+        line: list[Any] = [row.date, row.manager]
+        line += [row.open_at.get(h) for h in export.checkpoint_hours]
+        line += [row.created, _duration(row.talk_seconds)]
+        if export.with_meetings:
+            line.append(row.meetings_set)
+        ws.append(line)
+    _format_column(ws, 1, "DD.MM.YYYY")
+    if ws.max_row > 1:
+        ws.auto_filter.ref = f"A1:{get_column_letter(len(columns))}{ws.max_row}"
+
+    summary_ws = wb.create_sheet("Сводка")
+    _write_header(summary_ws, _task_flow_summary_columns(export))
+    for summary_row in _task_flow_summary(export):
+        summary_ws.append(summary_row)
+    summary_ws.append([])
+    summary_ws.append(["Отдел", export.department_name])
+    summary_ws.append(["Период", export.period])
+    if not export.data_ready:
+        summary_ws.append(["⚠ Bitrix не ответил", "числа за период не прочитаны"])
+    if export.truncated:
+        summary_ws.append(["⚠ Слишком много дел", "часть не попала в подсчёт"])
+    return _to_bytes(wb)
+
+
+def task_flow_filename_for(export: TaskFlowExport) -> str:
+    """ASCII filename — Cyrillic department names break naive HTTP clients."""
+    period = export.period.replace("..", "_")
+    return f"okk-taskflow-dept{export.department_bitrix_id}-{period}.xlsx"

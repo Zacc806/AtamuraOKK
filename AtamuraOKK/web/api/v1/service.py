@@ -1225,9 +1225,7 @@ def _appeal_view(
     head already cleared on an accepted appeal.
     """
     override = (
-        float(appeal.override_percent)
-        if appeal.override_percent is not None
-        else None
+        float(appeal.override_percent) if appeal.override_percent is not None else None
     )
     return AppealView(
         id=appeal.id,
@@ -1391,9 +1389,7 @@ async def view_for_appeal(session: AsyncSession, appeal: Appeal) -> AppealView:
         manager_name=getattr(ctx, "manager_name", None),
         started_at=getattr(ctx, "started_at", None),
         original_percent=(
-            float(ctx.percent)
-            if ctx is not None and ctx.percent is not None
-            else None
+            float(ctx.percent) if ctx is not None and ctx.percent is not None else None
         ),
         criteria_index=criteria_index,
         red_flags=_flags(getattr(ctx, "red_flags", None)),
@@ -1851,11 +1847,14 @@ async def get_team_task_flow(
     department_bitrix_id: int,
     date: str | None = None,
 ) -> TeamTaskFlow | None:
-    """РОП «Задачи за день»: остаток дел на 10/14/18, новые задачи, время на линии.
+    """РОП «Задачи за день»: остаток дел на 10/14/18, новые, время на линии, встречи.
 
     Live read-through to Bitrix over the department's roster, for ``date``
     (YYYY-MM-DD, default today). Checkpoints that the day hasn't reached yet come
-    back as ``null`` — the ranking is by the latest one that has. Returns ``None``
+    back as ``null`` — the ranking is by the latest one that has. ``meetings_set``
+    («встреч назначено») is the same stage-history count «Важные цифры дня» and
+    the analytics screen use, so the three screens can't disagree; it shares that
+    read's period cache and is ``null`` off the ТМ department. Returns ``None``
     when the department is unknown; ``data_ready=False`` when Bitrix is
     unreadable, so the cabinet shows «нет связи» instead of a table of zeros.
     """
@@ -1880,6 +1879,11 @@ async def get_team_task_flow(
 
     names = await _roster_names(session, department.id)
     counts: dict[int, day.TaskFlowCounts] = {}
+    # «Встреч назначено» is the ТМ funnel's booking stage, so it exists only for
+    # the ТМ department; elsewhere (a meeting office) the rows carry None, not a
+    # zero that would read as "никто не назначил".
+    is_tm = department_bitrix_id == settings.companion_tm_department_id
+    meetings_set: dict[int, int] | None = None
     truncated = False
     data_ready = True
     try:
@@ -1892,6 +1896,22 @@ async def get_team_task_flow(
                 checkpoints,
                 settings.companion_task_flow_max_scan,
             )
+            if is_tm:
+                try:
+                    meetings_set = await day.stage_entrants_by_assignee(
+                        bx,
+                        settings.companion_meeting_set_stage_id,
+                        day_start,
+                        day_end,
+                    )
+                except BitrixError as exc:
+                    # Only the meetings column degrades to «—»; the task columns
+                    # were already read and stay usable.
+                    logger.warning(
+                        "Team task-flow meetings read failed for dept {d}: {e}",
+                        d=department_bitrix_id,
+                        e=exc,
+                    )
     except BitrixError as exc:
         data_ready = False
         logger.warning(
@@ -1919,6 +1939,7 @@ async def get_team_task_flow(
             ],
             created=row.created,
             talk_seconds=row.talk_seconds,
+            meetings_set=meetings_set.get(uid, 0) if meetings_set is not None else None,
         )
         for uid, row in counts.items()
     ]

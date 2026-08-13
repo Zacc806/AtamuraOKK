@@ -114,6 +114,18 @@ class TaskFlowCounts(NamedTuple):
     talk_seconds: int
 
 
+class TaskFlowDay(NamedTuple):
+    """One day of «Задачи за день»: its window and the срезы that have elapsed.
+
+    ``checkpoints`` is empty for a day that hasn't reached its first срез — such
+    a day is skipped rather than reported as a row of zeros.
+    """
+
+    start: datetime
+    end: datetime
+    checkpoints: list[datetime]
+
+
 def stage_label(stage_id: str) -> str | None:
     """Human funnel label for a Zvandau (cat 24) stage id, if known."""
     sig = _STAGE_SIGNALS.get(stage_id)
@@ -808,6 +820,76 @@ async def stage_entrants_by_assignee(
     return await _stage_entrants_by_assignee(bx, stage_id, start, end)
 
 
+async def stage_entrants_by_assignee_per_day(
+    bx: BitrixClient,
+    stage_id: str,
+    start: datetime,
+    end: datetime,
+) -> dict[str, dict[int, int]]:
+    """``{YYYY-MM-DD: {assignee: distinct deals}}`` — the per-day split of the above.
+
+    Same source and same meaning as :func:`stage_entrants_by_assignee` (which the
+    day view and the analytics screen use), read in **one** pull for the whole
+    range so the export doesn't pay per day. A deal entering the stage on two
+    days counts on each; twice on one day still counts once, exactly as the day
+    view's set semantics do.
+    """
+    tz = ZoneInfo(settings.report_timezone)
+    by_day: dict[str, set[int]] = {}
+    cursor: int | None = 0
+    while cursor is not None:
+        env = await bx.call_raw(
+            "crm.stagehistory.list",
+            {
+                "entityTypeId": 2,
+                "filter": {
+                    "CATEGORY_ID": settings.companion_tm_category_id,
+                    "STAGE_ID": stage_id,
+                    ">=CREATED_TIME": start.date().isoformat(),
+                    "<CREATED_TIME": end.date().isoformat(),
+                },
+                "select": ["OWNER_ID", "CREATED_TIME"],
+                "start": cursor,
+            },
+        )
+        result = env.get("result") or {}
+        items = result.get("items") if isinstance(result, dict) else result
+        for it in items or []:
+            entered = _aware(it.get("CREATED_TIME"), tz)
+            if entered is None:
+                continue
+            label = entered.astimezone(tz).date().isoformat()
+            by_day.setdefault(label, set()).add(int(it["OWNER_ID"]))
+        nxt = env.get("next")
+        cursor = int(nxt) if nxt is not None else None
+
+    assignees = await _deal_assignees(bx, {d for ids in by_day.values() for d in ids})
+    out: dict[str, dict[int, int]] = {}
+    for label, deal_ids in by_day.items():
+        counts: dict[int, int] = {}
+        for deal_id in deal_ids:
+            uid = assignees.get(deal_id)
+            if uid is not None:
+                counts[uid] = counts.get(uid, 0) + 1
+        out[label] = counts
+    return out
+
+
+async def _deal_assignees(bx: BitrixClient, deal_ids: set[int]) -> dict[int, int]:
+    """``deal id -> ASSIGNED_BY_ID``, read 50 at a time (Bitrix's filter cap)."""
+    out: dict[int, int] = {}
+    ids = sorted(deal_ids)
+    for i in range(0, len(ids), 50):
+        async for row in bx.list(
+            "crm.deal.list",
+            {"filter": {"ID": ids[i : i + 50]}, "select": ["ID", "ASSIGNED_BY_ID"]},
+        ):
+            assignee = row.get("ASSIGNED_BY_ID")
+            if assignee and str(assignee) != "0":
+                out[int(row["ID"])] = int(assignee)
+    return out
+
+
 def _today_window() -> tuple[datetime, datetime]:
     """[midnight today, midnight tomorrow) in the report timezone."""
     tz = ZoneInfo(settings.report_timezone)
@@ -1063,23 +1145,61 @@ async def team_task_flow(
 
     Three capped activity scans plus one telephony scan serve the entire team, so
     the cost does not grow with roster size. Returns ``(counts by Bitrix user id,
-    truncated)``.
+    truncated)``. One day of :func:`team_task_flow_range`, which is where the
+    reconstruction actually lives.
     """
-    if not uids or not checkpoints:
+    per_day, truncated = await team_task_flow_range(
+        bx,
+        uids,
+        [TaskFlowDay(day_start, day_end, list(checkpoints))],
+        max_scan,
+    )
+    return per_day.get(day_start.date().isoformat(), {}), truncated
+
+
+async def team_task_flow_range(
+    bx: BitrixClient,
+    uids: Sequence[int],
+    days: Sequence[TaskFlowDay],
+    max_scan: int,
+) -> tuple[dict[str, dict[int, TaskFlowCounts]], bool]:
+    """«Задачи за день» for several days at once — one set of scans for all of them.
+
+    The export needs the same per-day numbers for a week or a month, and running
+    the day view N times would cost N× the Bitrix round-trips (a month is ~2000
+    paged requests, minutes of wall clock). Instead each source is read **once**
+    over the whole range and bucketed by day locally:
+
+    * the two workload scans use the range's last ``<DEADLINE`` — a superset of
+      every day's population — and each day re-filters it by its own deadline
+      bound, so a day still sees exactly the tasks the day view would show;
+    * the closed scan floors ``LAST_UPDATED`` at the range's first checkpoint;
+    * created / talk time / — are bucketed by their own timestamp.
+
+    Days carrying no elapsed checkpoint are skipped (they would be all-null), and
+    a range whose days are all like that reads nothing at all. Returns
+    ``({YYYY-MM-DD: counts by Bitrix user id}, truncated)``.
+    """
+    live = [d for d in days if d.checkpoints]
+    if not uids or not live:
         return {}, False
     tz = ZoneInfo(settings.report_timezone)
     ids = sorted(uids)
     roster = set(ids)
+    range_start = min(d.start for d in live)
+    range_end = max(d.end for d in live)
+    first_checkpoint = min(cp for d in live for cp in d.checkpoints)
+
     workload = {
         "RESPONSIBLE_ID": ids,
         "!PROVIDER_ID": _TELEPHONY_PROVIDERS,
         ">=DEADLINE": _DEADLINE_FLOOR,
-        "<DEADLINE": day_end.isoformat(),
+        "<DEADLINE": range_end.isoformat(),
     }
     still_open, trunc_open = await _scan_activities(
         bx,
         {**workload, "COMPLETED": "N"},
-        ["ID", "RESPONSIBLE_ID", "CREATED"],
+        ["ID", "RESPONSIBLE_ID", "CREATED", "DEADLINE"],
         max_scan,
     )
     # Only tasks touched at/after the first checkpoint can have been open at one.
@@ -1088,40 +1208,84 @@ async def team_task_flow(
         {
             **workload,
             "COMPLETED": "Y",
-            ">=LAST_UPDATED": min(checkpoints).isoformat(),
+            ">=LAST_UPDATED": first_checkpoint.isoformat(),
         },
-        ["ID", "RESPONSIBLE_ID", "CREATED", "LAST_UPDATED"],
+        ["ID", "RESPONSIBLE_ID", "CREATED", "DEADLINE", "LAST_UPDATED"],
         max_scan,
     )
-    created_today, trunc_created = await _scan_activities(
+    created_rows, trunc_created = await _scan_activities(
         bx,
         {
             "RESPONSIBLE_ID": ids,
             "!PROVIDER_ID": _TELEPHONY_PROVIDERS,
-            ">=CREATED": day_start.isoformat(),
-            "<CREATED": day_end.isoformat(),
+            ">=CREATED": range_start.isoformat(),
+            "<CREATED": range_end.isoformat(),
         },
-        ["ID", "RESPONSIBLE_ID"],
+        ["ID", "RESPONSIBLE_ID", "CREATED"],
         max_scan,
     )
-    talk = await _talk_seconds_by_user(bx, ids, day_start, day_end)
+    talk = await _talk_seconds_by_user_per_day(bx, ids, range_start, range_end, tz)
+    created = _bucket_by_day(created_rows, "CREATED", roster, tz)
 
-    open_at = _open_at_checkpoints(still_open, closed, checkpoints, roster, tz)
-    created_counts: dict[int, int] = dict.fromkeys(ids, 0)
-    for row in created_today:
-        uid = int(row.get("RESPONSIBLE_ID") or 0)
-        if uid in roster:
-            created_counts[uid] += 1
-
-    counts = {
-        uid: TaskFlowCounts(
-            open_at=open_at[uid],
-            created=created_counts[uid],
-            talk_seconds=talk.get(uid, 0),
+    out: dict[str, dict[int, TaskFlowCounts]] = {}
+    for spec in live:
+        label = spec.start.date().isoformat()
+        # A day only ever saw the tasks due by its own end; the range scan is the
+        # union over all days, so narrow it back down before reconstructing.
+        open_at = _open_at_checkpoints(
+            _due_before(still_open, spec.end, tz),
+            _due_before(closed, spec.end, tz),
+            spec.checkpoints,
+            roster,
+            tz,
         )
-        for uid in ids
-    }
-    return counts, trunc_open or trunc_closed or trunc_created
+        day_created = created.get(label, {})
+        day_talk = talk.get(label, {})
+        out[label] = {
+            uid: TaskFlowCounts(
+                open_at=open_at[uid],
+                created=day_created.get(uid, 0),
+                talk_seconds=day_talk.get(uid, 0),
+            )
+            for uid in ids
+        }
+    return out, trunc_open or trunc_closed or trunc_created
+
+
+def _due_before(
+    rows: Sequence[dict[str, Any]],
+    end: datetime,
+    tz: ZoneInfo,
+) -> list[dict[str, Any]]:
+    """The scan rows a single day would have seen — deadline before its end.
+
+    A row whose DEADLINE is unreadable is kept: dropping it would under-report,
+    and the scan's own filter already bounded the range.
+    """
+    kept = []
+    for row in rows:
+        due = _aware(row.get("DEADLINE"), tz)
+        if due is None or due < end:
+            kept.append(row)
+    return kept
+
+
+def _bucket_by_day(
+    rows: Sequence[dict[str, Any]],
+    field: str,
+    roster: set[int],
+    tz: ZoneInfo,
+) -> dict[str, dict[int, int]]:
+    """``{YYYY-MM-DD: {uid: rows}}`` — count activity rows per day per manager."""
+    out: dict[str, dict[int, int]] = {}
+    for row in rows:
+        uid = int(row.get("RESPONSIBLE_ID") or 0)
+        when = _aware(row.get(field), tz)
+        if uid not in roster or when is None:
+            continue
+        day = out.setdefault(when.astimezone(tz).date().isoformat(), {})
+        day[uid] = day.get(uid, 0) + 1
+    return out
 
 
 async def _talk_seconds_by_user(
@@ -1135,9 +1299,30 @@ async def _talk_seconds_by_user(
     One paged ``voximplant.statistic.get`` serves the whole list of users, so a
     team view costs the same round-trips as a single manager's.
     """
+    tz = ZoneInfo(settings.report_timezone)
     totals: dict[int, int] = {}
+    per_day = await _talk_seconds_by_user_per_day(bx, uids, start, end, tz)
+    for day_totals in per_day.values():
+        for uid, seconds in day_totals.items():
+            totals[uid] = totals.get(uid, 0) + seconds
+    return totals
+
+
+async def _talk_seconds_by_user_per_day(
+    bx: BitrixClient,
+    uids: Sequence[int],
+    start: datetime,
+    end: datetime,
+    tz: ZoneInfo,
+) -> dict[str, dict[int, int]]:
+    """``{YYYY-MM-DD: {uid: talk seconds}}`` over the window, in one paged pull.
+
+    Bucketed by the call's own start, so a week or a month costs the same single
+    scan a day does — that is what makes the range export affordable.
+    """
+    out: dict[str, dict[int, int]] = {}
     if not uids:
-        return totals
+        return out
     async for row in bx.list(
         "voximplant.statistic.get",
         {
@@ -1152,8 +1337,10 @@ async def _talk_seconds_by_user(
         if row.get("CALL_FAILED_CODE") != settings.ingest_success_code:
             continue
         uid = int(row.get("PORTAL_USER_ID") or 0)
-        totals[uid] = totals.get(uid, 0) + int(row.get("CALL_DURATION") or 0)
-    return totals
+        began = _aware(row.get("CALL_START_DATE"), tz) or start
+        day = out.setdefault(began.astimezone(tz).date().isoformat(), {})
+        day[uid] = day.get(uid, 0) + int(row.get("CALL_DURATION") or 0)
+    return out
 
 
 async def _talk_time_today(

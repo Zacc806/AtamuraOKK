@@ -817,6 +817,14 @@ class TeamTaskFlowRow(BaseModel):
         default=0,
         description="Время на линии — answered-call talk seconds that day",
     )
+    meetings_set: int | None = Field(
+        default=None,
+        description=(
+            "Встреч назначено — deals that entered the booking stage that day. "
+            "Null (not zero) outside the ТМ department, where the funnel does "
+            "not apply, and when the stage-history read failed"
+        ),
+    )
 
 
 class TeamTaskFlow(BaseModel):

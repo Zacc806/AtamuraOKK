@@ -391,6 +391,48 @@ async def team_export_xlsx(
 
 
 @router.get(
+    "/teams/{department_id}/task-flow/export.xlsx",
+    response_class=Response,
+    tags=["companion"],
+)
+async def team_task_flow_export_xlsx(
+    department_id: int,
+    period: str | None = Query(
+        default=None,
+        description="YYYY-MM-DD (day), YYYY-MM-DD..YYYY-MM-DD (week) or "
+        "YYYY-MM (month); default current month",
+    ),
+    identity: CompanionIdentity = Depends(get_companion_identity),
+    session: AsyncSession = Depends(get_db_session),
+) -> Response:
+    """РОП-выгрузка «Задачи за день» за день / неделю / месяц.
+
+    One row per manager per day — the card's table, for every day of the period,
+    plus a per-manager rollup sheet. The whole range is read in a single set of
+    scans (see ``day.team_task_flow_range``), but a cold month is still a live
+    Bitrix pull of tens of thousands of rows and takes minutes; a period longer
+    than ``companion_task_flow_export_max_days`` is refused with a 422.
+    Head-scoped like the team summary.
+    """
+    ensure_head(identity, department_id)
+    try:
+        data = await export.get_task_flow_export(session, department_id, period)
+    except PeriodError as exc:
+        raise _bad_period(exc) from exc
+    if data is None:
+        raise HTTPException(status_code=404, detail="Department not found.")
+    return Response(
+        content=export.build_task_flow_workbook(data),
+        media_type=export.CONTENT_TYPE,
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="{export.task_flow_filename_for(data)}"'
+            ),
+        },
+    )
+
+
+@router.get(
     "/teams/{department_id}/overdue-tasks",
     response_model=TeamOverdueTasks,
     tags=["companion"],
@@ -427,12 +469,14 @@ async def team_task_flow(
     identity: CompanionIdentity = Depends(get_companion_identity),
     session: AsyncSession = Depends(get_db_session),
 ) -> TeamTaskFlow:
-    """РОП «Задачи за день»: остаток дел на 10/14/18, новые задачи, время на линии.
+    """РОП «Задачи за день»: остаток дел на 10/14/18, новые, время на линии, встречи.
 
     One row per team member for a single day, live from Bitrix. The checkpoint
     counts are reconstructed (created-before / closed-after), not snapshotted;
-    checkpoints the day hasn't reached yet come back null. Head-scoped like the
-    team summary: global head, or the department's own РОП.
+    checkpoints the day hasn't reached yet come back null. ``meetings_set``
+    («встреч назначено») counts the deals that entered the booking stage that
+    day, and is null off the ТМ department, whose funnel it belongs to.
+    Head-scoped like the team summary: global head, or the department's own РОП.
     """
     ensure_head(identity, department_id)
     try:
