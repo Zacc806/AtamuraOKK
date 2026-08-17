@@ -207,6 +207,27 @@ class Settings(BaseSettings):
     # No transcript and no LLM needed. Enum ids in `companion_closed_reason_field`:
     # «Хронический недозвон» / «Автодозвон» / «Перестал выходить на связь».
     audit_never_reached_reason_ids: list[str] = ["1192", "1956", "3774"]
+    # The stated reason is often documented on the deal card rather than said on the
+    # call, so the judge is also given the manager's timeline notes (`audit/notes.py`)
+    # — else a documented, true reason reads as `contradicted` off the transcript alone.
+    # Judge route only: the «Дубль»/«недозвон» checks settle hard CRM/telephony facts
+    # and must stay un-arguable, so they never consult notes.
+    # The judge route goes through the Anthropic Message Batches API (half price, same
+    # request) instead of one live call per deal. The verdicts feed «Отказы не по делу»,
+    # which nobody watches in realtime — most batches land inside an hour, the ceiling
+    # is 24h — so the latency buys a 50% cut on the only part of the audit that costs
+    # tokens. Set False to judge live (e.g. to re-audit a slice on demand and see the
+    # verdicts immediately). Reuses `anthropic_batch_size` for the per-batch cap.
+    audit_judge_batch_enabled: bool = True
+    audit_use_card_notes: bool = True
+    # A note shorter than this is markup residue or a stray character, not a note.
+    audit_note_min_chars: int = 3
+    # Newest notes per deal fed to the judge (0 = no cap). Notes cluster around the
+    # close, so the cap drops the oldest.
+    audit_note_max_count: int = 12
+    # Cap on the notes block in the prompt (0 = no cap). p90 on this portal is ~300
+    # chars, so this only bites on the rare card with a long history.
+    audit_note_max_chars: int = 2000
 
     # --- Glossary correction (post-STT LLM repair of ЖК names & addresses) ---
     # Yandex v3 has no vocabulary API, so a cheap Claude pass fixes complex names

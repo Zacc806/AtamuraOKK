@@ -32,10 +32,33 @@ _CLOSE_B = "2026-07-02T11:00:00+05:00"
 
 
 class _FakeBitrix:
-    """Replays crm.deal.list (the closed-lost deals) and crm.deal.fields (labels)."""
+    """Replays crm.deal.list (the closed-lost deals) and crm.deal.fields (labels).
 
-    def __init__(self, deals: list[dict[str, Any]]) -> None:
+    ``comments`` feeds the deal-card notes the judge is given (``audit/notes.py``);
+    ``batches`` records the reads so a test can assert a route never asked for them.
+    """
+
+    def __init__(
+        self,
+        deals: list[dict[str, Any]],
+        *,
+        comments: dict[int, list[str]] | None = None,
+    ) -> None:
         self.deals = deals
+        self.comments = comments or {}
+        self.batches: list[dict[str, Any]] = []
+
+    async def batch(self, commands: dict[str, Any]) -> dict[str, Any]:
+        self.batches.append(commands)
+        for method, _params in commands.values():
+            assert method == "crm.timeline.comment.list"
+        return {
+            key: [
+                {"ID": str(n), "COMMENT": text, "AUTHOR_ID": "555"}
+                for n, text in enumerate(self.comments.get(int(key), []), start=1)
+            ]
+            for key in commands
+        }
 
     async def list(
         self,
@@ -95,9 +118,31 @@ def _stub_judge(monkeypatch: pytest.MonkeyPatch, verdict: str) -> list[int]:
             "evidence_quote": "мне интересно",
         }
 
+    # These tests exercise the realtime judge route; the Batches path (on by default)
+    # has its own suite in tests/test_audit_batch.py.
+    monkeypatch.setattr(settings, "audit_judge_batch_enabled", False)
     monkeypatch.setattr(service, "build_judge_client", object)
     monkeypatch.setattr(service, "judge_one", fake_judge)
     return calls
+
+
+def _capture_judge(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Replace the judge with a recorder of the kwargs it was handed."""
+    seen: list[dict[str, Any]] = []
+
+    async def fake_judge(client: Any, **kwargs: Any) -> dict[str, Any]:
+        seen.append(kwargs)
+        return {
+            "verdict": "supported",
+            "confidence": 0.9,
+            "justification": "причина подтверждается заметкой",
+            "evidence_quote": "",
+        }
+
+    monkeypatch.setattr(settings, "audit_judge_batch_enabled", False)
+    monkeypatch.setattr(service, "build_judge_client", object)
+    monkeypatch.setattr(service, "judge_one", fake_judge)
+    return seen
 
 
 async def _count(session: AsyncSession) -> int:
@@ -125,6 +170,64 @@ async def test_run_audit_persists_attributes_and_advances(
     assert row.manager_id is not None  # attributed to the ASSIGNED_BY_ID manager
     assert row.closed_at is not None
     assert stats.cursor == _CLOSE_A  # advanced to the deal's CLOSEDATE
+
+
+async def test_judge_is_given_the_deal_card_notes(
+    dbsession: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stated reason is often written on the card, not said on the call.
+
+    Judged on the transcript alone such a deal reads as ``contradicted`` — a false flag
+    in «Отказы не по делу» — so the manager's own notes have to reach the judge.
+    """
+    dbsession.add(Manager(bitrix_user_id=555, enriched=True))
+    await _seed_client(dbsession, 5001)
+    seen = _capture_judge(monkeypatch)
+    bx = _FakeBitrix(
+        [_deal("7001", contact="5001", closedate=_CLOSE_A)],
+        comments={7001: ["одобрение до 20 млн, по срокам не подходит"]},
+    )
+
+    await service.run_audit(dbsession, bx)
+
+    assert seen[0]["notes"] == ["одобрение до 20 млн, по срокам не подходит"]
+
+
+async def test_verdict_records_the_notes_it_was_judged_on(
+    dbsession: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A note can flip a verdict, so a РОП disputing one must see the same evidence."""
+    dbsession.add(Manager(bitrix_user_id=555, enriched=True))
+    await _seed_client(dbsession, 5001)
+    _capture_judge(monkeypatch)
+    bx = _FakeBitrix(
+        [_deal("7001", contact="5001", closedate=_CLOSE_A)],
+        comments={7001: ["не актуально, сам перезвонит"]},
+    )
+
+    await service.run_audit(dbsession, bx)
+
+    row = (await dbsession.execute(select(AuditVerdict))).scalar_one()
+    assert row.details == {
+        "check": service.JUDGE_CHECK_ID,
+        "notes": ["не актуально, сам перезвонит"],
+    }
+
+
+async def test_judge_runs_without_notes_when_the_card_is_empty(
+    dbsession: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No notes is the common case for a fresh card — it must not block the judge."""
+    dbsession.add(Manager(bitrix_user_id=555, enriched=True))
+    await _seed_client(dbsession, 5001)
+    seen = _capture_judge(monkeypatch)
+
+    stats = await service.run_audit(
+        dbsession, _FakeBitrix([_deal("7001", contact="5001", closedate=_CLOSE_A)])
+    )
+
+    assert stats.judged == 1
+    assert seen[0]["notes"] == []
 
 
 async def test_run_audit_skips_deal_without_transcript(

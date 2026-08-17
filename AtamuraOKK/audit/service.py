@@ -9,8 +9,10 @@ reason, by one of two routes:
   the conversation, so they are checked against Bitrix: does the client's number
   really sit on another deal? These need no transcript and no LLM.
 * **every other reason** (``audit/judge.py``) — joined to the client's call
-  transcript(s) we already hold and LLM-judged against it. Deals without a
-  transcript are skipped.
+  transcript(s) we already hold and LLM-judged against it, together with the manager's
+  own notes on the deal card (``audit/notes.py``): the stated reason is often written
+  there and never said on the call, so judging the transcript alone flags a documented,
+  true reason as ``contradicted``. Deals without a transcript are skipped.
 
 Either way the result upserts an :class:`AuditVerdict` (idempotent on
 ``bitrix_deal_id``). Deals already settled (a non-error verdict) are not re-done; the
@@ -30,9 +32,11 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
+from AtamuraOKK.audit import batch as audit_batch
 from AtamuraOKK.audit import telephony
 from AtamuraOKK.audit.duplicates import check_many, dup_reason_ids
 from AtamuraOKK.audit.judge import build_judge_client, judge_one
+from AtamuraOKK.audit.notes import notes_for_deals
 from AtamuraOKK.db.models.audit_verdict import AuditVerdict
 from AtamuraOKK.db.models.call import Call
 from AtamuraOKK.db.models.ingest_state import IngestState
@@ -46,6 +50,7 @@ if TYPE_CHECKING:
     from AtamuraOKK.bitrix import BitrixClient
 
 AUDIT_CURSOR_KEY = "audit_closed_deals"
+JUDGE_CHECK_ID = "llm_judge/v1"
 _UNSPECIFIED_REASON = "Не указана"
 _CONCURRENCY = 6
 
@@ -56,6 +61,10 @@ class AuditStats:
 
     scanned: int = 0
     judged: int = 0
+    # Deals handed to the Batches API this pass; their verdicts land in a later pass.
+    submitted: int = 0
+    # Deals submitted on an earlier pass whose batch has not come back yet.
+    in_flight: int = 0
     checked: int = 0
     telephony: int = 0
     no_transcript: int = 0
@@ -176,6 +185,7 @@ async def _resolve_targets(
     session: AsyncSession,
     deals: list[dict[str, Any]],
     done_ids: set[int],
+    in_flight: set[int],
     labels: dict[str, str],
     field_name: str,
     stats: AuditStats,
@@ -195,6 +205,12 @@ async def _resolve_targets(
     for d in deals:
         stats.scanned += 1
         closedate = str(d.get("CLOSEDATE") or "")
+        if int(d["ID"]) in in_flight:
+            # Submitted to the Batches API on an earlier pass, verdict not back yet.
+            # Not re-submitted, and not `done` — the cursor waits for the real verdict.
+            stats.in_flight += 1
+            entries.append({"cd": closedate, "done": False})
+            continue
         if int(d["ID"]) in done_ids:
             stats.already_done += 1
             entries.append({"cd": closedate, "done": True})
@@ -261,10 +277,26 @@ async def _resolve_targets(
     return entries, to_judge, to_check, to_telephony
 
 
-async def _judge_all(to_judge: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """LLM-judge every non-«Дубль» deal concurrently."""
+async def _attach_notes(bx: BitrixClient, to_judge: list[dict[str, Any]]) -> None:
+    """Read each judge target's card notes in one batch and hang them on the target.
+
+    The manager's timeline notes often carry the stated reason when the call does not
+    (`audit/notes.py`). Each target keeps the notes it was judged on (``x["notes"]``) so
+    the verdict can record them — both routes read them the same way, so a realtime and
+    a batched verdict see identical evidence.
+    """
+    notes_by_deal = await notes_for_deals(bx, [int(x["deal"]["ID"]) for x in to_judge])
+    for x in to_judge:
+        x["notes"] = notes_by_deal.get(int(x["deal"]["ID"]), [])
+
+
+async def _judge_all(
+    bx: BitrixClient, to_judge: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """LLM-judge every non-«Дубль» deal concurrently (realtime, full-price route)."""
     if not to_judge:
         return []
+    await _attach_notes(bx, to_judge)
     judge_client = build_judge_client()
     sem = asyncio.Semaphore(_CONCURRENCY)
     return list(
@@ -274,6 +306,7 @@ async def _judge_all(to_judge: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     judge_client,
                     transcript=x["transcript"],
                     close_reason=x["reason_label"],
+                    notes=x["notes"],
                     model=settings.anthropic_scoring_model,
                     sem=sem,
                 )
@@ -281,6 +314,52 @@ async def _judge_all(to_judge: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
         )
     )
+
+
+async def _submit_judge_batch(
+    session: AsyncSession,
+    bx: BitrixClient,
+    entries: list[dict[str, Any]],
+    to_judge: list[dict[str, Any]],
+    stats: AuditStats,
+) -> None:
+    """Hand the judge targets to the Batches API instead of judging them inline.
+
+    The judge route is the only one that costs tokens, so it is the only one batched.
+    A batched deal is settled by :func:`AtamuraOKK.audit.batch.poll_batches` on a later
+    pass, so its entry is marked **not done** here: the cursor holds behind it, and a
+    batch that never comes back is re-scanned and re-submitted rather than lost.
+
+    Each submitted deal gets a ``pending`` verdict row carrying its context, so the
+    poller finishes the verdict without a second Bitrix read and the next pass knows not
+    to submit it again. A deal whose chunk was rejected gets no row and stays in scope.
+    """
+    await _attach_notes(bx, to_judge)
+    submitted = await audit_batch.submit_targets(session, to_judge)
+    for e in entries:
+        if e.get("done") is None and e["kind"] == "judge":
+            e["done"] = False
+            x = to_judge[e["idx"]]
+            if int(x["deal"]["ID"]) not in submitted:
+                continue
+            await _upsert_verdict(
+                session,
+                x["deal"],
+                x["reason_label"],
+                x["reason_id"],
+                x["call_ids"],
+                x["closed_at"],
+                x["manager_id"],
+                {
+                    "verdict": audit_batch.PENDING_VERDICT,
+                    "confidence": None,
+                    "justification": "",
+                    "evidence_quote": "",
+                },
+                settings.anthropic_scoring_model,
+                {"check": JUDGE_CHECK_ID, "notes": x.get("notes") or []},
+            )
+            stats.submitted += 1
 
 
 async def _settle_and_persist(
@@ -300,7 +379,15 @@ async def _settle_and_persist(
         if x["deal"].get("ASSIGNED_BY_ID")
     }
     mgr_map = await ensure_managers(session, assigned, bx) if assigned else {}
-    judged = await _judge_all(to_judge)
+    for x in pending:
+        assigned_id = x["deal"].get("ASSIGNED_BY_ID")
+        x["manager_id"] = mgr_map.get(int(assigned_id)) if assigned_id else None
+
+    if to_judge and settings.audit_judge_batch_enabled:
+        await _submit_judge_batch(session, bx, entries, to_judge, stats)
+        judged: list[dict[str, Any]] = []
+    else:
+        judged = await _judge_all(bx, to_judge)
     checked = await check_many(bx, to_check)
     dialed = await telephony.check_many(bx, to_telephony)
 
@@ -320,7 +407,15 @@ async def _settle_and_persist(
             model = None
         else:
             x = to_judge[e["idx"]]
-            verdict, details = judged[e["idx"]], None
+            # Keep the card notes the judge was given: they can flip a verdict, so a
+            # РОП disputing one needs to see the evidence it actually had.
+            verdict, details = (
+                judged[e["idx"]],
+                {
+                    "check": JUDGE_CHECK_ID,
+                    "notes": x.get("notes") or [],
+                },
+            )
             model = settings.anthropic_scoring_model
         assigned_id = x["deal"].get("ASSIGNED_BY_ID")
         manager_id = mgr_map.get(int(assigned_id)) if assigned_id else None
@@ -391,7 +486,10 @@ async def run_audit(
     if not deals:
         return stats
 
-    # Skip deals already judged (non-error) — cheap re-run + retry of errors only.
+    # Skip deals already settled (non-error) — cheap re-run + retry of errors only. A
+    # `pending` row counts as settled *for this purpose*: the deal is in flight on the
+    # Batches API and must not be submitted twice. It is still not `done`, so the cursor
+    # stays behind it (`_resolve_targets` marks it, below).
     deal_ids = [int(d["ID"]) for d in deals]
     done_ids = set(
         (
@@ -405,10 +503,22 @@ async def run_audit(
         .scalars()
         .all()
     )
+    in_flight = set(
+        (
+            await session.execute(
+                select(AuditVerdict.bitrix_deal_id).where(
+                    AuditVerdict.bitrix_deal_id.in_(deal_ids),
+                    AuditVerdict.verdict == audit_batch.PENDING_VERDICT,
+                ),
+            )
+        )
+        .scalars()
+        .all()
+    )
     labels = await reason_enum_labels(bx, field_name)
 
     entries, to_judge, to_check, to_telephony = await _resolve_targets(
-        session, deals, done_ids, labels, field_name, stats
+        session, deals, done_ids, in_flight, labels, field_name, stats
     )
     if to_judge or to_check or to_telephony:
         await _settle_and_persist(
@@ -428,10 +538,13 @@ async def run_audit(
         stats.cursor = new_cursor
 
     logger.info(
-        "audit pass: scanned={s} judged={j} dup_checked={dc} nodial_checked={nd} "
-        "no_transcript={nt} already_done={ad} judge_off={jo} verdicts={v} cursor={c}",
+        "audit pass: scanned={s} judged={j} submitted={sub} in_flight={inf} "
+        "dup_checked={dc} nodial_checked={nd} no_transcript={nt} already_done={ad} "
+        "judge_off={jo} verdicts={v} cursor={c}",
         s=stats.scanned,
         j=stats.judged,
+        sub=stats.submitted,
+        inf=stats.in_flight,
         dc=stats.checked,
         nd=stats.telephony,
         nt=stats.no_transcript,

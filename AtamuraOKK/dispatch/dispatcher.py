@@ -17,6 +17,7 @@ from typing import Any
 
 from loguru import logger
 
+from AtamuraOKK.audit.batch import poll_batches
 from AtamuraOKK.audit.service import run_audit
 from AtamuraOKK.bitrix import BitrixClient
 from AtamuraOKK.db.session import session_scope
@@ -120,11 +121,11 @@ async def report_afternoon(ctx: dict[str, Any]) -> None:
 async def audit_closed_deals(ctx: dict[str, Any]) -> None:
     """Audit freshly closed-lost deals; persist a verdict per deal.
 
-    Its own cron (not part of the tick): one LLM call per newly closed deal makes
-    this pass minutes-long, so it needs a timeout far above the arq default. Gated
-    by ``audit_enabled``. The «Дубль…» reasons are settled against the CRM rather
-    than the LLM, so with ``audit_llm_judge_enabled`` off this pass still runs them
-    (and costs nothing) while Anthropic credits are out.
+    Its own cron (not part of the tick): the Bitrix and Voximplant scans make this pass
+    minutes-long, so it needs a timeout far above the arq default. Gated by
+    ``audit_enabled``. The «Дубль…» reasons are settled against the CRM rather than the
+    LLM, so with ``audit_llm_judge_enabled`` off this pass still runs them (and costs
+    nothing) while Anthropic credits are out.
     """
     if not settings.audit_enabled:
         return
@@ -133,6 +134,22 @@ async def audit_closed_deals(ctx: dict[str, Any]) -> None:
             await run_audit(session, bx)
     except Exception:
         logger.exception("dispatch: audit pass failed")
+
+
+async def audit_poll_batches(ctx: dict[str, Any]) -> None:
+    """Settle finished judge batches (``audit/batch.py``).
+
+    Separate from the audit pass because the two run on different clocks: the pass
+    submits, a batch takes anywhere from minutes to 24h, and only this job's tick
+    decides how fast a landed verdict reaches «Отказы не по делу». Cheap when idle —
+    one Postgres read of the in-flight batches and nothing else.
+    """
+    if not settings.audit_enabled or not settings.audit_judge_batch_enabled:
+        return
+    try:
+        await poll_batches()
+    except Exception:
+        logger.exception("dispatch: audit batch poll failed")
 
 
 async def daily_summary(ctx: dict[str, Any]) -> None:

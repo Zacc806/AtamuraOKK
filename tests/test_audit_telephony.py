@@ -46,6 +46,7 @@ class _FakeBitrix:
         self.phones = phones or {}
         self.calls_by_phone = calls_by_phone or {}
         self.vox_raises = vox_raises
+        self.note_reads: list[dict[str, Any]] = []
 
     async def list(
         self,
@@ -72,6 +73,12 @@ class _FakeBitrix:
         assert method == "crm.deal.list"
         for d in self.closed:  # the closed-lost scan
             yield d
+
+    async def batch(self, commands: dict[str, Any]) -> dict[str, Any]:
+        # Recorded, not raised: `notes.notes_for_deals` swallows its own failures by
+        # design, so an exception here would be silently absorbed and prove nothing.
+        self.note_reads.append(commands)
+        return {}
 
     async def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         if method == "crm.deal.fields":
@@ -118,6 +125,7 @@ def _closed(
 
 def _no_judge(monkeypatch: pytest.MonkeyPatch) -> None:
     """Any call to the judge is a test failure — the telephony route must not use it."""
+    monkeypatch.setattr(settings, "audit_judge_batch_enabled", False)
 
     async def boom(*args: Any, **kwargs: Any) -> dict[str, Any]:
         raise AssertionError("the LLM judge must not be called for a «недозвон» reason")
@@ -265,6 +273,31 @@ async def test_contact_without_phone_is_not_determinable(
 
     row = await _verdict(dbsession)
     assert row.verdict == "not_determinable"
+
+
+async def test_card_notes_never_soften_the_telephony_verdict(
+    dbsession: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The «недозвон» route must not consult the manager's card notes.
+
+    Its whole value is being un-arguable: Voximplant either logged an answered call or
+    it did not, and «ндз» typed into the card three times is not evidence against that
+    record. Notes are the *judge's* extra evidence only (`audit/notes.py`).
+    """
+    dbsession.add(Manager(bitrix_user_id=555, name="Асель", enriched=True))
+    _no_judge(monkeypatch)
+    deal = _closed("8007", contact="6007")
+    bx = _FakeBitrix(
+        [deal],
+        phones={6007: [_PHONE]},
+        calls_by_phone={_PHONE: [_row(settings.ingest_success_code, call_id="c1")]},
+    )
+
+    await service.run_audit(dbsession, bx)
+
+    row = await _verdict(dbsession)
+    assert row.verdict == "contradicted"  # the answered call still decides it
+    assert not bx.note_reads  # and no card note was read on the way there
 
 
 async def test_bitrix_failure_is_error_and_holds_cursor(

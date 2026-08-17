@@ -19,6 +19,7 @@ from loguru import logger
 
 from AtamuraOKK.dispatch.dispatcher import (
     audit_closed_deals,
+    audit_poll_batches,
     daily_summary,
     dispatch_tick,
     report_afternoon,
@@ -68,9 +69,12 @@ class DispatcherSettings:
         # needs a timeout far above the 300s arq default.
         cron(requalify_job, minute={10, 40}, timeout=3600, run_at_startup=True),
         cron(retry_job, minute={0}),
-        # LLM-judges each freshly closed-lost deal, so it needs a long timeout like
-        # requalification. Gated internally by settings.audit_enabled.
+        # Scans and routes each freshly closed-lost deal, so it needs a long timeout
+        # like requalification. Gated internally by settings.audit_enabled.
         cron(audit_closed_deals, minute={25, 55}, timeout=3600),
+        # Settles judge batches once they finish. Offset from the audit pass so a batch
+        # submitted at :25 is checked at :40 rather than waiting for the next pass.
+        cron(audit_poll_batches, minute={10, 40}, timeout=1800),
         cron(report_morning, hour={settings.report_lunch_hour}, minute={0}),
         cron(report_afternoon, hour={settings.report_evening_hour}, minute={0}),
         cron(daily_summary, hour={settings.report_day_end_hour}, minute={30}),

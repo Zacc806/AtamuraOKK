@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from AtamuraOKK.audit.notes import format_notes
 from AtamuraOKK.settings import settings
 
 if TYPE_CHECKING:
@@ -53,7 +54,16 @@ _SYSTEM = (
     "вне разговора и клиент его не озвучивает — например частота дозвонов "
     "(«недозвон», «не берёт трубку»), или решение банка по ипотеке, о котором "
     "клиент не упомянул.\n"
-    "Опирайся только на транскрипт, не додумывай."
+    "Кроме транскрипта тебе могут дать заметки менеджера из карточки сделки в CRM. "
+    "Это его собственные пометки по клиенту, часто написанные уже после звонка, и "
+    "причина закрытия нередко зафиксирована именно там, а в разговоре не звучит. "
+    "Считай их таким же свидетельством: если заметка прямо подтверждает причину, это "
+    "supported, даже когда в транскрипте подтверждения нет. Заметка не отменяет "
+    "прямого противоречия в разговоре: если клиент сказал обратное тому, что написано "
+    "в заметке, это contradicted. Заметки бывают в телеграфном стиле и с сокращениями "
+    "(«ндз» — недозвон, «пв» — первоначальный взнос, «оп» — отдел продаж) — не "
+    "додумывай за них того, чего там нет.\n"
+    "Опирайся только на транскрипт и заметки, не додумывай."
 )
 
 
@@ -77,40 +87,84 @@ def build_judge_client() -> AsyncAnthropic:
     return AsyncAnthropic(api_key=settings.anthropic_api_key)
 
 
+def build_request(
+    *,
+    transcript: str,
+    close_reason: str,
+    notes: list[str] | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """The ``messages.create`` parameters for judging one deal.
+
+    Split out of :func:`judge_one` so the realtime path and the Batches path
+    (``audit/batch.py``) send byte-identical requests — a verdict must not depend on
+    which route produced it.
+
+    ``notes`` are the manager's own timeline notes on the deal card
+    (``audit/notes.py``): the stated reason is often written there and never said on the
+    call, so they count as evidence next to the transcript. Empty → transcript alone.
+    """
+    notes_block = format_notes(notes or [])
+    user = (
+        f"Указанная причина закрытия: «{close_reason}»\n\n"
+        f"Транскрипт(ы) звонков с клиентом:\n{transcript}"
+    )
+    if notes_block:
+        user += f"\n\nЗаметки менеджера в карточке сделки (CRM):\n{notes_block}"
+    return {
+        "model": model or settings.anthropic_scoring_model,
+        "max_tokens": settings.anthropic_max_tokens,
+        "temperature": 0,
+        "system": _SYSTEM,
+        "messages": [{"role": "user", "content": user}],
+        "tools": [
+            {
+                "name": _TOOL_NAME,
+                "description": (
+                    "Запиши вердикт: подтверждает ли звонок причину закрытия."
+                ),
+                "input_schema": _TOOL_SCHEMA,
+            },
+        ],
+        "tool_choice": {"type": "tool", "name": _TOOL_NAME},
+    }
+
+
+def parse_verdict(content: list[Any]) -> dict[str, Any]:
+    """The forced tool call out of a judge response, or a blank ``error`` verdict."""
+    for block in content:
+        if block.type == "tool_use" and block.name == _TOOL_NAME:
+            return dict(block.input)
+    return _blank_verdict()
+
+
 async def judge_one(
     client: AsyncAnthropic,
     *,
     transcript: str,
     close_reason: str,
+    notes: list[str] | None = None,
     model: str | None = None,
     sem: asyncio.Semaphore | None = None,
 ) -> dict[str, Any]:
-    """Judge one deal; returns a verdict dict (``verdict="error"`` on failure)."""
-    model = model or settings.anthropic_scoring_model
-    user = (
-        f"Указанная причина закрытия: «{close_reason}»\n\n"
-        f"Транскрипт(ы) звонков с клиентом:\n{transcript}"
-    )
-    tool = {
-        "name": _TOOL_NAME,
-        "description": "Запиши вердикт: подтверждает ли звонок причину закрытия.",
-        "input_schema": _TOOL_SCHEMA,
-    }
+    """Judge one deal realtime; returns a verdict dict (``verdict="error"`` on failure).
+
+    The cheaper route for a backlog nobody is waiting on is ``audit/batch.py`` (half
+    price, same request). This path exists for the interactive/offline CLI and for
+    ``audit_judge_batch_enabled=False``.
+    """
     verdict = _blank_verdict()
     try:
         async with _MaybeSemaphore(sem):
             resp = await client.messages.create(  # type: ignore[call-overload]
-                model=model,
-                max_tokens=settings.anthropic_max_tokens,
-                temperature=0,
-                system=_SYSTEM,
-                messages=[{"role": "user", "content": user}],
-                tools=[tool],
-                tool_choice={"type": "tool", "name": _TOOL_NAME},
+                **build_request(
+                    transcript=transcript,
+                    close_reason=close_reason,
+                    notes=notes,
+                    model=model,
+                ),
             )
-        for block in resp.content:
-            if block.type == "tool_use" and block.name == _TOOL_NAME:
-                verdict = dict(block.input)
+        verdict = parse_verdict(resp.content)
     except Exception as exc:  # record, don't abort the batch
         verdict["justification"] = f"{type(exc).__name__}: {exc}"
         logger.warning("audit judge failed: {e}", e=exc)

@@ -52,16 +52,19 @@ class AuditVerdict(Base):
     # The manager-stated close reason (resolved enum label) + its raw enum id.
     close_reason: Mapped[str | None] = mapped_column(String(length=255))
     reason_id: Mapped[str | None] = mapped_column(String(length=64))
-    # supported | contradicted | not_determinable | error
+    # supported | contradicted | not_determinable | error | pending.
+    # `pending` means the deal is in flight on the Batches API (`audit/batch.py`) — the
+    # row holds its context until the verdict lands and is invisible to the cabinet.
     verdict: Mapped[str] = mapped_column(String(length=32), index=True)
     confidence: Mapped[float | None] = mapped_column(Float)
     justification: Mapped[str | None] = mapped_column(Text)
     evidence_quote: Mapped[str | None] = mapped_column(Text)
     # The call ids whose transcript(s) were judged.
     call_ids: Mapped[list[Any] | None] = mapped_column(JSONB)
-    # Structured evidence from a deterministic (non-LLM) check — for «Дубль…» reasons
-    # the duplicate deal/contact/lead ids, the projects, and whether the manager's
-    # subtype («этому» vs «другим проектам») was right. NULL for LLM-judged verdicts.
+    # Structured evidence for the verdict, tagged by `details.check`. For «Дубль…» the
+    # duplicate deal/contact/lead ids, the projects, and whether the manager's subtype
+    # («этому» vs «другим проектам») was right; for «недозвон» the dial attempts; for an
+    # LLM verdict the manager's card notes the judge was given (`audit/notes.py`).
     details: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # The LLM that judged this deal — NULL when the verdict came from a deterministic

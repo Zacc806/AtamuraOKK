@@ -180,6 +180,9 @@ line-length = 88
 "tests/test_companion_day.py" = ["SLF001"]
 # White-box test of day._audit_failed_items + the audit service.
 "tests/test_audit_service.py" = ["SLF001"]
+# White-box tests of the batch judge path (batch._client, PENDING_VERDICT) plus
+# day._audit_failed_items.
+"tests/test_audit_batch.py" = ["SLF001"]
 # White-box tests of the /analytics block helpers (_funnel, _tasks, …) plus
 # Russian business terms (ОКК, переназначились) and a test token literal.
 "tests/test_companion_analytics.py" = ["SLF001", "RUF001", "RUF002", "RUF003", "S105"]
