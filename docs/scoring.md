@@ -107,22 +107,34 @@ Anthropic-credit outage requeues thousands of FAILED rows back to `TRANSCRIBED`)
 from auto-draining credits. Set `ATAMURAOKK_SCORE_AUTO_TODAY_ONLY=false` to
 auto-score the full backlog again.
 
-## Cost structure and the three levers
-Measured over 200 real transcripts on `claude-sonnet-4-6`: input ~7.5k tokens
-(~5.8k of it the fixed prefix, ~1.7k the transcript), output ~5.2k tokens. **Output
-is ~78% of the bill** — the per-criterion text, not the transcript.
+## Cost structure and the levers
+Re-measured 2026-08-20 on `claude-sonnet-4-6` (live `usage`, 8 real calls × 2 runs;
+the older 7.5k/5.2k figures predate rubric v4 and the prompt's growth): input
+**~10.2k** tokens (**~8.0k** of it the fixed prefix, ~2.0k the transcript), output
+**~4.2k**. With the prefix served from cache that is **$0.071/call**, of which
+**output is ~88%** — the per-criterion text, not the transcript.
 
 | Lever | Where | Effect |
 |---|---|---|
-| Trimmed criterion text | `base.py` / `prompt.py` | `justification`/`evidence`/`recommendation` are requested **only** for failed elements (`score=0 && applicable=true`). A passing element's justification restates the checklist, and a Н.П. element is dropped by `_assemble` anyway, so both were pure spend. ~-26%. |
-| Prompt caching | `anthropic_scorer.build_request` | One `cache_control` breakpoint on the checklist block covers tools + system + checklist (~5.8k tokens, 77% of input) at ~0.1x. ~-16%. |
+| Trimmed criterion text | `base.py` / `prompt.py` | `justification`/`evidence`/`recommendation` are requested **only** for failed elements (`score=0 && applicable=true`), **omitted entirely** (not returned as empty strings) for ДА/Н.П., and capped at one short sentence (≤15 words) each. Output ~4.2k → **~3.0k (-28%)**, ~-24% of the bill. |
+| Prompt caching | `anthropic_scorer.build_request` | One `cache_control` breakpoint on the checklist block covers tools + system + checklist (~8k tokens, ~80% of input) at ~0.1x. |
 | Batch API | `scoring/batch.py` | 50% off everything, for the backlog only. |
 
-Together ≈ **-70%** per call (≈$0.10 → ≈$0.03).
+Trim + caching + batch ≈ **$0.027/call**.
 
-The numeric score is unaffected by the first lever: `_assemble` reads only `score`
-and `applicable`. Reports and `call_criteria_latest` render text for failed
-criteria as before; passing criteria now carry empty strings.
+The numeric score is unaffected: `_assemble` reads only `score` and `applicable`.
+Reports and `call_criteria_latest` render text for failed criteria as before; a
+passing criterion's fields are absent from the response and default to empty.
+
+**What the trim deliberately does not do.** A compact wire shape — `failed` objects
+plus bare `passed_ids`/`na_ids` id lists instead of 34 per-element objects — cut a
+further 19 points of output (to ~2.2k), but measured on the same 8 calls its
+element-level agreement with the current prompt was **~85%**, against **~95%** for
+two runs of the *same* prompt, and the mean percent moved ~3pp down. Enumerating a
+verdict per element is part of how the model scores, not just how it formats; the
+extra ~$0.01/call is buying score stability, which managers' numbers ride on. If it
+is ever revisited, re-run the A/B before shipping — the harness is a ~30-line script
+around `build_request` + `_assemble`.
 
 **Caching caveat.** `anthropic_cache_ttl` defaults to `1h` (2x write) rather than
 `5m` (1.25x write) because calls trickle in a few per hour — a 5-minute entry

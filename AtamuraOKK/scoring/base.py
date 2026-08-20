@@ -42,9 +42,16 @@ class CriterionScore(BaseModel):
     information for a *failed* element: a passing element's justification restates
     the checklist, and a Н.П. element is dropped from the payload entirely by
     ``_assemble``. They are therefore requested only when ``score=0`` and
-    ``applicable=true`` and default to empty everywhere else — that is ~26% of the
-    per-call cost with no effect on the numeric score, which reads only ``score``
-    and ``applicable``.
+    ``applicable=true``, **omitted** (not returned empty) everywhere else, and
+    capped at one short sentence each — measured over 8 calls × 2 runs that is
+    ~4.2k -> ~3.0k output tokens (-28%) with no effect on the numeric score, which
+    reads only ``score`` and ``applicable``.
+
+    The trim stops there deliberately. Replacing the per-element objects with
+    ``failed``/``passed_ids``/``na_ids`` id lists cut another 19 points of output,
+    but element-level agreement against the current prompt fell to ~85% (two runs
+    of the *same* prompt agree ~95%) and the mean percent moved ~3pp: enumerating a
+    verdict per element is doing work, not just formatting.
     """
 
     id: int = Field(description="Номер элемента из чек-листа")
@@ -61,21 +68,21 @@ class CriterionScore(BaseModel):
     )
     justification: str = Field(
         default="",
-        description="ТОЛЬКО при score=0 и applicable=true: краткое обоснование, "
-        "почему элемент не выполнен (на русском). При score=1 или applicable=false "
-        "верни пустую строку.",
+        description="ТОЛЬКО при score=0 и applicable=true: ОДНО короткое предложение "
+        "(до 15 слов), почему элемент не выполнен (на русском). При score=1 или "
+        "applicable=false НЕ возвращай это поле вовсе.",
     )
     evidence: str = Field(
         default="",
-        description="ТОЛЬКО при score=0 и applicable=true: цитата из разговора на "
-        "языке оригинала, подтверждающая невыполнение (или пусто, если цитаты нет). "
-        "При score=1 или applicable=false верни пустую строку.",
+        description="ТОЛЬКО при score=0 и applicable=true: короткая цитата (до 15 "
+        "слов) на языке оригинала (или пусто, если цитаты нет). При score=1 или "
+        "applicable=false НЕ возвращай это поле вовсе.",
     )
     recommendation: str = Field(
         default="",
-        description="ТОЛЬКО при score=0 и applicable=true: конкретная рекомендация "
-        "менеджеру, что сделать иначе на следующем звонке (на русском). "
-        "При score=1 или applicable=false верни пустую строку.",
+        description="ТОЛЬКО при score=0 и applicable=true: ОДНО короткое предложение "
+        "(до 15 слов) — что сделать иначе на следующем звонке (на русском). "
+        "При score=1 или applicable=false НЕ возвращай это поле вовсе.",
     )
 
 

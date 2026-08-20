@@ -129,6 +129,34 @@ def test_score_schema_marks_criterion_text_optional() -> None:
     assert not required & {"justification", "evidence", "recommendation"}
 
 
+def test_pass_and_na_elements_are_told_to_omit_the_text() -> None:
+    """Empty strings still cost tokens — the model must drop the keys instead."""
+    criterion = CallScore.model_json_schema()["$defs"]["CriterionScore"]
+
+    for field in ("justification", "evidence", "recommendation"):
+        assert "НЕ возвращай это поле" in criterion["properties"][field]["description"]
+
+
+def test_criterion_text_is_capped_to_one_sentence() -> None:
+    """The cap is the other half of the trim; drop it and output grows back."""
+    criterion = CallScore.model_json_schema()["$defs"]["CriterionScore"]
+    prompt = build_prompt("[AGENT] привет", RUBRIC, "outbound")
+
+    assert all(
+        "15 слов" in criterion["properties"][field]["description"]
+        for field in ("justification", "evidence", "recommendation")
+    )
+    assert "до 15 слов" in prompt.system
+    assert "не возвращай вовсе" in prompt.task
+
+
+def test_omitted_text_still_assembles() -> None:
+    """A ДА verdict arrives without the keys at all, not with empty ones."""
+    criterion = CriterionScore.model_validate({"id": 1, "score": 1})
+
+    assert (criterion.justification, criterion.evidence) == ("", "")
+
+
 @pytest.mark.parametrize("call_id", [1, 42, 999999])
 def test_batch_custom_id_round_trips(call_id: int) -> None:
     """Batch results are matched back to calls purely by custom_id."""
